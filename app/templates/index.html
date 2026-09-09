@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — ICT Scanner{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+  <h4 class="mb-0">Dashboard</h4>
+  <div>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('signals_page') }}">All signals</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('backtests_page') }}">All backtests</a>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3"><div class="card stat-card">
+    <div class="card-body py-3">
+      <div class="text-muted small">Signals (total)</div>
+      <div class="fs-4 mono">{{ stats.signals_total }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3"><div class="card stat-card border-success">
+    <div class="card-body py-3">
+      <div class="text-muted small">Approved</div>
+      <div class="fs-4 mono text-success">{{ stats.signals_approved }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3"><div class="card stat-card">
+    <div class="card-body py-3">
+      <div class="text-muted small">Rejected</div>
+      <div class="fs-4 mono">{{ stats.signals_rejected }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3"><div class="card stat-card">
+    <div class="card-body py-3">
+      <div class="text-muted small">Backtests</div>
+      <div class="fs-4 mono">{{ stats.backtests }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3"><div class="card stat-card">
+    <div class="card-body py-3">
+      <div class="text-muted small">Execution attempts</div>
+      <div class="fs-4 mono">{{ stats.trades_total }}
+        <span class="small text-muted">({{ stats.trades_sent }} sent)</span>
+      </div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3"><div class="card stat-card">
+    <div class="card-body py-3">
+      <div class="text-muted small">Skipped (safe gate)</div>
+      <div class="fs-4 mono">{{ stats.trades_skipped }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3"><div class="card stat-card">
+    <div class="card-body py-3">
+      <div class="text-muted small">Assets (enabled / total)</div>
+      <div class="fs-4 mono">{{ stats.assets_enabled }} / {{ stats.assets_total }}</div>
+    </div></div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Recent signals</span>
+        <a href="{{ url_for('signals_page') }}" class="small">view all</a>
+      </div>
+      <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle mb-0">
+        <thead class="table-dark">
+          <tr><th>#</th><th>Asset</th><th>Dir</th><th>Entry</th><th>RR</th>
+              <th>Entry (NY)</th><th>CISD</th><th>Session</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+        {% for s in recent_signals %}
+          <tr style="cursor:pointer" onclick="location.href='{{ url_for('signal_detail', signal_id=s.id) }}'">
+            <td class="text-muted">{{ s.id }}</td>
+            <td>{{ s.asset }}</td>
+            <td><span class="badge {{ 'text-bg-success' if s.direction == 'buy' else 'text-bg-danger' }}">
+              {{ s.direction|upper }}</span></td>
+            <td class="mono">{{ s.entry | num }}</td>
+            <td class="mono">{{ '%.2f' | format(s.rr) }}</td>
+            <td class="mono">{{ s.entry_time_utc | ny }}</td>
+            <td>{{ s.cisd_tf or '-' }}</td>
+            <td>{{ s.session_primary or '-' }}</td>
+            <td>{{ s.status | status }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="9" class="text-muted text-center py-4">No signals yet. Run <code>python run.py scan</code>.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card mb-3">
+      <div class="card-header">Risk &amp; session policy</div>
+      <ul class="list-group list-group-flush">
+        <li class="list-group-item d-flex justify-content-between">
+          <span>Min RR</span><span class="mono">{{ cfg.min_rr }}</span></li>
+        <li class="list-group-item d-flex justify-content-between">
+          <span>Target RR range</span><span class="mono">{{ cfg.target_rr_range[0] }}–{{ cfg.target_rr_range[1] }}</span></li>
+        <li class="list-group-item d-flex justify-content-between">
+          <span>Risk per trade</span><span class="mono">{{ cfg.risk_percent }}%</span></li>
+        <li class="list-group-item d-flex justify-content-between">
+          <span>Entry sessions</span><span class="small text-end">{{ cfg.valid_entry_sessions | join(', ') }}</span></li>
+        <li class="list-group-item d-flex justify-content-between">
+          <span>CISD cut-off (NY)</span><span class="mono">{{ cfg.cisd_threshold_hour_ny }}:00</span></li>
+      </ul>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">Enabled assets</div>
+      <ul class="list-group list-group-flush">
+        {% for a in assets %}
+        <li class="list-group-item d-flex justify-content-between">
+          <span>{{ a.name }}</span><span class="mono text-muted">{{ a.broker_symbol }}</span></li>
+        {% else %}
+        <li class="list-group-item text-muted">None enabled.</li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-header">System events</div>
+      <ul class="list-group list-group-flush">
+        {% for e in recent_events %}
+        <li class="list-group-item py-1 small d-flex justify-content-between">
+          <span class="text-muted">{{ e.event_time_utc | ny }}</span>
+          <span class="ms-2">{{ e.source }} · {{ e.message }}</span>
+        </li>
+        {% else %}
+        <li class="list-group-item text-muted">No events.</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}

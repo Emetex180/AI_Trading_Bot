@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Backtests — ICT Scanner{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Backtests</h4>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+  <table class="table table-sm table-hover align-middle mb-0">
+    <thead class="table-dark">
+      <tr><th>#</th><th>Name</th><th>Asset</th><th>Window (NY)</th><th>Signals</th>
+          <th>Trades</th><th>Win rate</th><th>Profit factor</th><th>Total R</th><th>Max DD (R)</th></tr>
+    </thead>
+    <tbody>
+    {% for b in rows %}
+      {% set sm = b.summary_json or {} %}
+      <tr style="cursor:pointer" onclick="location.href='{{ url_for('backtest_detail', bt_id=b.id) }}'">
+        <td class="text-muted">{{ b.id }}</td>
+        <td>{{ b.name or '-' }}</td>
+        <td>{{ b.asset }}</td>
+        <td class="small mono">{{ b.start_utc | ny }} → {{ b.end_utc | ny }}</td>
+        <td class="mono">{{ sm.get('n_signals', '-') }}</td>
+        <td class="mono">{{ sm.get('n_trades', '-') }}</td>
+        <td class="mono">{{ '%.1f%%' | format((sm.get('win_rate', 0) or 0) * 100) }}</td>
+        <td class="mono">{{ sm.get('profit_factor', 0) | pf }}</td>
+        <td class="mono">{{ '%.2f' | format(sm.get('total_r', 0) or 0) }}</td>
+        <td class="mono">{{ '%.2f' | format(sm.get('max_drawdown_r', 0) or 0) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="10" class="text-muted text-center py-4">
+        No backtests yet. Run <code>python run.py backtest</code>.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

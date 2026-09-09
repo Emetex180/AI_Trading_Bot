@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Backtest #{{ bt.id }} — ICT Scanner{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Backtest #{{ bt.id }}
+    <span class="text-muted fs-6">{{ bt.name or bt.asset }}</span></h4>
+  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('backtests_page') }}">← Backtests</a>
+</div>
+
+<div class="row g-3 mb-3">
+  {% set sm = summary %}
+  {% for label, key, fmt in [
+      ('Signals', 'n_signals', '%.0f'), ('Closed trades', 'n_trades', '%.0f'),
+      ('Open', 'n_open', '%.0f'), ('Wins', 'n_wins', '%.0f'), ('Losses', 'n_losses', '%.0f'),
+      ('Win rate', 'win_rate', '%.1f%%'), ('Profit factor', 'profit_factor', '%.2f'),
+      ('Total R', 'total_r', '%.2f'), ('Max DD (R)', 'max_drawdown_r', '%.2f')] %}
+  <div class="col-6 col-md-3">
+    <div class="card stat-card"><div class="card-body py-2">
+      <div class="text-muted small">{{ label }}</div>
+      {% if key == 'win_rate' %}
+        <div class="mono">{{ (sm.get(key, 0) or 0) * 100 }}%</div>
+      {% elif key == 'profit_factor' %}
+        <div class="mono">{{ sm.get(key, 0) | pf }}</div>
+      {% else %}
+        <div class="mono">{{ fmt | format(sm.get(key, 0) or 0) }}</div>
+      {% endif %}
+    </div></div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="row g-3">
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="card-header">Equity curve (R multiples)</div>
+      <div class="card-body">
+        <canvas id="equityChart" height="120"></canvas>
+      </div>
+    </div>
+
+    <div class="card mt-3">
+      <div class="card-header">Trades</div>
+      <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle mb-0">
+        <thead class="table-dark">
+          <tr><th>#</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Entry (NY)</th><th>RR</th>
+              <th>PnL (R)</th><th>Outcome</th><th>Reason</th></tr>
+        </thead>
+        <tbody>
+        {% for t in trades %}
+          <tr>
+            <td class="text-muted">{{ loop.index }}</td>
+            <td><span class="badge {{ 'text-bg-success' if t.direction == 'buy' else 'text-bg-danger' }}">{{ t.direction|upper }}</span></td>
+            <td class="mono">{{ t.entry | num }}</td>
+            <td class="mono">{{ t.exit_price | num }}</td>
+            <td class="mono">{{ t.entry_time_utc | ny }}</td>
+            <td class="mono">{{ '%.2f' | format(t.rr) }}</td>
+            <td class="mono {{ 'text-success' if t.pnl > 0 else ('text-danger' if t.pnl < 0 else '') }}">{{ '%.2f' | format(t.pnl) }}</td>
+            <td><span class="badge {{ 'text-bg-success' if t.outcome == 'WIN' else ('text-bg-danger' if t.outcome == 'LOSS' else 'text-bg-secondary') }}">{{ t.outcome }}</span></td>
+            <td class="small text-muted">{{ t.reason }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="9" class="text-muted text-center py-4">No trades recorded.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card mb-3">
+      <div class="card-header">Meta</div>
+      <table class="table table-sm mb-0">
+        <tbody>
+          <tr><th>Asset</th><td>{{ bt.asset }}</td></tr>
+          <tr><th>Symbol</th><td>{{ bt.symbol or '-' }}</td></tr>
+          <tr><th>Start (NY)</th><td class="mono">{{ bt.start_utc | ny }}</td></tr>
+          <tr><th>End (NY)</th><td class="mono">{{ bt.end_utc | ny }}</td></tr>
+          <tr><th>Created</th><td class="mono">{{ bt.created_at | ny }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-header">Params</div>
+      <pre class="small p-3 mb-0 overflow-auto">{{ params | tojson(indent=2) }}</pre>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script id="equity-data" type="application/json">{{ curve | tojson }}</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script>
+  const points = JSON.parse(document.getElementById('equity-data').textContent);
+  const labels = points.map(p => p[0] ? new Date(p[0]).toLocaleString() : '');
+  const values = points.map(p => p[1]);
+  new Chart(document.getElementById('equityChart'), {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: 'Cumulative R',
+      data: values,
+      borderColor: '#0dcaf0', backgroundColor: 'rgba(13,202,240,.1)', fill: true,
+      tension: 0, pointRadius: 2,
+    }]},
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: { y: { title: { display: true, text: 'R multiples' } } },
+    },
+  });
+</script>
+{% endblock %}

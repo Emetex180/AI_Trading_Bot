@@ -1,0 +1,17 @@
+{
+  "_comment": "Asset registry. Each key is the STRATEGY name used across the bot; 'broker_symbol' is what MT5 receives. Add/remove assets here or via the asset manager API — no strategy code changes needed. 'enabled' controls whether the scanner trades/analyzes the asset.",
+  "assets": [
+    {
+      "name": "USTEC",
+      "broker_symbol": "USTEC",
+      "enabled": true,
+      "digits": 2
+    },
+    {
+      "name": "GOLD",
+      "broker_symbol": "XAUUSDm",
+      "enabled": false,
+      "digits": 2
+    }
+  ]
+}

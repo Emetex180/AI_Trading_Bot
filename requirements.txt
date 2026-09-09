@@ -1,0 +1,22 @@
+# Core
+MetaTrader5>=5.0.6180
+pandas>=2.0.0
+numpy>=1.26.0
+
+# Web dashboard
+Flask>=3.0.0
+
+# Persistence (SQLite now; PostgreSQL-ready schema)
+SQLAlchemy>=2.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# HTTP (Telegram + LLM API)
+requests>=2.31.0
+
+# Testing
+pytest>=8.0.0
+
+# Frontend (served via CDN in templates; nothing to install)
+# Chart.js / Bootstrap are loaded from a CDN in app/templates/base.html
