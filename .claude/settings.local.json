@@ -4,7 +4,7 @@
     "ANTHROPIC_AUTH_TOKEN": "sk-QgPzZUdiXGumoIjYaCpXuSw41klmoGH9TXoitnAqs0jcw6v7",
     "ANTHROPIC_API_KEY": "",
     "ANTHROPIC_MODEL": "deepseek-v4-flash",
-    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "2"
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
   },
   "permissions": {
     "allow": [
