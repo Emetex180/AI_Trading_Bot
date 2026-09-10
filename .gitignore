@@ -1,25 +1,11 @@
-# Secrets — never commit
 .env
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
+.claude/
 .venv/
 venv/
-.pytest_cache/
-
-# Local runtime data (SQLite DB + candle caches)
-data/*.db
-data/*.sqlite
-data/cache/
-
-# Editor / OS
-.idea/
-.vscode/
-.DS_Store
-Thumbs.db
-
-# Logs
+__pycache__/
+*.pyc
+data/
 logs/
-*.log
+*.db
+*.sqlite
+*.sqlite3
