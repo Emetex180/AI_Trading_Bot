@@ -1,0 +1,23 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://agentrouter.org",
+    "ANTHROPIC_AUTH_TOKEN": "sk-QgPzZUdiXGumoIjYaCpXuSw41klmoGH9TXoitnAqs0jcw6v7",
+    "ANTHROPIC_API_KEY": "",
+    "ANTHROPIC_MODEL": "deepseek-v4-flash",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
+  },
+  "permissions": {
+    "allow": [
+      "PowerShell(python -m pytest tests/test_backtesting.py -q)",
+      "PowerShell(python -m pytest -q)",
+      "PowerShell(python -c \"import flask, sqlalchemy, dotenv; print\\('flask', flask.__version__\\); print\\('sqlalchemy', sqlalchemy.__version__\\)\")",
+      "PowerShell(python debug_fmt.py)",
+      "PowerShell(python -m pytest tests/test_web.py -q)",
+      "PowerShell(python -m pytest tests/test_database.py -q)",
+      "PowerShell(python -m pytest tests/test_scanner.py -q)",
+      "PowerShell(python -m pytest -q; python run.py assets)",
+      "PowerShell(pip *)",
+      "PowerShell(python -c \"import MetaTrader5, pandas, numpy, flask, sqlalchemy, dotenv, requests; print\\('all core deps import OK'\\)\")"
+    ]
+  }
+}
