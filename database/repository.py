@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterator
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from config import Settings, get_settings
@@ -25,13 +25,33 @@ from .models import Base
 __all__ = ["Base", "models", "get_engine", "get_session", "init_db",
            "Repository"]
 
+# How long SQLite waits for a competing writer before raising "database is
+# locked". A live scanner thread writes signals while Flask request threads
+# read, so contention is expected rather than exceptional.
+_SQLITE_BUSY_TIMEOUT_MS = 10_000
+
 
 def _make_engine(db_url: str):
     kwargs: dict = {"future": True}
     # SQLite needs check_same_thread=False for Flask's default threads.
     if db_url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
-    return create_engine(db_url, **kwargs)
+    engine = create_engine(db_url, **kwargs)
+
+    if db_url.startswith("sqlite"):
+        # WAL lets the scanner write while request threads read instead of
+        # serialising on a global lock; the busy timeout turns the remaining
+        # contention into a short wait rather than an immediate error.
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(dbapi_connection, _record):  # pragma: no cover
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+            finally:
+                cursor.close()
+
+    return engine
 
 
 def get_engine(settings: Settings | None = None):
@@ -39,15 +59,79 @@ def get_engine(settings: Settings | None = None):
     return _make_engine(cfg.db_url)
 
 
+# Columns added to a table *after* a database was first created. ``create_all``
+# only ever CREATEs a missing table — it never ALTERs one that already exists —
+# so an added column must be back-filled explicitly or every query touching that
+# table fails with "no such column".
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # (table, column, DDL type)
+    ("backtests", "batch_id", "VARCHAR(36)"),
+)
+
+# Indexes to (re)assert on every startup. Safe because ``IF NOT EXISTS`` is
+# understood by both SQLite and PostgreSQL.
+_ENSURED_INDEXES: tuple[tuple[str, str, str], ...] = (
+    ("ix_backtests_batch_id", "backtests", "batch_id"),
+)
+
+
+def _ensure_schema(engine) -> None:
+    """Apply additive migrations to an existing database (idempotent).
+
+    Only ever adds: a missing column or a missing index. Never drops, renames or
+    retypes anything, so running it against a populated database is safe.
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    for table, column, ddl_type in _ADDED_COLUMNS:
+        if table not in existing_tables:
+            continue  # create_all just made it, so the column is already there
+        if column in {c["name"] for c in inspector.get_columns(table)}:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+
+    for index, table, column in _ENSURED_INDEXES:
+        if table not in existing_tables:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS {index} ON {table} ({column})"))
+
+
 def init_db(settings: Settings | None = None) -> None:
-    """Create all tables (idempotent). Call once at startup."""
-    Base.metadata.create_all(get_engine(settings))
+    """Create all tables and apply additive migrations (idempotent)."""
+    engine = get_engine(settings)
+    Base.metadata.create_all(engine)
+    _ensure_schema(engine)
 
 
 def get_session(settings: Settings | None = None) -> Session:
     engine = get_engine(settings)
     maker = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     return maker()
+
+
+def _batch_entry(batch_id: str, rows: list) -> dict:
+    """Structural description of one backtest batch.
+
+    Deliberately carries no scores: ranking lives in :mod:`backtesting.compare`
+    so this module stays free of strategy/analysis logic.
+    """
+    ordered = sorted(rows, key=lambda r: r.id)
+    starts = [r.start_utc for r in ordered if r.start_utc is not None]
+    ends = [r.end_utc for r in ordered if r.end_utc is not None]
+    created = [r.created_at for r in ordered if r.created_at is not None]
+    return {
+        "batch_id": batch_id,
+        "rows": ordered,
+        "n_assets": len(ordered),
+        "assets": [r.asset for r in ordered],
+        "created_at": max(created) if created else None,
+        "start_utc": min(starts) if starts else None,
+        "end_utc": max(ends) if ends else None,
+    }
 
 
 class Repository:
@@ -172,6 +256,19 @@ class Repository:
         ).scalars().all()
         return list(rows)
 
+    def signals_after_id(self, after_id: int, limit: int = 50) -> list[m.Signal]:
+        """Signals with a higher id than ``after_id`` (dashboard live feed)."""
+        rows = self.session.execute(
+            select(m.Signal).where(m.Signal.id > after_id)
+            .order_by(m.Signal.id.asc()).limit(limit)
+        ).scalars().all()
+        return list(rows)
+
+    def max_signal_id(self) -> int:
+        """Highest signal id, or 0 when the table is empty."""
+        return int(self.session.execute(
+            select(func.max(m.Signal.id))).scalar() or 0)
+
     # ------------------------------------------------------------------ #
     # Trades (execution attempts)
     # ------------------------------------------------------------------ #
@@ -224,9 +321,10 @@ class Repository:
     def save_backtest(self, *, name: str, asset: str, symbol: str | None,
                       start_utc: datetime | None, end_utc: datetime | None,
                       params: dict, summary: dict,
-                      trades: list[dict]) -> m.Backtest:
+                      trades: list[dict],
+                      batch_id: str | None = None) -> m.Backtest:
         bt = m.Backtest(
-            name=name, asset=asset, symbol=symbol,
+            name=name, asset=asset, symbol=symbol, batch_id=batch_id,
             start_utc=start_utc, end_utc=end_utc,
             params_json=params, summary_json=summary,
         )
@@ -242,6 +340,45 @@ class Repository:
             select(m.Backtest).order_by(m.Backtest.id.desc()).limit(limit)
         ).scalars().all()
         return list(rows)
+
+    def backtest_batch(self, batch_id: str) -> list[m.Backtest]:
+        """Every per-asset row produced by one batch request, in run order."""
+        rows = self.session.execute(
+            select(m.Backtest).where(m.Backtest.batch_id == batch_id)
+            .order_by(m.Backtest.id.asc())
+        ).scalars().all()
+        return list(rows)
+
+    def recent_batches(self, limit: int = 20, scan: int = 500) -> list[dict]:
+        """Backtest campaigns, newest first.
+
+        Returns structural rows only — ``batch_id``, the rows, the window — and
+        leaves ranking to :mod:`backtesting.compare`, so this module stays a
+        persistence facade with no scoring logic.
+
+        A row with ``batch_id IS NULL`` predates batching (or came from a
+        single-asset run on an older build). Each one is surfaced as its own
+        one-asset batch rather than dropped, so no history disappears.
+        """
+        rows = self.session.execute(
+            select(m.Backtest).order_by(m.Backtest.id.desc()).limit(scan)
+        ).scalars().all()
+
+        batches: list[dict] = []
+        grouped: dict[str, dict] = {}
+        for row in rows:
+            if row.batch_id is None:
+                batches.append(_batch_entry(f"single:{row.id}", [row]))
+                continue
+            entry = grouped.get(row.batch_id)
+            if entry is None:
+                entry = {"batch_id": row.batch_id, "rows": []}
+                grouped[row.batch_id] = entry
+                batches.append(entry)
+            entry["rows"].append(row)
+
+        out = [_batch_entry(b["batch_id"], b["rows"]) for b in batches]
+        return out[:limit]
 
     def get_backtest(self, backtest_id: int) -> m.Backtest | None:
         return self.session.get(m.Backtest, backtest_id)

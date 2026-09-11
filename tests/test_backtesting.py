@@ -183,6 +183,40 @@ def test_backtest_persists_via_repository():
     assert repo.recent_backtests()[0].summary_json["n_open"] == 1
 
 
+def test_summary_exposes_the_comparison_metrics_end_to_end():
+    """A real replay carries every key the cross-asset ranking page reads.
+
+    The unit-level behaviour of each metric is pinned in ``test_compare.py``;
+    this guards the contract end-to-end, through a real strategy run, so a
+    metric that silently stops being populated cannot pass the suite.
+    """
+    warm, feed = build_scenario()
+    rows, prev = [], 101.7
+    for _ in range(45):
+        o, prev = prev, prev + 0.35
+        rows.append((o, o + 0.4, o - 0.1, prev))
+    summary, _ = _runner().run(warm + feed + _after(feed[-1].t_ny, rows))
+    d = summary.to_dict()
+
+    for key in ("expectancy", "avg_win_r", "avg_loss_r", "payoff_ratio",
+                "n_long", "n_short", "long_r", "short_r", "long_win_rate",
+                "short_win_rate", "max_consecutive_losses", "best_trade_r",
+                "worst_trade_r", "avg_bars_held", "by_session",
+                "by_silver_bullet"):
+        assert key in d, f"summary_json is missing {key}"
+
+    assert d["expectancy"] == d["avg_r"] == d["total_r"]  # one closed winner
+    assert d["n_long"] == 1 and d["n_short"] == 0
+    assert d["long_r"] == d["total_r"] and d["short_r"] == 0.0
+    assert d["max_consecutive_losses"] == 0
+    assert d["worst_trade_r"] > 0
+    assert d["avg_bars_held"] > 0
+    # The scenario enters inside the NY morning, so the trade is attributed to
+    # a real ICT session rather than falling through to "outside".
+    assert sum(b["n_trades"] for b in d["by_session"].values()) == 1
+    assert "outside" not in d["by_session"]
+
+
 def test_simulate_buy_loss_on_mirror_geometry():
     """Direct simulate call already covers SL; guard sell-direction too."""
     sig = _signal(direction="sell", entry=100.0, sl=102.0, tp=95.0, rr=2.5)

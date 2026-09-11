@@ -1,35 +1,90 @@
 {% extends "base.html" %}
+{% from "_macros.html" import stat, empty %}
 {% block title %}Backtests — ICT Scanner{% endblock %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h4 class="mb-0">Backtests</h4>
 </div>
 
+{% set bt = job_state.backtest %}
+<div class="card mb-3" id="backtest-card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span>Run a backtest</span>
+    <span id="backtest-state-badge" class="badge text-bg-secondary">{{ bt.state }}</span>
+  </div>
+  <div class="card-body">
+    <form id="backtest-form" class="row g-2 align-items-end">
+      <div class="col-sm-4">
+        <label class="form-label small mb-1" for="bt-asset">Asset</label>
+        <select class="form-select form-select-sm" id="bt-asset" name="asset">
+          <option value="">All enabled (compare every asset)</option>
+          {% for a in assets %}{% if a.enabled %}
+          <option value="{{ a.name }}">{{ a.name }} — {{ a.broker_symbol }}</option>
+          {% endif %}{% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-sm-3">
+        <label class="form-label small mb-1" for="bt-bars">M1 candles</label>
+        <input type="number" class="form-control form-control-sm" id="bt-bars" name="bars"
+               value="{{ default_bars }}" min="100" max="500000">
+      </div>
+      <div class="col-6 col-sm-3">
+        <label class="form-label small mb-1" for="bt-hold">Max hold (M1 bars)</label>
+        <input type="number" class="form-control form-control-sm" id="bt-hold" name="max_hold_m1"
+               placeholder="default" min="1">
+      </div>
+      <div class="col-sm-2">
+        <button type="submit" id="bt-run" class="btn btn-sm btn-primary w-100">Run</button>
+      </div>
+    </form>
+    <div id="backtest-message" class="small mt-2"></div>
+    <div class="progress progress-thin mt-2 d-none" id="backtest-progress">
+      <div class="progress-bar" id="backtest-progress-bar" style="width: 0%"></div>
+    </div>
+    <div id="backtest-error" class="alert alert-danger py-2 small mt-3 mb-0 {% if not bt.last_error %}d-none{% endif %}">
+      {{ bt.last_error }}
+    </div>
+  </div>
+</div>
+
 <div class="card">
+  <div class="card-header">Runs</div>
   <div class="table-responsive">
-  <table class="table table-sm table-hover align-middle mb-0">
-    <thead class="table-dark">
-      <tr><th>#</th><th>Name</th><th>Asset</th><th>Window (NY)</th><th>Signals</th>
-          <th>Trades</th><th>Win rate</th><th>Profit factor</th><th>Total R</th><th>Max DD (R)</th></tr>
+  <table class="table table-sm table-hover table-compact">
+    <thead>
+      <tr>
+        <th>Run</th><th>Assets</th><th>Window (NY)</th><th>Signals</th><th>Trades</th>
+        <th>Win rate</th><th>Expectancy (R)</th><th>Total R</th><th>Best asset</th>
+      </tr>
     </thead>
     <tbody>
-    {% for b in rows %}
-      {% set sm = b.summary_json or {} %}
-      <tr style="cursor:pointer" onclick="location.href='{{ url_for('backtest_detail', bt_id=b.id) }}'">
-        <td class="text-muted">{{ b.id }}</td>
-        <td>{{ b.name or '-' }}</td>
-        <td>{{ b.asset }}</td>
+    {% for b in batches %}
+      {% set t = b.totals %}
+      <tr class="row-link"
+          onclick="location.href='{{ url_for('backtest_batch_page', batch_id=b.batch_id) }}'">
+        <td>
+          <span class="mono">{{ b.created_at | ny }}</span>
+          {% if b.is_single %}<span class="badge text-bg-secondary ms-1">single</span>{% endif %}
+        </td>
+        <td class="mono">{{ b.n_assets }}</td>
         <td class="small mono">{{ b.start_utc | ny }} → {{ b.end_utc | ny }}</td>
-        <td class="mono">{{ sm.get('n_signals', '-') }}</td>
-        <td class="mono">{{ sm.get('n_trades', '-') }}</td>
-        <td class="mono">{{ '%.1f%%' | format((sm.get('win_rate', 0) or 0) * 100) }}</td>
-        <td class="mono">{{ sm.get('profit_factor', 0) | pf }}</td>
-        <td class="mono">{{ '%.2f' | format(sm.get('total_r', 0) or 0) }}</td>
-        <td class="mono">{{ '%.2f' | format(sm.get('max_drawdown_r', 0) or 0) }}</td>
+        <td class="mono">{{ t.n_signals }}</td>
+        <td class="mono">{{ t.n_trades }}</td>
+        <td class="mono">{{ '%.1f%%' | format(t.win_rate * 100) }}</td>
+        <td class="mono {{ 'text-success' if t.expectancy > 0 else ('text-danger' if t.expectancy < 0 else '') }}">
+          {{ '%.2f' | format(t.expectancy) }}</td>
+        <td class="mono">{{ '%.2f' | format(t.total_r) }}</td>
+        <td>
+          {% if b.best and b.best.tested %}
+            <span class="badge text-bg-success">{{ b.best.asset }}</span>
+            <span class="small text-muted mono">{{ '%.2f' | format(b.best.expectancy) }} R</span>
+          {% else %}
+            <span class="text-muted small">no closed trades</span>
+          {% endif %}
+        </td>
       </tr>
     {% else %}
-      <tr><td colspan="10" class="text-muted text-center py-4">
-        No backtests yet. Run <code>python run.py backtest</code>.</td></tr>
+      {{ empty(9, 'No backtests yet. Use the form above to run one.') }}
     {% endfor %}
     </tbody>
   </table>

@@ -1,32 +1,45 @@
 {% extends "base.html" %}
+{% from "_macros.html" import stat, outcome_badge, dir_badge, empty %}
 {% block title %}Backtest #{{ bt.id }} — ICT Scanner{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="mb-0">Backtest #{{ bt.id }}
-    <span class="text-muted fs-6">{{ bt.name or bt.asset }}</span></h4>
-  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('backtests_page') }}">← Backtests</a>
+{% set sm = summary %}
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+  <div>
+    <h4 class="mb-0">Backtest #{{ bt.id }}
+      <span class="text-muted fs-6">{{ bt.asset }}</span></h4>
+    <div class="small text-muted mono">{{ bt.symbol or '-' }} · {{ bt.start_utc | ny }} → {{ bt.end_utc | ny }}</div>
+  </div>
+  <div class="d-flex gap-2">
+    {% if bt.batch_id %}
+      <a class="btn btn-sm btn-outline-primary"
+         href="{{ url_for('backtest_batch_page', batch_id=bt.batch_id) }}">← Compare this batch</a>
+    {% endif %}
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('backtests_page') }}">All backtests</a>
+  </div>
 </div>
 
 <div class="row g-3 mb-3">
-  {% set sm = summary %}
-  {% for label, key, fmt in [
-      ('Signals', 'n_signals', '%.0f'), ('Closed trades', 'n_trades', '%.0f'),
-      ('Open', 'n_open', '%.0f'), ('Wins', 'n_wins', '%.0f'), ('Losses', 'n_losses', '%.0f'),
-      ('Win rate', 'win_rate', '%.1f%%'), ('Profit factor', 'profit_factor', '%.2f'),
-      ('Total R', 'total_r', '%.2f'), ('Max DD (R)', 'max_drawdown_r', '%.2f')] %}
-  <div class="col-6 col-md-3">
-    <div class="card stat-card"><div class="card-body py-2">
-      <div class="text-muted small">{{ label }}</div>
-      {% if key == 'win_rate' %}
-        <div class="mono">{{ (sm.get(key, 0) or 0) * 100 }}%</div>
-      {% elif key == 'profit_factor' %}
-        <div class="mono">{{ sm.get(key, 0) | pf }}</div>
-      {% else %}
-        <div class="mono">{{ fmt | format(sm.get(key, 0) or 0) }}</div>
-      {% endif %}
-    </div></div>
+  <div class="col-6 col-lg-2">{{ stat('Signals', sm.n_signals) }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Closed trades', sm.n_trades) }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Open', sm.n_open, 'muted') }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Win rate', '%.1f%%' | format(sm.win_rate * 100)) }}</div>
+  <div class="col-6 col-lg-2">
+    {{ stat('Expectancy', '%.2f' | format(sm.expectancy) ~ ' R',
+            'success' if sm.expectancy > 0 else ('danger' if sm.expectancy < 0 else 'muted')) }}
   </div>
-  {% endfor %}
+  <div class="col-6 col-lg-2">
+    {{ stat('Total R', '%.2f' | format(sm.total_r),
+            'success' if sm.total_r > 0 else ('danger' if sm.total_r < 0 else 'muted')) }}
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-6 col-lg-2">{{ stat('Profit factor', sm.profit_factor | pf) }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Max drawdown', '%.2f' | format(sm.max_drawdown_r) ~ ' R') }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Avg win', '%.2f' | format(sm.avg_win_r) ~ ' R', 'success') }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Avg loss', '%.2f' | format(sm.avg_loss_r) ~ ' R', 'danger') }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Payoff ratio', sm.payoff_ratio | pf) }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Max consecutive losses', sm.max_consecutive_losses, 'warning') }}</div>
 </div>
 
 <div class="row g-3">
@@ -34,33 +47,37 @@
     <div class="card">
       <div class="card-header">Equity curve (R multiples)</div>
       <div class="card-body">
-        <canvas id="equityChart" height="120"></canvas>
+        <div class="chart-box chart-box-sm">
+          <canvas id="equityChart"></canvas>
+        </div>
       </div>
     </div>
 
     <div class="card mt-3">
       <div class="card-header">Trades</div>
       <div class="table-responsive">
-      <table class="table table-sm table-hover align-middle mb-0">
-        <thead class="table-dark">
-          <tr><th>#</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Entry (NY)</th><th>RR</th>
-              <th>PnL (R)</th><th>Outcome</th><th>Reason</th></tr>
+      <table class="table table-sm table-hover table-compact">
+        <thead>
+          <tr><th>#</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Entry (NY)</th><th>Exit (NY)</th>
+              <th>RR</th><th>PnL (R)</th><th>Bars</th><th>Outcome</th><th>Reason</th></tr>
         </thead>
         <tbody>
         {% for t in trades %}
           <tr>
             <td class="text-muted">{{ loop.index }}</td>
-            <td><span class="badge {{ 'text-bg-success' if t.direction == 'buy' else 'text-bg-danger' }}">{{ t.direction|upper }}</span></td>
+            <td>{{ dir_badge(t.direction) }}</td>
             <td class="mono">{{ t.entry | num }}</td>
             <td class="mono">{{ t.exit_price | num }}</td>
             <td class="mono">{{ t.entry_time_utc | ny }}</td>
+            <td class="mono">{{ t.exit_time_utc | ny }}</td>
             <td class="mono">{{ '%.2f' | format(t.rr) }}</td>
             <td class="mono {{ 'text-success' if t.pnl > 0 else ('text-danger' if t.pnl < 0 else '') }}">{{ '%.2f' | format(t.pnl) }}</td>
-            <td><span class="badge {{ 'text-bg-success' if t.outcome == 'WIN' else ('text-bg-danger' if t.outcome == 'LOSS' else 'text-bg-secondary') }}">{{ t.outcome }}</span></td>
+            <td class="mono text-muted">{{ t.bars_held }}</td>
+            <td>{{ outcome_badge(t.outcome) }}</td>
             <td class="small text-muted">{{ t.reason }}</td>
           </tr>
         {% else %}
-          <tr><td colspan="9" class="text-muted text-center py-4">No trades recorded.</td></tr>
+          {{ empty(11, 'No trades recorded.') }}
         {% endfor %}
         </tbody>
       </table>
@@ -71,16 +88,41 @@
   <div class="col-lg-4">
     <div class="card mb-3">
       <div class="card-header">Meta</div>
-      <table class="table table-sm mb-0">
+      <table class="table table-sm table-compact kv-table">
         <tbody>
           <tr><th>Asset</th><td>{{ bt.asset }}</td></tr>
-          <tr><th>Symbol</th><td>{{ bt.symbol or '-' }}</td></tr>
+          <tr><th>Symbol</th><td class="mono">{{ bt.symbol or '-' }}</td></tr>
+          <tr><th>Direction split</th>
+              <td class="mono">{{ sm.n_long }} long / {{ sm.n_short }} short</td></tr>
+          <tr><th>Avg bars held</th><td class="mono">{{ '%.0f' | format(sm.avg_bars_held) }}</td></tr>
+          <tr><th>Best / worst</th>
+              <td class="mono">{{ '%.2f' | format(sm.best_trade_r) }} / {{ '%.2f' | format(sm.worst_trade_r) }} R</td></tr>
           <tr><th>Start (NY)</th><td class="mono">{{ bt.start_utc | ny }}</td></tr>
           <tr><th>End (NY)</th><td class="mono">{{ bt.end_utc | ny }}</td></tr>
           <tr><th>Created</th><td class="mono">{{ bt.created_at | ny }}</td></tr>
         </tbody>
       </table>
     </div>
+
+    {% if sm.by_session %}
+    <div class="card mb-3">
+      <div class="card-header">By session</div>
+      <table class="table table-sm table-compact">
+        <thead><tr><th>Session</th><th class="text-end">Trades</th><th class="text-end">Exp. (R)</th></tr></thead>
+        <tbody>
+          {% for key, b in sm.by_session.items() %}
+          <tr>
+            <td>{{ key }}</td>
+            <td class="mono text-end">{{ b.n_trades }}</td>
+            <td class="mono text-end {{ 'text-success' if b.expectancy > 0 else ('text-danger' if b.expectancy < 0 else '') }}">
+              {{ '%.2f' | format(b.expectancy) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
     <div class="card">
       <div class="card-header">Params</div>
       <pre class="small p-3 mb-0 overflow-auto">{{ params | tojson(indent=2) }}</pre>
@@ -91,24 +133,40 @@
 
 {% block scripts %}
 <script id="equity-data" type="application/json">{{ curve | tojson }}</script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script>
-  const points = JSON.parse(document.getElementById('equity-data').textContent);
-  const labels = points.map(p => p[0] ? new Date(p[0]).toLocaleString() : '');
-  const values = points.map(p => p[1]);
-  new Chart(document.getElementById('equityChart'), {
-    type: 'line',
-    data: { labels, datasets: [{
-      label: 'Cumulative R',
-      data: values,
-      borderColor: '#0dcaf0', backgroundColor: 'rgba(13,202,240,.1)', fill: true,
-      tension: 0, pointRadius: 2,
-    }]},
-    options: {
-      responsive: true,
-      plugins: { legend: { display: false } },
-      scales: { y: { title: { display: true, text: 'R multiples' } } },
-    },
-  });
+  (function () {
+    "use strict";
+    var points = JSON.parse(document.getElementById('equity-data').textContent);
+    var canvas = document.getElementById('equityChart');
+    if (!canvas) return;
+    if (!points.length) {
+      canvas.parentNode.innerHTML = '<div class="empty-state">No closed trades to plot.</div>';
+      return;
+    }
+    new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels: points.map(function (p) {
+          return p[0] ? new Date(p[0]).toLocaleString() : '';
+        }),
+        datasets: [{
+          label: 'Cumulative R',
+          data: points.map(function (p) { return p[1]; }),
+          borderColor: '#0dcaf0',
+          backgroundColor: 'rgba(13,202,240,.1)',
+          fill: true, tension: 0, pointRadius: 2,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+          y: { title: { display: true, text: 'R multiples' } },
+        },
+      },
+    });
+  })();
 </script>
 {% endblock %}

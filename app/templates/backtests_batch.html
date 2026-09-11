@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat, empty %}
+{% block title %}Backtest comparison — ICT Scanner{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+  <div>
+    <h4 class="mb-0">Backtest comparison</h4>
+    <div class="small text-muted mono">
+      {{ comparison | length }} asset(s) · {{ start_utc | ny }} → {{ end_utc | ny }}
+    </div>
+  </div>
+  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('backtests_page') }}">← All backtests</a>
+</div>
+
+{# ---------------------------------------------------------------- #}
+{# The headline: which asset should this strategy actually be run on? #}
+{# ---------------------------------------------------------------- #}
+{% if best and best.tested %}
+<div class="card mb-3 border-success">
+  <div class="card-body d-flex flex-wrap align-items-center gap-3">
+    <div>
+      <div class="stat-label">Best asset by expectancy</div>
+      <div class="fs-4 fw-semibold">{{ best.asset }}
+        <span class="text-muted fs-6 mono">{{ best.symbol or '' }}</span>
+      </div>
+    </div>
+    <div class="d-flex flex-wrap gap-4 ms-auto">
+      <div><div class="stat-label">Expectancy</div>
+        <div class="stat-value text-success">{{ '%.2f' | format(best.expectancy) }} R</div></div>
+      <div><div class="stat-label">Win rate</div>
+        <div class="stat-value">{{ '%.1f%%' | format(best.win_rate * 100) }}</div></div>
+      <div><div class="stat-label">Trades</div>
+        <div class="stat-value">{{ best.n_trades }}</div></div>
+      <div><div class="stat-label">Total R</div>
+        <div class="stat-value">{{ '%.2f' | format(best.total_r) }}</div></div>
+    </div>
+  </div>
+</div>
+{% else %}
+<div class="alert alert-secondary py-2 small mb-3">
+  <strong>No asset produced a closed trade in this window.</strong>
+  Nothing here is a recommendation — widen the window or check the strategy's
+  minimum-history gate before drawing a conclusion.
+</div>
+{% endif %}
+
+<div class="row g-3 mb-3">
+  <div class="col-6 col-lg-2">
+    {{ stat('Assets tested', totals.n_assets_tested ~ ' / ' ~ totals.n_assets) }}
+  </div>
+  <div class="col-6 col-lg-2">{{ stat('Signals', totals.n_signals) }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Closed trades', totals.n_trades) }}</div>
+  <div class="col-6 col-lg-2">{{ stat('Open', totals.n_open, 'muted') }}</div>
+  <div class="col-6 col-lg-2">
+    {{ stat('Win rate', '%.1f%%' | format(totals.win_rate * 100)) }}
+  </div>
+  <div class="col-6 col-lg-2">
+    {{ stat('Pooled expectancy', '%.2f' | format(totals.expectancy) ~ ' R',
+            'success' if totals.expectancy > 0 else ('danger' if totals.expectancy < 0 else 'muted')) }}
+  </div>
+</div>
+
+{# ---------------------------------------------------------------- #}
+{# Ranking table                                                    #}
+{# ---------------------------------------------------------------- #}
+<div class="card mb-3">
+  <div class="card-header">Ranked by expectancy (average R per closed trade)</div>
+  <div class="table-responsive">
+  <table class="table table-sm table-hover table-compact">
+    <thead>
+      <tr>
+        <th>#</th><th>Asset</th><th>Signals</th><th>Trades</th><th>Open</th>
+        <th>Win rate</th><th>Expectancy (R)</th><th>Total R</th>
+        <th>Profit factor</th><th>Max DD (R)</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in comparison %}
+      <tr class="{{ 'table-success' if c.is_best }}">
+        <td class="mono">{{ c.rank }}</td>
+        <td>
+          <strong>{{ c.asset }}</strong>
+          {% if c.symbol %}<span class="text-muted small mono">{{ c.symbol }}</span>{% endif %}
+          {% if not c.tested %}<span class="badge text-bg-secondary ms-1">no trades</span>{% endif %}
+        </td>
+        <td class="mono">{{ c.n_signals }}</td>
+        <td class="mono">{{ c.n_trades }}</td>
+        <td class="mono text-muted">{{ c.n_open }}</td>
+        <td class="mono">{{ '%.1f%%' | format(c.win_rate * 100) }}</td>
+        <td class="mono fw-semibold {{ 'text-success' if c.expectancy > 0 else ('text-danger' if c.expectancy < 0 else 'text-muted') }}">
+          {{ '%.2f' | format(c.expectancy) }}</td>
+        <td class="mono {{ 'text-success' if c.total_r > 0 else ('text-danger' if c.total_r < 0 else '') }}">
+          {{ '%.2f' | format(c.total_r) }}</td>
+        <td class="mono">{{ c.profit_factor | pf }}</td>
+        <td class="mono">{{ '%.2f' | format(c.max_drawdown_r) }}</td>
+        <td>
+          {% if c.backtest_id %}
+          <a class="small" href="{{ url_for('backtest_detail', bt_id=c.backtest_id) }}">trades →</a>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      {{ empty(11, 'No assets in this batch.') }}
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="card-body py-2 chart-note">
+    An asset with no closed trades is ranked last whatever its other figures —
+    it carries no evidence either way.
+  </div>
+</div>
+
+{# ---------------------------------------------------------------- #}
+{# Equity curves                                                    #}
+{# ---------------------------------------------------------------- #}
+<div class="card mb-3">
+  <div class="card-header">Equity curves (cumulative R, plotted on entry time)</div>
+  <div class="card-body">
+    <div class="chart-box">
+      <canvas id="batchCurves"></canvas>
+    </div>
+    <div class="chart-note mt-2">
+      Each line is one asset replayed over the same window. Curves are not a
+      portfolio — they are separate instruments, not concurrent positions.
+    </div>
+  </div>
+</div>
+
+{# ---------------------------------------------------------------- #}
+{# Trade-quality detail                                             #}
+{# ---------------------------------------------------------------- #}
+<div class="card mb-3">
+  <div class="card-header">Trade quality by asset</div>
+  <div class="table-responsive">
+  <table class="table table-sm table-compact">
+    <thead>
+      <tr>
+        <th>Asset</th><th>Avg win (R)</th><th>Avg loss (R)</th><th>Payoff</th>
+        <th>Best (R)</th><th>Worst (R)</th><th>Max consec losses</th>
+        <th>Avg bars held</th><th>Long</th><th>Short</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in comparison %}
+      <tr>
+        <td><strong>{{ c.asset }}</strong></td>
+        <td class="mono text-success">{{ '%.2f' | format(c.avg_win_r) }}</td>
+        <td class="mono text-danger">{{ '%.2f' | format(c.avg_loss_r) }}</td>
+        <td class="mono">{{ c.payoff_ratio | pf }}</td>
+        <td class="mono">{{ '%.2f' | format(c.best_trade_r) }}</td>
+        <td class="mono">{{ '%.2f' | format(c.worst_trade_r) }}</td>
+        <td class="mono">{{ c.max_consecutive_losses }}</td>
+        <td class="mono">{{ '%.0f' | format(c.avg_bars_held) }}</td>
+        <td class="small mono">{{ c.n_long }} · {{ '%.0f%%' | format(c.long_win_rate * 100) }} · {{ '%.1f' | format(c.long_r) }}R</td>
+        <td class="small mono">{{ c.n_short }} · {{ '%.0f%%' | format(c.short_win_rate * 100) }} · {{ '%.1f' | format(c.short_r) }}R</td>
+      </tr>
+    {% else %}
+      {{ empty(10, 'No assets in this batch.') }}
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+{# ---------------------------------------------------------------- #}
+{# Where the edge lives: session and Silver Bullet breakdowns        #}
+{# ---------------------------------------------------------------- #}
+{% macro breakdown_card(title, note, matrix) %}
+<div class="card mb-3">
+  <div class="card-header">{{ title }}</div>
+  <div class="table-responsive">
+  <table class="table table-sm table-compact">
+    <thead>
+      <tr>
+        <th>Window</th>
+        {% for c in comparison %}<th class="text-end">{{ c.asset }}</th>{% endfor %}
+        <th class="text-end">Trades</th><th class="text-end">Total R</th>
+        <th class="text-end">Expectancy</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in matrix %}
+      <tr>
+        <td>{{ row.label }} <span class="text-muted small mono">{{ row.key }}</span></td>
+        {% for cell in row.cells %}
+          <td class="mono text-end">
+            {% if cell %}
+              <span class="{{ 'text-success' if cell.expectancy > 0 else ('text-danger' if cell.expectancy < 0 else 'text-muted') }}">
+                {{ '%.2f' | format(cell.expectancy) }}</span>
+              <span class="text-muted small">({{ cell.n_trades }})</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+        {% endfor %}
+        <td class="mono text-end">{{ row.n_trades }}</td>
+        <td class="mono text-end {{ 'text-success' if row.total_r > 0 else ('text-danger' if row.total_r < 0 else '') }}">
+          {{ '%.2f' | format(row.total_r) }}</td>
+        <td class="mono text-end fw-semibold {{ 'text-success' if row.expectancy > 0 else ('text-danger' if row.expectancy < 0 else 'text-muted') }}">
+          {{ '%.2f' | format(row.expectancy) }}</td>
+      </tr>
+    {% else %}
+      {{ empty(comparison | length + 4, 'No closed trades to break down.') }}
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="card-body py-2 chart-note">{{ note }}</div>
+</div>
+{% endmacro %}
+
+{{ breakdown_card(
+     'By session (expectancy in R, trade count in brackets)',
+     'Pooled across assets, ranked best first. A session that only one asset traded still appears.',
+     session_matrix) }}
+
+{{ breakdown_card(
+     'By Silver Bullet window (expectancy in R, trade count in brackets)',
+     'Silver Bullet setups are a subset of the session breakdown above.',
+     silver_bullet_matrix) }}
+{% endblock %}
+
+{% block scripts %}
+<script id="batch-curves" type="application/json">[
+{% for c in comparison %}{"asset": {{ c.asset | tojson }}, "points": {{ c.equity_curve | tojson }}}{% if not loop.last %},{% endif %}{% endfor %}
+]</script>
+<script>
+  (function () {
+    "use strict";
+    var curves = JSON.parse(document.getElementById('batch-curves').textContent);
+    var canvas = document.getElementById('batchCurves');
+    if (!canvas) return;
+
+    // Categorical palette with enough separation to read on the dark theme.
+    var PALETTE = ['#4dabf7', '#51cf66', '#ffd43b', '#ff8787', '#cc5de8',
+                   '#22b8cf', '#ffa94d', '#94d82d'];
+
+    var datasets = curves
+      .filter(function (c) { return c.points && c.points.length; })
+      .map(function (c, i) {
+        return {
+          label: c.asset,
+          // x is epoch ms so the axis needs no date adapter; y is cumulative R.
+          data: c.points.map(function (p) {
+            return { x: Date.parse(p[0]), y: p[1] };
+          }),
+          borderColor: PALETTE[i % PALETTE.length],
+          backgroundColor: 'transparent',
+          borderWidth: 2, tension: 0, pointRadius: 0,
+        };
+      });
+
+    if (!datasets.length) {
+      canvas.parentNode.innerHTML =
+        '<div class="empty-state">No closed trades to plot.</div>';
+      return;
+    }
+
+    new Chart(canvas, {
+      type: 'line',
+      data: { datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'nearest', intersect: false },
+        plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } } },
+        scales: {
+          x: {
+            type: 'linear',
+            title: { display: true, text: 'Entry time' },
+            ticks: {
+              maxRotation: 0,
+              callback: function (value) {
+                return new Date(value).toLocaleDateString();
+              },
+            },
+          },
+          y: { title: { display: true, text: 'Cumulative R' } },
+        },
+      },
+    });
+  })();
+</script>
+{% endblock %}

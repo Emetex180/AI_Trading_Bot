@@ -4,17 +4,19 @@ Usage (from the project root)::
 
     python run.py scan      # live multi-asset scanner (ALERT ONLY by default)
     python run.py backtest  # run a historical backtest per enabled asset
-    python run.py web       # Flask dashboard (read-only)
+    python run.py web       # dashboard + control panel
     python run.py assets    # list the asset registry
     python run.py smoke     # quick no-MT5 self-check
 
 The scanner never executes orders unless AUTO_TRADING=true is set explicitly in
 ``.env`` (default false). All safety gating lives in ``trading.executor``.
+
+``scan`` and ``backtest`` are thin wrappers around :mod:`runner`, which the
+dashboard also drives — so the browser and the CLI run identical code.
 """
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 
@@ -25,133 +27,52 @@ from database.repository import Repository, init_db
 # Live scanner
 # --------------------------------------------------------------------------- #
 def run_scan(settings: Settings) -> int:
-    from trading.asset_manager import AssetManager
+    """Live multi-asset scanner, run by the shared :class:`runner.JobManager`.
 
-    # Registry is required; nothing else can decide what to analyse.
-    manager = AssetManager(settings=settings)
-    assets = manager.enabled_assets()
-    if not assets:
-        print("[scan] No enabled assets in the registry — enable assets in "
-              f"{settings.assets_file} first.")
-        return 0
+    The loop itself lives in ``runner.py`` so the CLI and the dashboard drive
+    exactly the same implementation. This function only starts it, blocks until
+    Ctrl+C or a fatal error, then stops it.
+    """
+    from runner import LIVE_ERROR, JobManager
 
-    # MT5 connection is the only hard dependency of the live path.
-    try:
-        from trading.market_data import MarketData
-        from trading.mt5_client import MT5Client
-
-        client = MT5Client(settings)
-        client.connect()
-        market = MarketData(client, settings.mt5_server_utc_offset)
-    except Exception as exc:  # pragma: no cover - depends on a live terminal
-        print(f"[scan] MT5 unavailable: {exc}")
+    jobs = JobManager(settings=settings, on_event=print)
+    started = jobs.start_live()
+    if not started["ok"]:
+        print(f"[scan] {started['message']}")
         return 2
 
-    from scanner import AssetScanner
-
-    warm_count = int(os.getenv("WARMUP_M1_BARS", "5000"))
-    poll_sleep = settings.scanner_poll_interval_ms / 1000.0
-
-    repo = Repository(settings=settings)
-    repo.log_event("INFO", "scanner", f"starting; auto_trading={settings.auto_trading}")
-
-    def equity():
-        acc = client.account_info()
-        return acc.equity if acc else None
-
-    scanners = {}
     try:
-        for asset in assets:
-            if not market.symbol_exists(asset.broker_symbol):
-                print(f"[scan] symbol not visible: {asset.broker_symbol} "
-                      f"(asset {asset.name}) — skipping.")
-                repo.log_event("WARN", "scanner",
-                               f"{asset.name}: symbol {asset.broker_symbol} not visible")
-                continue
-            warm = market.fetch_m1_closed(asset.broker_symbol, warm_count,
-                                          drop_forming=True)
-            sc = AssetScanner(asset, settings=settings, repo=repo,
-                              equity_provider=equity)
-            sc.warm(warm)
-            scanners[asset.name] = sc
-            print(f"[scan] {asset.name} ({asset.broker_symbol}) warmed with "
-                  f"{len(warm)} M1 candles.")
-            repo.log_event("INFO", "scanner",
-                           f"{asset.name} warmed ({len(warm)} M1)")
-
-        print(f"[scan] LIVE — AUTO_TRADING={settings.auto_trading}. "
-              "Press Ctrl+C to stop.")
-        while True:
-            for name, sc in scanners.items():
-                candles = market.poll_closed_candles(sc.symbol, lookback=5)
-                handled = sc.feed_new(candles)
-                if handled:
-                    repo.log_event("INFO", "scanner",
-                                   f"{name}: {handled} new signal(s)")
-            time.sleep(poll_sleep)
+        while jobs.is_live_running():
+            time.sleep(0.25)
     except KeyboardInterrupt:  # pragma: no cover - user stop
-        print("\n[scan] stopped by user.")
-    finally:
-        try:
-            client.disconnect()
-        except Exception:
-            pass
-        repo.close()
+        print("\n[scan] stopping...")
+        jobs.stop_live()
+        return 0
+
+    state = jobs.live_state()
+    if state["state"] == LIVE_ERROR:
+        print(f"[scan] {state['last_error']}")
+        return 2
     return 0
 
 
 # --------------------------------------------------------------------------- #
 # Backtest
 # --------------------------------------------------------------------------- #
-def run_backtest(settings: Settings) -> int:
-    from trading.asset_manager import AssetManager
+def run_backtest(settings: Settings, asset: str | None = None) -> int:
+    """Historical backtest per asset, run by the shared :class:`runner.JobManager`."""
+    from runner import BT_ERROR, JobManager
 
-    from backtesting.engine import BacktestRunner
-
-    manager = AssetManager(settings=settings)
-    assets = manager.enabled_assets()
-    if not assets:
-        print("[backtest] No enabled assets.")
-        return 0
-
-    try:
-        from trading.market_data import MarketData
-        from trading.mt5_client import MT5Client
-
-        client = MT5Client(settings)
-        client.connect()
-        market = MarketData(client, settings.mt5_server_utc_offset)
-    except Exception as exc:  # pragma: no cover - needs a live terminal
-        print(f"[backtest] MT5 unavailable: {exc}")
+    jobs = JobManager(settings=settings, on_event=print)
+    requested = jobs.request_backtest(asset=asset)
+    if not requested["ok"]:
+        print(f"[backtest] {requested['message']}")
         return 2
 
-    count = settings.backtest_m1_bars
-    init_db(settings)
-    with Repository(settings=settings) as repo:
-        repo.log_event("INFO", "backtest", f"starting over {count} M1 per asset")
-        for asset in assets:
-            candles = market.fetch_m1_closed(asset.broker_symbol, count,
-                                             drop_forming=True)
-            runner = BacktestRunner(asset)
-            summary, trades = runner.run(candles, name=asset.name)
-            repo.save_backtest(
-                name=f"{asset.name} auto",
-                asset=asset.name,
-                symbol=asset.broker_symbol,
-                start_utc=summary.start_utc,
-                end_utc=summary.end_utc,
-                params=summary.params,
-                summary=summary.to_dict(),
-                trades=[t.as_db_dict() for t in trades],
-            )
-            d = summary.to_dict()
-            print(f"[backtest] {asset.name}: {d['n_signals']} signals, "
-                  f"{d['n_trades']} trades, win {d['win_rate']:.1%}, "
-                  f"PF {d['profit_factor']:.2f}, total R {d['total_r']:.2f}")
-        try:
-            client.disconnect()
-        except Exception:
-            pass
+    state = jobs.wait_for_backtest()
+    if state["state"] == BT_ERROR:
+        print(f"[backtest] {state['last_error']}")
+        return 2
     return 0
 
 
@@ -163,8 +84,11 @@ def run_web(settings: Settings) -> int:
 
     web_app = create_app(settings=settings)
     print(f"[web] dashboard at http://{settings.flask_host}:{settings.flask_port}")
+    # The reloader MUST stay off. It forks a second process, and because the
+    # dashboard can now start a live scanner that process would warm up its own
+    # engine and broadcast DUPLICATE Telegram alerts for every setup.
     web_app.run(host=settings.flask_host, port=settings.flask_port,
-                debug=settings.flask_debug)
+                debug=settings.flask_debug, use_reloader=False)
     return 0
 
 

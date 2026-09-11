@@ -18,19 +18,29 @@ Simulation model
 
 Statistics are reported in **R multiples** (one unit of risk per trade), which
 is broker- and lot-size-neutral. An R-based equity curve is returned so a
-dashboard can plot it.
+dashboard can plot it, alongside per-direction and per-session breakdowns used
+to compare assets against each other.
+
+Session attribution reuses the live strategy's :mod:`trading.sessions` helpers
+against the trade's NY-clock entry time, so a backtest breakdown and a live
+signal agree about which session a setup belongs to.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
+from trading import sessions as sess
+from trading import time_utils as tu
 from trading.asset_manager import Asset
 from trading.bars import Candle
 from trading.strategy import ICTStrategy
 
 DEFAULT_MAX_HOLD_M1 = 60 * 12  # allow multi-hour holds by default
+
+#: Bucket key for trades whose entry falls outside every named ICT window.
+OUTSIDE_SESSION = "outside"
 
 
 # --------------------------------------------------------------------------- #
@@ -51,6 +61,21 @@ class BacktestSummary:
     gross_win_r: float = 0.0
     gross_loss_r: float = 0.0
     equity_curve: list[tuple[str, float]] = field(default_factory=list)
+    # --- direction split ---------------------------------------------------- #
+    n_long: int = 0
+    n_short: int = 0
+    long_r: float = 0.0
+    short_r: float = 0.0
+    long_wins: int = 0
+    short_wins: int = 0
+    # --- risk quality ------------------------------------------------------- #
+    max_consecutive_losses: int = 0
+    best_trade_r: float = 0.0
+    worst_trade_r: float = 0.0
+    avg_bars_held: float = 0.0
+    # --- where the edge actually lives -------------------------------------- #
+    by_session: dict[str, dict[str, Any]] = field(default_factory=dict)
+    by_silver_bullet: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def win_rate(self) -> float:
@@ -65,6 +90,40 @@ class BacktestSummary:
     @property
     def avg_r(self) -> float:
         return self.total_r / self.n_trades if self.n_trades else 0.0
+
+    @property
+    def expectancy(self) -> float:
+        """Average R per closed trade.
+
+        This is the cross-asset ranking metric: it is risk-normalised, so it
+        stays comparable as lot sizing or risk percent changes, and it rewards
+        consistency rather than one outsized winner.
+        """
+        return self.total_r / self.n_trades if self.n_trades else 0.0
+
+    @property
+    def avg_win_r(self) -> float:
+        return self.gross_win_r / self.n_wins if self.n_wins else 0.0
+
+    @property
+    def avg_loss_r(self) -> float:
+        return self.gross_loss_r / self.n_losses if self.n_losses else 0.0
+
+    @property
+    def payoff_ratio(self) -> float:
+        """Average win divided by average loss."""
+        if self.n_losses == 0:
+            return float("inf") if self.gross_win_r > 0 else 0.0
+        loss = abs(self.avg_loss_r)
+        return (self.avg_win_r / loss) if loss else 0.0
+
+    @property
+    def long_win_rate(self) -> float:
+        return self.long_wins / self.n_long if self.n_long else 0.0
+
+    @property
+    def short_win_rate(self) -> float:
+        return self.short_wins / self.n_short if self.n_short else 0.0
 
     def max_drawdown_r(self) -> float:
         peak = 0.0
@@ -87,7 +146,23 @@ class BacktestSummary:
             "profit_factor": round(self.profit_factor, 4),
             "total_r": round(self.total_r, 4),
             "avg_r": round(self.avg_r, 4),
+            "expectancy": round(self.expectancy, 4),
+            "avg_win_r": round(self.avg_win_r, 4),
+            "avg_loss_r": round(self.avg_loss_r, 4),
+            "payoff_ratio": round(self.payoff_ratio, 4),
             "max_drawdown_r": round(self.max_drawdown_r(), 4),
+            "max_consecutive_losses": self.max_consecutive_losses,
+            "best_trade_r": round(self.best_trade_r, 4),
+            "worst_trade_r": round(self.worst_trade_r, 4),
+            "avg_bars_held": round(self.avg_bars_held, 2),
+            "n_long": self.n_long,
+            "n_short": self.n_short,
+            "long_r": round(self.long_r, 4),
+            "short_r": round(self.short_r, 4),
+            "long_win_rate": round(self.long_win_rate, 4),
+            "short_win_rate": round(self.short_win_rate, 4),
+            "by_session": self.by_session,
+            "by_silver_bullet": self.by_silver_bullet,
             "equity_curve": [[t, round(eq, 4)] for t, eq in self.equity_curve],
         }
 
@@ -124,6 +199,58 @@ class BacktestTrade:
             "bars_held": self.bars_held,
             "reason": self.reason,
         }
+
+
+# --------------------------------------------------------------------------- #
+# Breakdowns (pure + testable)
+# --------------------------------------------------------------------------- #
+def _bucket_key(entry_time_utc: datetime) -> str:
+    """Primary ICT session key for a trade entry, on the project NY clock."""
+    window = sess.primary_session(tu.minute_of_day(tu.utc_to_ny(entry_time_utc)))
+    return window.key if window else OUTSIDE_SESSION
+
+
+def _silver_bullet_key(entry_time_utc: datetime) -> str:
+    """Silver Bullet window key for a trade entry, or ``outside``."""
+    key = sess.active_silver_bullet_key(tu.minute_of_day(tu.utc_to_ny(entry_time_utc)))
+    return key or OUTSIDE_SESSION
+
+
+def _breakdown(trades: list["BacktestTrade"],
+               key_fn: Callable[[datetime], str]) -> dict[str, dict[str, Any]]:
+    """Group closed trades into per-bucket statistics, best total R first.
+
+    Deterministic ordering (total R, then bucket name) so two runs over the same
+    trades render identically.
+    """
+    grouped: dict[str, list[BacktestTrade]] = {}
+    for t in trades:
+        grouped.setdefault(key_fn(t.entry_time_utc), []).append(t)
+
+    out: dict[str, dict[str, Any]] = {}
+    for key, rows in grouped.items():
+        wins = sum(1 for t in rows if t.outcome == "WIN")
+        total_r = sum(t.pnl_r for t in rows)
+        out[key] = {
+            "n_trades": len(rows),
+            "n_wins": wins,
+            "win_rate": round(wins / len(rows), 4) if rows else 0.0,
+            "total_r": round(total_r, 4),
+            "expectancy": round(total_r / len(rows), 4) if rows else 0.0,
+        }
+    return dict(sorted(out.items(), key=lambda kv: (-kv[1]["total_r"], kv[0])))
+
+
+def _max_consecutive_losses(closed_by_time: list["BacktestTrade"]) -> int:
+    """Longest run of consecutive losses in entry order."""
+    worst = run = 0
+    for t in closed_by_time:
+        if t.outcome == "LOSS":
+            run += 1
+            worst = max(worst, run)
+        else:
+            run = 0
+    return worst
 
 
 # --------------------------------------------------------------------------- #
@@ -246,12 +373,16 @@ class BacktestRunner:
         wins = [t for t in closed if t.outcome == "WIN"]
         losses = [t for t in closed if t.outcome == "LOSS"]
         open_trades = [t for t in trades if t.outcome == "OPEN"]
+        closed_by_time = sorted(closed, key=lambda x: x.entry_time_utc)
 
         curve: list[tuple[str, float]] = []
         eq = 0.0
-        for t in sorted(closed, key=lambda x: x.entry_time_utc):
+        for t in closed_by_time:
             eq += t.pnl_r
             curve.append((t.exit_time_utc.isoformat() if t.exit_time_utc else "", eq))
+
+        long_trades = [t for t in closed if t.direction == "buy"]
+        short_trades = [t for t in closed if t.direction == "sell"]
 
         s = BacktestSummary(
             asset=self.asset.name,
@@ -267,5 +398,18 @@ class BacktestRunner:
             gross_win_r=sum(t.pnl_r for t in wins),
             gross_loss_r=sum(t.pnl_r for t in losses),
             equity_curve=curve,
+            n_long=len(long_trades),
+            n_short=len(short_trades),
+            long_r=sum(t.pnl_r for t in long_trades),
+            short_r=sum(t.pnl_r for t in short_trades),
+            long_wins=sum(1 for t in long_trades if t.outcome == "WIN"),
+            short_wins=sum(1 for t in short_trades if t.outcome == "WIN"),
+            max_consecutive_losses=_max_consecutive_losses(closed_by_time),
+            best_trade_r=max((t.pnl_r for t in closed), default=0.0),
+            worst_trade_r=min((t.pnl_r for t in closed), default=0.0),
+            avg_bars_held=(sum(t.bars_held for t in closed) / len(closed)
+                           if closed else 0.0),
+            by_session=_breakdown(closed, _bucket_key),
+            by_silver_bullet=_breakdown(closed, _silver_bullet_key),
         )
         return s

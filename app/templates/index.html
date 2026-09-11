@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import stat, dir_badge, empty %}
 {% block title %}Dashboard — ICT Scanner{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
@@ -9,50 +10,74 @@
   </div>
 </div>
 
+{% set live = job_state.live %}
+<div class="card mb-3" id="live-card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span>Live session</span>
+    <span id="live-state-badge" class="badge text-bg-secondary">{{ live.state }}</span>
+  </div>
+  <div class="card-body">
+    {% if not telegram_ready %}
+    <div class="alert alert-warning py-2 small mb-3">
+      <strong>Telegram is not configured.</strong> Signals will still be detected and saved,
+      but <strong>no alert will reach your phone</strong>. Set <code>TELEGRAM_ENABLED=true</code>,
+      <code>TELEGRAM_BOT_TOKEN</code> and <code>TELEGRAM_CHAT_ID</code> in <code>.env</code>
+      (see the README's Telegram setup section).
+    </div>
+    {% endif %}
+
+    <div class="d-flex flex-wrap gap-2 mb-3">
+      <button type="button" id="live-start" class="btn btn-sm btn-success">Start live session</button>
+      <button type="button" id="live-stop" class="btn btn-sm btn-outline-danger">Stop</button>
+    </div>
+
+    <div id="live-message" class="small mb-3"></div>
+
+    <dl class="row small mb-0">
+      <dt class="col-6 text-muted fw-normal">Started (NY)</dt>
+      <dd class="col-6 mono text-end" id="live-started">{{ live.started_at_utc | ny or '—' }}</dd>
+      <dt class="col-6 text-muted fw-normal">Assets warmed</dt>
+      <dd class="col-6 mono text-end" id="live-assets">{{ live.assets | join(', ') or '—' }}</dd>
+      <dt class="col-6 text-muted fw-normal">Last closed M1 (NY)</dt>
+      <dd class="col-6 mono text-end" id="live-last-candle">{{ live.last_candle_utc | ny or '—' }}</dd>
+      <dt class="col-6 text-muted fw-normal">Signals this session</dt>
+      <dd class="col-6 mono text-end" id="live-signals">{{ live.signals_session }}</dd>
+    </dl>
+
+    <div id="live-error" class="alert alert-danger py-2 small mt-3 mb-0 {% if not live.last_error %}d-none{% endif %}">
+      {{ live.last_error }}
+    </div>
+  </div>
+</div>
+
+<div id="new-signals" class="mb-3"></div>
+
+<div class="row g-3 mb-3">
+  <div class="col-6 col-lg-3">
+    {{ stat('Signals (total)', stats.signals_total) }}
+  </div>
+  <div class="col-6 col-lg-3">
+    {{ stat('Approved', stats.signals_approved, 'success') }}
+  </div>
+  <div class="col-6 col-lg-3">
+    {{ stat('Execution attempts', stats.trades_total, '',
+            stats.trades_sent ~ ' sent') }}
+  </div>
+  <div class="col-6 col-lg-3">
+    {{ stat('Backtests', stats.backtests) }}
+  </div>
+</div>
+
 <div class="row g-3 mb-4">
-  <div class="col-6 col-md-3"><div class="card stat-card">
-    <div class="card-body py-3">
-      <div class="text-muted small">Signals (total)</div>
-      <div class="fs-4 mono">{{ stats.signals_total }}</div>
-    </div></div>
+  <div class="col-6 col-lg-3">
+    {{ stat('Rejected', stats.signals_rejected, 'muted') }}
   </div>
-  <div class="col-6 col-md-3"><div class="card stat-card border-success">
-    <div class="card-body py-3">
-      <div class="text-muted small">Approved</div>
-      <div class="fs-4 mono text-success">{{ stats.signals_approved }}</div>
-    </div></div>
+  <div class="col-6 col-lg-3">
+    {{ stat('Skipped (safe gate)', stats.trades_skipped, 'muted') }}
   </div>
-  <div class="col-6 col-md-3"><div class="card stat-card">
-    <div class="card-body py-3">
-      <div class="text-muted small">Rejected</div>
-      <div class="fs-4 mono">{{ stats.signals_rejected }}</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-md-3"><div class="card stat-card">
-    <div class="card-body py-3">
-      <div class="text-muted small">Backtests</div>
-      <div class="fs-4 mono">{{ stats.backtests }}</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-md-3"><div class="card stat-card">
-    <div class="card-body py-3">
-      <div class="text-muted small">Execution attempts</div>
-      <div class="fs-4 mono">{{ stats.trades_total }}
-        <span class="small text-muted">({{ stats.trades_sent }} sent)</span>
-      </div>
-    </div></div>
-  </div>
-  <div class="col-6 col-md-3"><div class="card stat-card">
-    <div class="card-body py-3">
-      <div class="text-muted small">Skipped (safe gate)</div>
-      <div class="fs-4 mono">{{ stats.trades_skipped }}</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-md-3"><div class="card stat-card">
-    <div class="card-body py-3">
-      <div class="text-muted small">Assets (enabled / total)</div>
-      <div class="fs-4 mono">{{ stats.assets_enabled }} / {{ stats.assets_total }}</div>
-    </div></div>
+  <div class="col-6 col-lg-3">
+    {{ stat('Assets (enabled / total)',
+            stats.assets_enabled ~ ' / ' ~ stats.assets_total, 'info') }}
   </div>
 </div>
 
@@ -64,18 +89,17 @@
         <a href="{{ url_for('signals_page') }}" class="small">view all</a>
       </div>
       <div class="table-responsive">
-      <table class="table table-sm table-hover align-middle mb-0">
-        <thead class="table-dark">
+      <table class="table table-sm table-hover table-compact">
+        <thead>
           <tr><th>#</th><th>Asset</th><th>Dir</th><th>Entry</th><th>RR</th>
               <th>Entry (NY)</th><th>CISD</th><th>Session</th><th>Status</th></tr>
         </thead>
         <tbody>
         {% for s in recent_signals %}
-          <tr style="cursor:pointer" onclick="location.href='{{ url_for('signal_detail', signal_id=s.id) }}'">
+          <tr class="row-link" onclick="location.href='{{ url_for('signal_detail', signal_id=s.id) }}'">
             <td class="text-muted">{{ s.id }}</td>
             <td>{{ s.asset }}</td>
-            <td><span class="badge {{ 'text-bg-success' if s.direction == 'buy' else 'text-bg-danger' }}">
-              {{ s.direction|upper }}</span></td>
+            <td>{{ dir_badge(s.direction) }}</td>
             <td class="mono">{{ s.entry | num }}</td>
             <td class="mono">{{ '%.2f' | format(s.rr) }}</td>
             <td class="mono">{{ s.entry_time_utc | ny }}</td>
@@ -84,7 +108,7 @@
             <td>{{ s.status | status }}</td>
           </tr>
         {% else %}
-          <tr><td colspan="9" class="text-muted text-center py-4">No signals yet. Run <code>python run.py scan</code>.</td></tr>
+          {{ empty(9, 'No signals yet. Start a live session above.') }}
         {% endfor %}
         </tbody>
       </table>

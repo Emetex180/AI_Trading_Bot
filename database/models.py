@@ -120,6 +120,11 @@ class Backtest(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     asset: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Groups the per-asset rows produced by ONE backtest request, so a campaign
+    # over N assets can be ranked and compared instead of reading as N unrelated
+    # runs. NULL on rows written before batching existed (and on any single-asset
+    # run from an older build); those are surfaced as one-row batches.
+    batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     start_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     end_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     params_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

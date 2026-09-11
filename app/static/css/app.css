@@ -1,0 +1,182 @@
+/* ==========================================================================
+   ICT Scanner — application stylesheet
+   --------------------------------------------------------------------------
+   Bootstrap 5.3.3 arrives from CDN and supplies the grid, reset and utilities.
+   This file supplies the small set of components this app repeats across every
+   page, so templates stop carrying inline styles and hand-rolled one-off
+   variants of the same card, table and badge.
+
+   Convention: numeric columns use tabular figures (`.mono` / `.stat-value`) so
+   digits line up down a column and are readable at a glance.
+   ========================================================================== */
+
+:root {
+  --app-radius: 0.5rem;
+  --app-rule: var(--bs-border-color);
+  --app-muted: var(--bs-secondary-color);
+  --app-gutter: 1rem;
+}
+
+body {
+  padding-top: 4.5rem;
+}
+
+/* Every figure that sits in a column of other figures. */
+.mono,
+.stat-value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   Stat tiles
+   One canonical markup everywhere:
+     <div class="stat-card [tone]">
+       <div class="stat-label">…</div>
+       <div class="stat-value">…</div>
+       <div class="stat-sub">…</div>   (optional)
+     </div>
+   -------------------------------------------------------------------------- */
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  height: 100%;
+  padding: 0.7rem 0.9rem;
+  background: var(--bs-tertiary-bg);
+  border: 1px solid var(--app-rule);
+  border-left: 3px solid var(--bs-primary);
+  border-radius: var(--app-radius);
+}
+
+.stat-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--app-muted);
+}
+
+.stat-value {
+  font-size: 1.45rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.stat-sub {
+  font-size: 0.75rem;
+  color: var(--app-muted);
+}
+
+.stat-card.success { border-left-color: var(--bs-success); }
+.stat-card.danger  { border-left-color: var(--bs-danger); }
+.stat-card.warning { border-left-color: var(--bs-warning); }
+.stat-card.info    { border-left-color: var(--bs-info); }
+.stat-card.muted   { border-left-color: var(--bs-secondary); }
+
+/* --------------------------------------------------------------------------
+   Tables
+   A light uppercase header rule instead of Bootstrap's `thead.table-dark`,
+   which made every table read as a heavy block.
+   -------------------------------------------------------------------------- */
+.table.table-compact {
+  margin-bottom: 0;
+}
+
+.table.table-compact > :not(caption) > * > * {
+  padding: 0.5rem 0.75rem;
+  border-bottom-color: var(--app-rule);
+  vertical-align: middle;
+}
+
+.table.table-compact > thead > tr > th {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--app-muted);
+  border-bottom: 1px solid var(--bs-border-color);
+  white-space: nowrap;
+}
+
+.table.table-compact > tbody > tr:last-child > td {
+  border-bottom: 0;
+}
+
+/* Rows that navigate on click. */
+.row-link {
+  cursor: pointer;
+}
+
+/* --------------------------------------------------------------------------
+   States and badges
+   -------------------------------------------------------------------------- */
+.empty-state {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--app-muted);
+  font-size: 0.875rem;
+}
+
+/* Status dot — replaces the emoji glyphs, which render inconsistently. */
+.dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.35rem;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: baseline;
+}
+
+.badge {
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* Grey scale-coloured caption text used under a card header. */
+.card-header {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--bs-tertiary-bg);
+}
+
+/* --------------------------------------------------------------------------
+   Charts
+   Chart.js is given a fixed-height box so `maintainAspectRatio: false`
+   resizes correctly instead of growing without bound.
+   -------------------------------------------------------------------------- */
+.chart-box {
+  position: relative;
+  height: 320px;
+}
+
+.chart-box-sm {
+  position: relative;
+  height: 240px;
+}
+
+/* Legend / note text beneath a chart. */
+.chart-note {
+  font-size: 0.75rem;
+  color: var(--app-muted);
+}
+
+/* Thin progress bar used for backtest asset progress. */
+.progress-thin {
+  height: 6px;
+}
+
+/* Key-value tables (meta panels) read better with a narrower label column. */
+.kv-table th {
+  width: 45%;
+  font-weight: 500;
+  color: var(--app-muted);
+}
+
+/* AI overlay panel. */
+.ai-box {
+  background: var(--bs-tertiary-bg);
+  border: 1px solid var(--app-rule);
+  border-radius: var(--app-radius);
+}

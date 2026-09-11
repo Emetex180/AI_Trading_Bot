@@ -52,3 +52,22 @@ def test_invalid_command_exits():
 
     with pytest.raises(SystemExit):
         run_mod.main(["not-a-command"])
+
+
+def test_run_web_disables_the_reloader(tmp_path, monkeypatch):
+    """The Werkzeug reloader forks a second process -> a second live scanner,
+    which would broadcast duplicate Telegram alerts for every setup."""
+    from flask import Flask
+
+    settings = _settings_with_assets(tmp_path, monkeypatch)
+    captured = {}
+
+    def _fake_run(self, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(Flask, "run", _fake_run)
+
+    assert run_mod.run_web(settings) == 0
+    assert captured["use_reloader"] is False
+    assert captured["host"] == settings.flask_host
+    assert captured["port"] == settings.flask_port

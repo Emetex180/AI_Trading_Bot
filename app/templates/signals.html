@@ -1,8 +1,10 @@
 {% extends "base.html" %}
+{% from "_macros.html" import dir_badge, empty %}
 {% block title %}Signals — ICT Scanner{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
   <h4 class="mb-0">Signals</h4>
+  <div class="small text-muted">{{ rows | length }} shown</div>
 </div>
 
 <form method="get" class="row g-2 mb-3">
@@ -23,37 +25,38 @@
     </select>
   </div>
   <div class="col-auto"><button class="btn btn-sm btn-primary">Filter</button></div>
+  {% if filter_asset or filter_status %}
+  <div class="col-auto">
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('signals_page') }}">Clear</a>
+  </div>
+  {% endif %}
 </form>
 
 <div class="card">
   <div class="table-responsive">
-  <table class="table table-sm table-hover align-middle mb-0">
-    <thead class="table-dark">
+  <table class="table table-sm table-hover table-compact">
+    <thead>
       <tr><th>#</th><th>Asset</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th>
-          <th>RR</th><th>Entry (NY)</th><th>Liquidity</th><th>CISD</th><th>FVG</th>
-          <th>Session</th><th>AI</th><th>Status</th></tr>
+          <th>RR</th><th>Entry (NY)</th><th>Session</th><th>CISD</th><th>AI</th><th>Status</th></tr>
     </thead>
     <tbody>
     {% for s in rows %}
-      <tr style="cursor:pointer" onclick="location.href='{{ url_for('signal_detail', signal_id=s.id) }}'">
+      <tr class="row-link" onclick="location.href='{{ url_for('signal_detail', signal_id=s.id) }}'">
         <td class="text-muted">{{ s.id }}</td>
         <td>{{ s.asset }}</td>
-        <td><span class="badge {{ 'text-bg-success' if s.direction == 'buy' else 'text-bg-danger' }}">
-          {{ s.direction|upper }}</span></td>
+        <td>{{ dir_badge(s.direction) }}</td>
         <td class="mono">{{ s.entry | num }}</td>
         <td class="mono">{{ s.sl | num }}</td>
         <td class="mono">{{ s.tp | num }}</td>
         <td class="mono">{{ '%.2f' | format(s.rr) }}</td>
         <td class="mono">{{ s.entry_time_utc | ny }}</td>
-        <td class="small">{{ s.liquidity_type or '-' }} @ {{ s.liquidity_price | num }}</td>
-        <td>{{ s.cisd_tf or '-' }}</td>
-        <td class="small">{{ s.fvg_direction or '-' }}</td>
         <td class="small">{{ s.session_primary or '-' }}</td>
+        <td class="small">{{ s.cisd_tf or '-' }}</td>
         <td class="small">{{ s.ai_status or '-' }}</td>
         <td>{{ s.status | status }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="14" class="text-muted text-center py-4">No signals match the filter.</td></tr>
+      {{ empty(12, 'No signals match the filter.') }}
     {% endfor %}
     </tbody>
   </table>

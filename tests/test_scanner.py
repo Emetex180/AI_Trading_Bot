@@ -32,7 +32,15 @@ def _repo():
 
 
 def _settings(**kw):
-    base = get_settings()
+    """Hermetic settings: never inherit the developer's real ``.env``.
+
+    ``get_settings()`` reads the project ``.env``, so a developer who has
+    Telegram enabled there would otherwise change what these tests exercise.
+    Overrides in ``kw`` are applied on top.
+    """
+    base = replace(get_settings(), auto_trading=False, ai_enabled=False,
+                   telegram_enabled=False, telegram_bot_token="",
+                   telegram_chat_id="")
     return replace(base, **kw)
 
 
@@ -45,7 +53,7 @@ def _make_scanner(repo, settings, ai_transport=None, telegram_transport=None):
                                             '"risks": ["news"], '
                                             '"confidence": 60}'}}]}))
     notifier = TelegramNotifier(settings=settings, transport=telegram_transport or (
-        lambda text: scanner_mod._FakeSend(True)))
+        lambda text: _FakeSend(True)))
     executor = Executor(settings=settings)
     return scanner_mod.AssetScanner(
         ASSET, settings=settings, repo=repo, analyzer=analyzer,

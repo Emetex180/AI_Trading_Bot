@@ -1,13 +1,22 @@
-"""Flask dashboard (read-only monitoring UI).
+"""Flask dashboard and control panel.
 
-The dashboard is deliberately **read-only**: it renders signals, trades and
-backtests persisted by the scanner, and shows the live safety configuration
-(AUTO_TRADING state, risk policy). It performs no MT5, AI or Telegram I/O, so
-it runs even when the terminal is closed. Auto-trading can never be enabled
-from this UI.
+The dashboard **reads** signals, trades and backtests persisted by the scanner,
+and — through :mod:`app.api` — can also **operate** the bot: start/stop a live
+session and launch backtests. Those routes delegate to
+:class:`runner.JobManager`, which owns the background threads.
 
-:func:`create_app` accepts an injected :class:`database.repository.Repository`
-so tests can drive the full UI against an in-memory SQLite database.
+What it still cannot do: enable auto-trading. ``AUTO_TRADING`` remains a
+``.env``-only setting and no route here can change it, so every approved signal
+continues to be recorded as ``SKIPPED`` unless that flag was set deliberately
+outside the browser. Session state is displayed read-only.
+
+Routes that render pages touch no MT5, AI or Telegram, so they keep working when
+the terminal is closed; the control routes start work on a background thread
+rather than blocking a request.
+
+:func:`create_app` accepts injected :class:`database.repository.Repository` and
+:class:`runner.JobManager` instances so tests can drive the full UI against an
+in-memory database with no terminal.
 """
 from __future__ import annotations
 
@@ -16,12 +25,67 @@ from math import isinf
 from flask import Flask, abort, g, jsonify, render_template, request
 from sqlalchemy.orm import sessionmaker
 
+from backtesting.compare import batch_totals, rank_assets
+from backtesting.compare import tidy as tidy_summary
 from config import Settings, get_settings
 from database.models import Base
 from database.repository import Repository, get_engine
 from trading import time_utils as tu
 
+from .api import asset_choices, register_api
+
 _TEMPLATES = "templates"
+
+#: Human labels for breakdown bucket keys (sessions / Silver Bullet windows).
+_WINDOW_LABELS: dict[str, str] = {}
+
+
+def _window_label(key: str) -> str:
+    """Display label for a session or Silver Bullet bucket key."""
+    if not _WINDOW_LABELS:
+        from trading.sessions import CORE_SESSIONS, SILVER_BULLET_WINDOWS
+
+        for w in (*CORE_SESSIONS, *SILVER_BULLET_WINDOWS):
+            _WINDOW_LABELS[w.key] = w.label
+        _WINDOW_LABELS["outside"] = "Outside any window"
+    return _WINDOW_LABELS.get(key, key)
+
+
+def _asset_summaries(rows) -> list[dict]:
+    """Per-asset summary dicts, with the row's own identity overlaid.
+
+    ``summary_json`` is written by the backtester and normally carries ``asset``
+    as well, but the row is the authoritative record of which instrument it is,
+    so the comparison never depends on the JSON blob being complete.
+    """
+    return [{**(r.summary_json or {}), "asset": r.asset, "symbol": r.symbol,
+             "backtest_id": r.id} for r in rows]
+
+
+def _breakdown_matrix(ranked: list[dict], field: str) -> list[dict]:
+    """Per-asset cells for one breakdown dimension, pooled and best-first.
+
+    Rows are the bucket keys present anywhere in the batch (so a session that
+    only one asset traded still appears); ``cells`` is aligned to ``ranked``,
+    with ``None`` where that asset had no trades in the bucket.
+    """
+    keys = sorted({k for row in ranked for k in (row.get(field) or {})})
+    matrix = []
+    for key in keys:
+        cells = [(row.get(field) or {}).get(key) for row in ranked]
+        present = [c for c in cells if c]
+        n_trades = sum(c["n_trades"] for c in present)
+        total_r = sum(c["total_r"] for c in present)
+        matrix.append({
+            "key": key,
+            "label": _window_label(key),
+            "cells": cells,
+            "n_trades": n_trades,
+            "total_r": round(total_r, 4),
+            "expectancy": round(total_r / n_trades, 4) if n_trades else 0.0,
+        })
+    matrix.sort(key=lambda r: r["expectancy"], reverse=True)
+    return matrix
 
 
 # --------------------------------------------------------------------------- #
@@ -67,11 +131,16 @@ def _profit_factor(value) -> str:
 # --------------------------------------------------------------------------- #
 def create_app(settings: Settings | None = None,
                repository: Repository | None = None,
-               setup_db: bool = True) -> Flask:
+               setup_db: bool = True,
+               jobs=None) -> Flask:
     """Build the dashboard app.
 
     ``repository`` injects a pre-built Repository (e.g. in-memory for tests);
     when omitted the app opens a fresh SQLite-backed engine per configuration.
+
+    ``jobs`` injects the background job manager. When omitted a real
+    :class:`runner.JobManager` is built from the configuration — pass a fake in
+    tests so no test can ever reach MT5.
     """
     cfg = settings or get_settings()
 
@@ -85,11 +154,17 @@ def create_app(settings: Settings | None = None,
     else:
         factory = None
 
+    if jobs is None:
+        from runner import JobManager
+
+        jobs = JobManager(settings=cfg)
+
     app = Flask(__name__, template_folder=_TEMPLATES,
                 static_folder="static", static_url_path="/static")
     app.config["CFG"] = cfg
     app.config["SESSION_FACTORY"] = factory
     app.config["FIXED_REPO"] = repository
+    app.config["JOBS"] = jobs
 
     app.jinja_env.filters["ny"] = _ny_str
     app.jinja_env.filters["num"] = _num
@@ -132,12 +207,17 @@ def create_app(settings: Settings | None = None,
             "assets_enabled": sum(1 for a in assets if a.enabled),
             "assets_total": len(assets),
         }
+        # Rendered once so the page is useful before the first poll returns.
+        job_state = jobs.status()
         return render_template(
             "index.html",
             stats=stats,
+            job_state=job_state,
             recent_signals=repo.recent_signals(12),
             recent_events=repo.recent_events(8),
             assets=[a for a in assets if a.enabled],
+            telegram_ready=(cfg.telegram_enabled and cfg.telegram_bot_token
+                            and cfg.telegram_chat_id),
             cfg=cfg,
         )
 
@@ -167,7 +247,54 @@ def create_app(settings: Settings | None = None,
     @app.get("/backtests")
     def backtests_page():
         repo = g.repo
-        return render_template("backtests.html", rows=repo.recent_backtests(100))
+        batches = []
+        for entry in repo.recent_batches(limit=20):
+            summaries = _asset_summaries(entry["rows"])
+            ranked = rank_assets(summaries)
+            batches.append({
+                **entry,
+                "totals": batch_totals(summaries),
+                "best": ranked[0] if ranked else None,
+                "is_single": entry["batch_id"].startswith("single:"),
+            })
+        return render_template(
+            "backtests.html",
+            batches=batches,
+            assets=asset_choices(cfg, repo),
+            job_state=jobs.status(),
+            default_bars=cfg.backtest_m1_bars,
+        )
+
+    @app.get("/backtests/batch/<batch_id>")
+    def backtest_batch_page(batch_id: str):
+        """Cross-asset comparison for one backtest campaign."""
+        repo = g.repo
+        if batch_id.startswith("single:"):
+            # Legacy/pre-batching row, surfaced as a one-asset batch so old
+            # history stays reachable through the same route.
+            raw = batch_id.split(":", 1)[1]
+            row = repo.get_backtest(int(raw)) if raw.isdigit() else None
+            rows = [row] if row is not None else []
+        else:
+            rows = repo.backtest_batch(batch_id)
+        if not rows:
+            abort(404)
+
+        summaries = _asset_summaries(rows)
+        ranked = rank_assets(summaries)
+        comparison = ranked
+
+        return render_template(
+            "backtests_batch.html",
+            batch_id=batch_id,
+            comparison=comparison,
+            totals=batch_totals(summaries),
+            best=comparison[0] if comparison else None,
+            session_matrix=_breakdown_matrix(ranked, "by_session"),
+            silver_bullet_matrix=_breakdown_matrix(ranked, "by_silver_bullet"),
+            start_utc=min((r.start_utc for r in rows if r.start_utc), default=None),
+            end_utc=max((r.end_utc for r in rows if r.end_utc), default=None),
+        )
 
     @app.get("/backtests/<int:bt_id>")
     def backtest_detail(bt_id: int):
@@ -180,7 +307,7 @@ def create_app(settings: Settings | None = None,
         return render_template(
             "backtest_detail.html",
             bt=bt,
-            summary=bt.summary_json or {},
+            summary=tidy_summary(bt.summary_json),
             params=bt.params_json or {},
             trades=trades,
             curve=curve,
@@ -189,6 +316,14 @@ def create_app(settings: Settings | None = None,
     @app.get("/health")
     def health():
         repo = g.repo
-        return jsonify({"status": "ok", "signals": repo.count_signals()})
+        return jsonify({
+            "status": "ok",
+            "signals": repo.count_signals(),
+            "live_running": jobs.is_live_running(),
+            "backtest_state": jobs.backtest_state()["state"],
+        })
+
+    # Control endpoints (start/stop live, run backtest, poll status).
+    register_api(app)
 
     return app
