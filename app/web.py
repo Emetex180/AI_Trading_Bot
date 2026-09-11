@@ -22,6 +22,7 @@ in-memory database with no terminal.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from math import isinf
 
 from flask import Flask, abort, current_app, g, jsonify, render_template, request
@@ -182,6 +183,71 @@ def _profit_factor(value) -> str:
     return f"{fv:.2f}"
 
 
+def _span(start, end) -> str:
+    """Human duration between two datetimes, e.g. ``84 days, 3 h``.
+
+    A backtest window is stated as two dates, which does not tell you whether it
+    covers a fortnight or two years — the figure that decides whether a result is
+    worth reading. Days are dropped once the span is under a day so an intraday
+    replay reads as hours and minutes rather than as "0 days".
+    """
+    if start is None or end is None or end <= start:
+        return ""
+    minutes = int((end - start).total_seconds() // 60)
+    days, rem = divmod(minutes, 60 * 24)
+    hours, mins = divmod(rem, 60)
+    if days:
+        return f"{days} day{'s' if days != 1 else ''}, {hours} h"
+    if hours:
+        return f"{hours} h, {mins} min"
+    return f"{mins} min"
+
+
+def _iso_dt(value) -> datetime | None:
+    """Parse an ISO timestamp stored in ``summary_json``, or ``None``.
+
+    The summary carries these as strings because it is persisted as JSON, but
+    every template renders them through the ``ny`` filter, which operates on
+    datetimes. Converting here keeps that filter strict rather than teaching it
+    to guess at strings.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+#: The period breakdowns the detail page offers, as
+#: ``(toggle key, label, summary attribute, note)``. Ordered coarse to fine, and
+#: the first is the default view.
+_PERIODS: tuple[tuple[str, str, str, str], ...] = (
+    ("month", "Month", "by_month",
+     "Calendar months on the NY clock. The bucket is the month the setup "
+     "triggered in, not the month it closed in."),
+    ("week", "Week", "by_week",
+     "ISO weeks (Monday-based). A week belongs to the year holding its "
+     "Thursday, so a January date can sit in the previous year's final week."),
+    ("day_of_week", "Day of week", "by_day_of_week",
+     "Weekday of the entry. A strategy that only pays on two days of the week "
+     "is a different proposition from one that pays every day."),
+    ("hour", "Hour of day", "by_hour",
+     "NY-clock hour the setup triggered in — the same time base as the session "
+     "and Silver Bullet breakdowns."),
+)
+
+
+def _period_rows(breakdown: dict) -> list[dict]:
+    """One table row per bucket, already ordered by the engine.
+
+    The engine owns the ordering (chronological for months and weeks, calendar
+    for weekdays) because it is a statement about the data, not about the
+    markup; this only shapes it for the template.
+    """
+    return [{"bucket": key, **stats} for key, stats in (breakdown or {}).items()]
+
+
 # --------------------------------------------------------------------------- #
 # App factory
 # --------------------------------------------------------------------------- #
@@ -236,8 +302,13 @@ def create_app(settings: Settings | None = None,
         The auto-trading badge in ``base.html`` is a safety affordance: whether
         the bot may place orders must be visible on *every* page, not only on the
         routes that happen to pass ``cfg`` through explicitly.
+
+        ``ny_offset_hours`` travels for the same reason: the charts label their
+        axes in the browser, and the browser must use the *same* fixed NY offset
+        the server's ``ny`` filter does (``trading.time_utils.NY_OFFSET_HOURS``),
+        or a chart label would disagree with the table cell next to it.
         """
-        return {"cfg": cfg}
+        return {"cfg": cfg, "ny_offset_hours": tu.NY_OFFSET_HOURS}
 
     # ------------------------------------------------------------------ #
     # Repository per request
@@ -330,6 +401,7 @@ def create_app(settings: Settings | None = None,
                 "totals": batch_totals(summaries),
                 "best": ranked[0] if ranked else None,
                 "is_single": entry["batch_id"].startswith("single:"),
+                "duration": _span(entry.get("start_utc"), entry.get("end_utc")),
             })
         return render_template(
             "backtests.html",
@@ -357,6 +429,8 @@ def create_app(settings: Settings | None = None,
         summaries = _asset_summaries(rows)
         ranked = rank_assets(summaries)
         comparison = ranked
+        start_utc = min((r.start_utc for r in rows if r.start_utc), default=None)
+        end_utc = max((r.end_utc for r in rows if r.end_utc), default=None)
 
         return render_template(
             "backtests_batch.html",
@@ -366,8 +440,9 @@ def create_app(settings: Settings | None = None,
             best=comparison[0] if comparison else None,
             session_matrix=_breakdown_matrix(ranked, "by_session"),
             silver_bullet_matrix=_breakdown_matrix(ranked, "by_silver_bullet"),
-            start_utc=min((r.start_utc for r in rows if r.start_utc), default=None),
-            end_utc=max((r.end_utc for r in rows if r.end_utc), default=None),
+            start_utc=start_utc,
+            end_utc=end_utc,
+            duration=_span(start_utc, end_utc),
         )
 
     @app.get("/backtests/<int:bt_id>")
@@ -377,14 +452,31 @@ def create_app(settings: Settings | None = None,
         if bt is None:
             abort(404)
         trades = repo.backtest_trades(bt_id)
-        curve = (bt.summary_json or {}).get("equity_curve") or []
+        sm = tidy_summary(bt.summary_json)
+        curve = sm.get("equity_curve") or []
+
+        # Stated explicitly rather than left for the reader to subtract: the
+        # replayed window and the window actually traded in are different spans,
+        # and a run whose first signal arrives three weeks in should say so.
+        window = {
+            "start_utc": bt.start_utc,
+            "end_utc": bt.end_utc,
+            "duration": _span(bt.start_utc, bt.end_utc),
+            "n_bars": sm.get("n_bars") or 0,
+            "first_entry_utc": _iso_dt(sm.get("first_entry_utc")),
+            "last_exit_utc": _iso_dt(sm.get("last_exit_utc")),
+        }
         return render_template(
             "backtest_detail.html",
             bt=bt,
-            summary=tidy_summary(bt.summary_json),
+            summary=sm,
             params=bt.params_json or {},
             trades=trades,
             curve=curve,
+            window=window,
+            periods=[{"key": key, "label": label, "note": note,
+                      "rows": _period_rows(sm.get(attr))}
+                     for key, label, attr, note in _PERIODS],
         )
 
     @app.get("/assets")

@@ -795,6 +795,12 @@ input[type="number"] {
 
 .chart-box-sm { height: 260px; }
 
+/* Toggled containers on the backtest detail page. `[hidden]` alone is not
+   enough for .table-responsive: it sets display:block from this same author
+   sheet, and author rules outrank the user-agent `[hidden] { display: none }`. */
+.period-panel[hidden],
+.chart-box[hidden] { display: none; }
+
 /* --------------------------------------------------------------------------
    13. Purpose-built blocks
    -------------------------------------------------------------------------- */

@@ -145,6 +145,7 @@ def test_the_chart_hosts_and_their_data_scripts_are_paired(dashboard):
     """Each canvas must ship alongside the JSON its inline script reads."""
     detail = dashboard["html"]["backtest_detail"]
     assert 'id="equityChart"' in detail and 'id="equity-data"' in detail
+    assert 'id="periodChart"' in detail and 'id="period-data"' in detail
 
     batch = dashboard["html"]["batch"]
     assert 'id="batchCurves"' in batch and 'id="batch-curves"' in batch
@@ -163,6 +164,38 @@ def test_each_chart_dataset_is_valid_json(dashboard):
     equity = re.search(r'<script id="equity-data"[^>]*>(.*?)</script>',
                        dashboard["html"]["backtest_detail"], re.S).group(1)
     assert isinstance(json.loads(equity), list)
+
+
+def test_the_period_payload_carries_every_granularity(dashboard):
+    """The chart redraws from this blob when the toggle changes, so a missing
+    entry would silently blank the chart rather than 404."""
+    import json
+
+    payload = re.search(r'<script id="period-data"[^>]*>(.*?)</script>',
+                        dashboard["html"]["backtest_detail"], re.S).group(1)
+    parsed = json.loads(payload)
+
+    assert [p["key"] for p in parsed] == ["month", "week", "day_of_week", "hour"]
+    for period in parsed:
+        # Shaped for the chart and for the table from the same rows, which is
+        # why a bucket carries the counts *and* the R figures.
+        for key in ("label", "note", "rows"):
+            assert key in period, f"{period['key']} has no {key}"
+
+
+def test_the_detail_page_has_the_period_and_trade_filter_controls(dashboard):
+    """Both are wired in the page's own inline script, so the ids are the
+    contract between the markup and that script."""
+    detail = dashboard["html"]["backtest_detail"]
+    for element in ("period-analysis", "period-switch", "period-chart-box",
+                    "period-empty", "period-note", "trade-filter", "trade-from",
+                    "trade-to", "trade-filter-clear", "trade-filter-summary",
+                    "trade-rows", "trade-count"):
+        assert f'id="{element}"' in detail, f"{element} missing from the detail page"
+
+    # One table panel per granularity, all but the first collapsed.
+    assert detail.count('class="table-responsive period-panel"') == 4
+    assert detail.count("hidden>") >= 3
 
 
 def test_the_broker_catalogue_reaches_the_browser_as_data(dashboard):

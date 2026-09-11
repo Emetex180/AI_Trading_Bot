@@ -9,7 +9,11 @@
       Backtest #{{ bt.id }}
       <span class="badge tone-accent">{{ bt.asset }}</span>
     </h1>
-    <p class="page-sub mono">{{ bt.symbol or '-' }} · {{ bt.start_utc | ny }} → {{ bt.end_utc | ny }}</p>
+    <p class="page-sub mono">
+      {{ bt.symbol or '-' }} ·
+      {{ bt.start_utc | ny }} → {{ bt.end_utc | ny }} (NY)
+      {%- if window.duration %} · {{ window.duration }}{% endif %}
+    </p>
   </div>
   <div class="page-actions">
     {% if bt.batch_id %}
@@ -37,31 +41,200 @@
   {{ stat('Max consecutive losses', sm.max_consecutive_losses, 'warning') }}
 </div>
 
+{# ------------------------------------------------------------------ #}
+{# The window. Stated once, in full, before any figure that depends on #}
+{# it -- "win rate 62%" means nothing until you know over what.         #}
+{# ------------------------------------------------------------------ #}
+<div class="card mb-4">
+  <div class="card-header">Replay window</div>
+  <div class="card-body">
+    <dl class="meta-grid">
+      <div>
+        <dt>From (NY)</dt>
+        <dd class="mono">{{ bt.start_utc | ny or '—' }}</dd>
+      </div>
+      <div>
+        <dt>To (NY)</dt>
+        <dd class="mono">{{ bt.end_utc | ny or '—' }}</dd>
+      </div>
+      <div>
+        <dt>Duration</dt>
+        <dd class="mono">{{ window.duration or '—' }}</dd>
+      </div>
+      <div>
+        <dt>M1 candles replayed</dt>
+        <dd class="mono">{{ '{:,}'.format(window.n_bars) if window.n_bars else '—' }}</dd>
+      </div>
+      <div>
+        <dt>First entry (NY)</dt>
+        <dd class="mono">{{ window.first_entry_utc | ny or '—' }}</dd>
+      </div>
+      <div>
+        <dt>Last exit (NY)</dt>
+        <dd class="mono">{{ window.last_exit_utc | ny or '—' }}</dd>
+      </div>
+      <div>
+        <dt>Run created (NY)</dt>
+        <dd class="mono">{{ bt.created_at | ny }}</dd>
+      </div>
+    </dl>
+  </div>
+  <div class="card-note">
+    The replay window is what was fed to the strategy; the span from first entry
+    to last exit is what it actually traded, and is normally narrower at both
+    ends. Candle counts are the broker's M1 bars, so weekends and closed hours
+    are absent rather than empty.
+  </div>
+</div>
+
 <div class="row g-4">
   <div class="col-xl-8">
-    <div class="card mb-4">
+    <div class="card">
       <div class="card-header">Equity curve (R multiples)</div>
       <div class="card-body">
         <div class="chart-box chart-box-sm">
           <canvas id="equityChart"></canvas>
         </div>
       </div>
+      <div class="card-note">
+        Plotted on the exit time, on the NY clock. Cumulative R is risk-normalised,
+        so it is comparable across assets and lot sizes.
+      </div>
+    </div>
+  </div>
+
+  <div class="col-xl-4">
+    <div class="card">
+      <div class="card-header">Meta</div>
+      <table class="table kv-table">
+        <tbody>
+          <tr><th>Asset</th><td class="fw-semibold">{{ bt.asset }}</td></tr>
+          <tr><th>Symbol</th><td class="mono">{{ bt.symbol or '-' }}</td></tr>
+          <tr><th>Direction split</th>
+              <td class="mono">{{ sm.n_long }} long / {{ sm.n_short }} short</td></tr>
+          <tr><th>Avg bars held</th><td class="mono">{{ '%.0f' | format(sm.avg_bars_held) }}</td></tr>
+          <tr><th>Best / worst</th>
+              <td class="mono">{{ '%.2f' | format(sm.best_trade_r) }} / {{ '%.2f' | format(sm.worst_trade_r) }} R</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{# ------------------------------------------------------------------ #}
+{# How a trade performed in a given period. The grouping is done in    #}
+{# the engine on the NY-clock *entry* time, so "February" means the    #}
+{# month the setup triggered in, not the month it happened to close.   #}
+{# ------------------------------------------------------------------ #}
+<div class="card my-4" id="period-analysis">
+  <div class="card-header">
+    <span>Performance by period</span>
+    <span class="card-header-note">NY clock · bucketed on entry time</span>
+  </div>
+  <div class="card-body">
+    {# A plain utility row rather than `.filter-bar`: that class carries its own
+       surface, padding and shadow, which would double-box it inside this card. #}
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3" id="period-switch"
+         role="group" aria-label="Period granularity">
+      {% for p in periods %}
+      <button type="button" class="btn btn-sm {{ 'btn-primary' if loop.first else 'btn-outline-secondary' }}"
+              data-period="{{ p.key }}" aria-pressed="{{ 'true' if loop.first else 'false' }}">
+        {{ p.label }}
+      </button>
+      {% endfor %}
+      <span class="form-hint ms-auto" id="period-note">{{ periods[0].note if periods }}</span>
+    </div>
+    <div class="chart-box chart-box-sm" id="period-chart-box">
+      <canvas id="periodChart"></canvas>
+    </div>
+    <div class="empty-state d-none" id="period-empty">
+      No closed trades in this granularity.
+    </div>
+  </div>
+
+  {# Every granularity is rendered server-side rather than rebuilt in the
+     browser: the tables stay complete with scripting off, and a bucket is
+     only ever present when a trade landed in it. #}
+  {% for p in periods %}
+  <div class="table-responsive period-panel" data-period="{{ p.key }}"
+       {% if not loop.first %}hidden{% endif %}>
+    <table class="table table-hover">
+      <thead>
+        <tr>
+          <th>{{ p.label }}</th>
+          <th class="text-end">Trades</th>
+          <th class="text-end">Wins</th>
+          <th class="text-end">Win rate</th>
+          <th class="text-end">Total R</th>
+          <th class="text-end">Expectancy</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in p.rows %}
+        <tr>
+          <td class="mono fw-semibold">{{ r.bucket }}</td>
+          <td class="mono text-end">{{ r.n_trades }}</td>
+          <td class="mono text-end">{{ r.n_wins }}</td>
+          <td class="mono text-end">{{ '%.1f%%' | format(r.win_rate * 100) }}</td>
+          <td class="mono text-end {{ 'text-pos' if r.total_r > 0 else ('text-neg' if r.total_r < 0 else '') }}">
+            {{ '%.2f' | format(r.total_r) }}</td>
+          <td class="mono text-end fw-semibold {{ 'text-pos' if r.expectancy > 0 else ('text-neg' if r.expectancy < 0 else 'text-muted') }}">
+            {{ '%.2f' | format(r.expectancy) }}</td>
+        </tr>
+      {% else %}
+        {% set nothing = 'No closed trades to break down by ' ~ p.label | lower ~ '.' %}
+        {{ empty(6, nothing) }}
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+
+  <div class="card-note">
+    Open trades are excluded from every bucket — a period's expectancy is only
+    ever computed over trades that actually closed. A bucket with two or three
+    trades is noise, not an edge.
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-xl-8">
+    {# Filtering happens in the browser against the stored rows, so this is a
+       plain control strip rather than a form -- there is nothing to submit. #}
+    <div class="filter-bar mb-4" id="trade-filter">
+      <div>
+        <label class="form-label d-block" for="trade-from">Entry from (NY)</label>
+        <input type="text" class="form-control form-control-sm" id="trade-from"
+               placeholder="YYYY-MM-DD" autocomplete="off">
+      </div>
+      <div>
+        <label class="form-label d-block" for="trade-to">Entry to (NY)</label>
+        <input type="text" class="form-control form-control-sm" id="trade-to"
+               placeholder="YYYY-MM-DD" autocomplete="off">
+      </div>
+      <button type="button" class="btn btn-sm btn-outline-secondary"
+              id="trade-filter-clear">Clear</button>
+      <div class="ms-auto">
+        <div class="form-hint" id="trade-filter-summary"></div>
+      </div>
     </div>
 
     <div class="card">
       <div class="card-header">
         <span>Trades</span>
-        <span class="badge tone-secondary">{{ trades | length }}</span>
+        <span class="badge tone-secondary" id="trade-count">{{ trades | length }}</span>
       </div>
-      <div class="table-responsive">
-      <table class="table table-hover">
+      <div class="table-responsive table-scroll">
+      <table class="table table-hover" id="trade-rows">
         <thead>
           <tr><th>#</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Entry (NY)</th><th>Exit (NY)</th>
               <th>RR</th><th>PnL (R)</th><th>Bars</th><th>Outcome</th><th>Reason</th></tr>
         </thead>
         <tbody>
         {% for t in trades %}
-          <tr>
+          {# Filtered in the browser against the same NY string the cell shows,
+             so what the filter matches is exactly what the user can read. #}
+          <tr data-entry="{{ t.entry_time_utc | ny }}" data-pnl="{{ '%.4f' | format(t.pnl) }}">
             <td class="text-muted mono">{{ loop.index }}</td>
             <td>{{ dir_badge(t.direction) }}</td>
             <td class="mono">{{ t.entry | price(t.asset) }}</td>
@@ -85,24 +258,6 @@
   </div>
 
   <div class="col-xl-4">
-    <div class="card mb-4">
-      <div class="card-header">Meta</div>
-      <table class="table kv-table">
-        <tbody>
-          <tr><th>Asset</th><td class="fw-semibold">{{ bt.asset }}</td></tr>
-          <tr><th>Symbol</th><td class="mono">{{ bt.symbol or '-' }}</td></tr>
-          <tr><th>Direction split</th>
-              <td class="mono">{{ sm.n_long }} long / {{ sm.n_short }} short</td></tr>
-          <tr><th>Avg bars held</th><td class="mono">{{ '%.0f' | format(sm.avg_bars_held) }}</td></tr>
-          <tr><th>Best / worst</th>
-              <td class="mono">{{ '%.2f' | format(sm.best_trade_r) }} / {{ '%.2f' | format(sm.worst_trade_r) }} R</td></tr>
-          <tr><th>Start (NY)</th><td class="mono">{{ bt.start_utc | ny }}</td></tr>
-          <tr><th>End (NY)</th><td class="mono">{{ bt.end_utc | ny }}</td></tr>
-          <tr><th>Created</th><td class="mono">{{ bt.created_at | ny }}</td></tr>
-        </tbody>
-      </table>
-    </div>
-
     {% if sm.by_session %}
     <div class="card mb-4">
       <div class="card-header">By session</div>
@@ -119,6 +274,9 @@
           {% endfor %}
         </tbody>
       </table>
+      <div class="card-note">
+        Ranked best total R first — where the edge lives, not when.
+      </div>
     </div>
     {% endif %}
 
@@ -132,42 +290,217 @@
 
 {% block scripts %}
 <script id="equity-data" type="application/json">{{ curve | tojson }}</script>
+<script id="period-data" type="application/json">[
+{% for p in periods %}{"key": {{ p.key | tojson }}, "label": {{ p.label | tojson }},
+ "note": {{ p.note | tojson }}, "rows": {{ p.rows | tojson }}}{% if not loop.last %},{% endif %}{% endfor %}
+]</script>
 <script>
   (function () {
     "use strict";
-    var points = JSON.parse(document.getElementById('equity-data').textContent);
-    var canvas = document.getElementById('equityChart');
-    if (!canvas) return;
-    if (!points.length) {
-      canvas.parentNode.innerHTML = '<div class="empty-state">No closed trades to plot.</div>';
-      return;
-    }
+    var utc = window.ictUtc;
     var theme = window.ictChartTheme;
-    new Chart(canvas, {
-      type: 'line',
-      data: {
-        labels: points.map(function (p) {
-          return p[0] ? new Date(p[0]).toLocaleString() : '';
-        }),
-        datasets: [{
-          label: 'Cumulative R',
-          data: points.map(function (p) { return p[1]; }),
-          borderColor: theme.accent,
-          backgroundColor: theme.accentFill,
-          fill: true, tension: 0, pointRadius: 2, pointHoverRadius: 4,
-          borderWidth: 2,
-        }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
-          y: { title: { display: true, text: 'R multiples' } },
+    var canvas = document.getElementById('equityChart');
+
+    // -- Equity curve -------------------------------------------------- //
+    var points = JSON.parse(document.getElementById('equity-data').textContent);
+    if (canvas && points.length) {
+      // x is epoch ms so the axis needs no date adapter, and parsing through
+      // ictUtc keeps the label on the same clock as the table's Entry (NY).
+      var marks = points.map(function (p) {
+        return { x: utc.parse(p[0]), y: p[1] };
+      });
+      new Chart(canvas, {
+        type: 'line',
+        data: {
+          datasets: [{
+            label: 'Cumulative R',
+            data: marks,
+            borderColor: theme.accent,
+            backgroundColor: theme.accentFill,
+            fill: true, tension: 0, pointRadius: 2, pointHoverRadius: 4,
+            borderWidth: 2,
+          }],
         },
-      },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: function (items) { return utc.label(items[0].parsed.x); },
+              },
+            },
+          },
+          scales: {
+            x: {
+              type: 'linear',
+              title: {
+                display: true,
+                text: '{{ bt.start_utc | ny }} → {{ bt.end_utc | ny }} (NY)',
+              },
+              ticks: {
+                maxRotation: 0, autoSkip: true, maxTicksLimit: 8,
+                callback: function (value) { return utc.label(value); },
+              },
+            },
+            y: { title: { display: true, text: 'R multiples' } },
+          },
+        },
+      });
+    } else if (canvas) {
+      canvas.parentNode.innerHTML =
+        '<div class="empty-state">No closed trades to plot.</div>';
+    }
+
+    // -- Performance by period ----------------------------------------- //
+    var periodCanvas = document.getElementById('periodChart');
+    var chartBox = document.getElementById('period-chart-box');
+    var emptyBox = document.getElementById('period-empty');
+    if (periodCanvas) {
+
+    var periods = JSON.parse(document.getElementById('period-data').textContent);
+    var byKey = {};
+    periods.forEach(function (p) { byKey[p.key] = p; });
+
+    // Read the tokens rather than repeating the hexes, so the bars match the
+    // .text-pos / .text-neg colouring used in the tables below them.
+    var tokens = getComputedStyle(document.documentElement);
+    var POS = tokens.getPropertyValue('--c-pos').trim() || '#10b981';
+    var NEG = tokens.getPropertyValue('--c-neg').trim() || '#f43f5e';
+
+    var chart = null;
+
+    function draw(key) {
+      var period = byKey[key];
+      if (chart) { chart.destroy(); chart = null; }
+
+      // The canvas is hidden rather than replaced, because the granularity
+      // switch can draw again afterwards -- unlike the equity chart above,
+      // which is drawn once and has nothing to redraw.
+      var hasRows = Boolean(period && period.rows.length);
+      if (chartBox) chartBox.hidden = !hasRows;
+      if (emptyBox) emptyBox.classList.toggle('d-none', hasRows);
+      if (!hasRows) return;
+
+      var rows = period.rows;
+      var bar = {
+        label: 'Total R',
+        data: rows.map(function (r) { return r.total_r; }),
+        backgroundColor: rows.map(function (r) {
+          return r.total_r < 0 ? NEG : POS;
+        }),
+        borderWidth: 0,
+        borderRadius: 3,
+      };
+
+      chart = new Chart(periodCanvas, {
+        type: 'bar',
+        data: { labels: rows.map(function (r) { return r.bucket; }), datasets: [bar] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: function (item) {
+                  var r = rows[item.dataIndex];
+                  return [r.total_r.toFixed(2) + ' R over ' + r.n_trades +
+                          ' trade(s)', 'win rate ' +
+                          (r.win_rate * 100).toFixed(1) + '%',
+                          'expectancy ' + r.expectancy.toFixed(2) + ' R'];
+                },
+              },
+            },
+          },
+          scales: {
+            x: { title: { display: true, text: period.label } },
+            y: { title: { display: true, text: 'Total R' } },
+          },
+        },
+      });
+    }
+
+    var switchBar = document.getElementById('period-switch');
+    if (switchBar) {
+      switchBar.addEventListener('click', function (event) {
+        var button = event.target.closest('button[data-period]');
+        if (!button) return;
+        var key = button.getAttribute('data-period');
+
+        Array.prototype.forEach.call(
+          switchBar.querySelectorAll('button[data-period]'), function (b) {
+            var on = b === button;
+            b.className = 'btn btn-sm ' +
+              (on ? 'btn-primary' : 'btn-outline-secondary');
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
+          });
+
+        Array.prototype.forEach.call(
+          document.querySelectorAll('.period-panel'), function (panel) {
+            panel.hidden = panel.getAttribute('data-period') !== key;
+          });
+
+        var note = document.getElementById('period-note');
+        if (note) note.textContent = byKey[key] ? byKey[key].note : '';
+
+        draw(key);
+      });
+    }
+    draw(periods.length ? periods[0].key : null);
+    }
+
+    // -- Trades table filter ------------------------------------------- //
+    /* Matched against the NY string the cell already displays, so a filter is
+     * answerable by reading the table: no timezone arithmetic happens here, and
+     * the endpoints are inclusive day bounds compared as text. */
+    var from = document.getElementById('trade-from');
+    var to = document.getElementById('trade-to');
+    var table = document.getElementById('trade-rows');
+
+    function applyFilter() {
+      if (!table) return;
+      var lo = from ? from.value.trim() : '';
+      var hi = to ? to.value.trim() : '';
+      var total = 0, shown = 0, r = 0;
+
+      Array.prototype.forEach.call(
+        table.tBodies[0].querySelectorAll('tr[data-entry]'), function (row) {
+          total += 1;
+          var day = (row.getAttribute('data-entry') || '').slice(0, 10);
+          // A bare date therefore includes that whole day, which is what
+          // "entry to 2026-03-28" has to mean to be useful.
+          var keep = !((lo && day < lo) || (hi && day > hi));
+          row.hidden = !keep;
+          if (keep) {
+            shown += 1;
+            r += parseFloat(row.getAttribute('data-pnl')) || 0;
+          }
+        });
+
+      var summary = document.getElementById('trade-filter-summary');
+      if (summary) {
+        summary.textContent = (lo || hi)
+          ? shown + ' of ' + total + ' trade(s) · ' + r.toFixed(2) + ' R shown'
+          : '';
+      }
+      var badge = document.getElementById('trade-count');
+      if (badge) badge.textContent = (lo || hi) ? shown + ' / ' + total : total;
+    }
+
+    [from, to].forEach(function (input) {
+      if (input) input.addEventListener('input', applyFilter);
     });
+    var clear = document.getElementById('trade-filter-clear');
+    if (clear) {
+      clear.addEventListener('click', function () {
+        if (from) from.value = '';
+        if (to) to.value = '';
+        applyFilter();
+      });
+    }
+    applyFilter();
   })();
 </script>
 {% endblock %}

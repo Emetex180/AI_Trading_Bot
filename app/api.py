@@ -607,7 +607,12 @@ def register_api(app) -> None:
         last_candle = live.get("last_candle_utc")
         live["last_candle_ny"] = (tu.utc_to_ny(last_candle).strftime("%Y-%m-%d %H:%M")
                                   if last_candle else "")
-        payload["backtest"] = _add_ny_times(payload["backtest"], ("finished_at_utc",))
+        # The window travels with the job state so the page can say *what* is
+        # being replayed, not just that something is. ``mode``/``bars`` already
+        # describe a candle-count run; a range run needs these two dates.
+        payload["backtest"] = _add_ny_times(payload["backtest"],
+                                            ("finished_at_utc", "start_utc",
+                                             "end_utc"))
         payload["probe"] = _add_ny_times(payload["probe"],
                                          ("oldest_utc", "newest_utc",
                                           "finished_at_utc"))

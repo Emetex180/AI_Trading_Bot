@@ -42,6 +42,12 @@ def _save_backtest(repo):
             "n_losses": 0, "win_rate": 1.0, "profit_factor": float("inf"),
             "total_r": 2.0, "max_drawdown_r": 0.0,
             "equity_curve": [["2026-01-01T14:00:00", 2.0]],
+            "n_bars": 1440,
+            "first_entry_utc": "2026-01-01T13:10:00",
+            "last_exit_utc": "2026-01-01T14:00:00",
+            "by_month": {"2026-01": {"n_trades": 1, "n_wins": 1,
+                                     "win_rate": 1.0, "total_r": 2.0,
+                                     "expectancy": 2.0}},
         },
         trades=[dict(asset="TEST", direction="buy", entry=101.7, sl=99.5, tp=106.0,
                      exit_price=106.0, entry_time_utc=datetime(2026, 1, 1, 13, 10),
@@ -123,6 +129,43 @@ def test_backtests_list_and_detail_with_equity_chart():
     text = resp.get_data(as_text=True)
     assert "Equity curve" in text
     assert "WIN" in text and "equityChart" in text
+
+
+def test_backtest_detail_states_the_window_and_analyses_it_by_period():
+    """The two things the result page has to answer: over what, and when.
+
+    A win rate is meaningless until you know the window it was earned in, and
+    which period carried the result is the follow-up question.
+    """
+    repo = _repo()
+    _save_backtest(repo)
+    bt = repo.recent_backtests()[0]
+
+    text = _client(repo).get(f"/backtests/{bt.id}").get_data(as_text=True)
+
+    # The window, in full: both ends, the duration and the bar count. The seeded
+    # row spans 2026-01-01T00:00Z to 2026-01-02T00:00Z, i.e. 2025-12-31 20:00 to
+    # 2026-01-01 20:00 on the NY clock (UTC-4).
+    assert "Replay window" in text
+    assert "2025-12-31 20:00" in text
+    assert "2026-01-01 20:00" in text
+    assert "1 day, 0 h" in text
+    assert "1,440" in text                     # n_bars, thousands-separated
+    assert "2026-01-01 09:10" in text          # first entry, on the NY clock
+
+    # The analysis, with all four granularities present and the seeded bucket
+    # rendered -- into the table *and* into the chart's data.
+    assert "Performance by period" in text
+    for key in ("month", "week", "day_of_week", "hour"):
+        assert f'data-period="{key}"' in text
+    assert '<td class="mono fw-semibold">2026-01</td>' in text
+    assert '"bucket": "2026-01"' in text
+
+    # The trades table is filterable, which needs a machine-readable entry time
+    # on each row and the controls that read it.
+    assert 'data-entry="2026-01-01 09:10"' in text
+    assert 'data-pnl="2.0000"' in text
+    assert 'id="trade-from"' in text and 'id="trade-to"' in text
 
 
 def _save_batch_asset(repo, batch_id, asset, total_r, wins, losses):

@@ -39,6 +39,46 @@
   };
   window.ictChartTheme = CHART;
 
+  /* ------------------------------------------------------------------ */
+  /* Time on the project's NY clock                                      */
+  /*                                                                     */
+  /* Two things the browser must not guess at:                          */
+  /*                                                                     */
+  /*  1. Stored backtest timestamps are naive UTC ("2026-01-02T14:00:00").*/
+  /*     Date.parse reads a bare timestamp as *local* time, so the old    */
+  /*     chart labels were silently shifted by the viewer's UTC offset and*/
+  /*     could not be reconciled with the table beside them. The suffix is*/
+  /*     added here rather than migrating stored rows, so history written */
+  /*     before this fix reads correctly too.                             */
+  /*  2. "NY" in this project is a fixed UTC-4 offset, not                */
+  /*     America/New_York with DST (trading.time_utils.NY_OFFSET_HOURS).  */
+  /*     base.html publishes that offset so `label` renders byte-identical*/
+  /*     to the server's `ny` Jinja filter.                              */
+  /*                                                                     */
+  /* Published on `window` so both the detail and the batch page can use  */
+  /* it instead of each rolling its own.                                  */
+  /* ------------------------------------------------------------------ */
+  var NY_MS = (window.ictClock && window.ictClock.nyOffsetHours !== undefined
+               ? window.ictClock.nyOffsetHours : -4) * 3600 * 1000;
+
+  /* Naive or zoned ISO string -> epoch ms, always read as UTC. */
+  function utcMs(value) {
+    if (!value) return NaN;
+    var s = String(value);
+    if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(s)) s += "Z";
+    return Date.parse(s);
+  }
+
+  /* Epoch ms -> "YYYY-MM-DD HH:MM" on the NY clock, matching the server's
+   * `ny` filter. Shifting the instant and formatting in UTC avoids toISOString's
+   * own timezone conversion, which would undo the shift. */
+  function nyLabel(ms) {
+    if (!isFinite(ms)) return "";
+    return new Date(ms + NY_MS).toISOString().slice(0, 16).replace("T", " ");
+  }
+
+  window.ictUtc = { parse: utcMs, label: nyLabel };
+
   if (window.Chart) {
     var C = window.Chart;
     C.defaults.color = "#97a5bd";
@@ -224,6 +264,18 @@
       (bt.state === "error" ? " bg-danger" : (bt.state === "done" ? " bg-success" : ""));
   }
 
+  /* Which period a run covers, in the same terms the form was filled in with.
+   * A range run reports its two NY dates; a candle-count run can only report the
+   * count, because the window is whatever the broker's history turns out to be
+   * until the bars are fetched. */
+  function backtestWindow(bt) {
+    if (bt.mode === "range" && bt.start_ny && bt.end_ny) {
+      return bt.start_ny + " → " + bt.end_ny + " (NY)";
+    }
+    if (bt.bars) return "the last " + bt.bars + " M1 candles";
+    return "";
+  }
+
   function renderBacktest(bt) {
     var badge = byId("backtest-state-badge");
     if (!badge) return;
@@ -236,14 +288,19 @@
 
     renderBacktestProgress(bt);
 
+    var replayWindow = backtestWindow(bt);
     if (bt.state === "queued") {
-      show("backtest-message", bt.queued_reason || "Queued.", "warning");
+      show("backtest-message", (bt.queued_reason || "Queued.") +
+        (replayWindow ? " Window: " + replayWindow + "." : ""), "warning");
     } else if (bt.state === "running" || bt.state === "starting") {
       var progress = bt.progress_total
         ? " (" + bt.progress_done + "/" + bt.progress_total + " assets)" : "";
-      show("backtest-message", "Running" + progress + "…", "info");
+      show("backtest-message",
+           "Running" + (replayWindow ? " over " + replayWindow : "") + progress + "…",
+           "info");
     } else if (bt.state === "done") {
       show("backtest-message", "Finished " + (bt.finished_at_ny || "") +
+        " — window " + (replayWindow || "unknown") +
         (bt.batch_id ? " — opening the comparison…" : ""), "success");
     }
 

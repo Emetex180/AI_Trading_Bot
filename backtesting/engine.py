@@ -23,7 +23,10 @@ to compare assets against each other.
 
 Session attribution reuses the live strategy's :mod:`trading.sessions` helpers
 against the trade's NY-clock entry time, so a backtest breakdown and a live
-signal agree about which session a setup belongs to.
+signal agree about which session a setup belongs to. The same entry time drives
+the *period* breakdowns (month, ISO week, weekday, hour), so "how did February
+go?" is answered about the periods setups belonged to rather than the periods
+their exits happened to land in.
 """
 from __future__ import annotations
 
@@ -41,6 +44,11 @@ DEFAULT_MAX_HOLD_M1 = 60 * 12  # allow multi-hour holds by default
 
 #: Bucket key for trades whose entry falls outside every named ICT window.
 OUTSIDE_SESSION = "outside"
+
+#: Weekday abbreviations in calendar order. ``strftime("%a")`` is locale
+#: dependent, so the key is built from this table rather than from a format
+#: string that could render as "Mo." on a non-English machine.
+DAY_NAMES: tuple[str, ...] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 # --------------------------------------------------------------------------- #
@@ -76,6 +84,18 @@ class BacktestSummary:
     # --- where the edge actually lives -------------------------------------- #
     by_session: dict[str, dict[str, Any]] = field(default_factory=dict)
     by_silver_bullet: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # --- when the edge actually lives --------------------------------------- #
+    # Same shape as the two above, keyed on the entry's NY clock. Kept as four
+    # separate dicts rather than one nested map so every consumer (``tidy``, the
+    # templates, the batch matrices) treats a period exactly like a session.
+    by_month: dict[str, dict[str, Any]] = field(default_factory=dict)
+    by_week: dict[str, dict[str, Any]] = field(default_factory=dict)
+    by_day_of_week: dict[str, dict[str, Any]] = field(default_factory=dict)
+    by_hour: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # --- the window itself -------------------------------------------------- #
+    n_bars: int = 0                      # M1 candles replayed
+    first_entry_utc: datetime | None = None
+    last_exit_utc: datetime | None = None
 
     @property
     def win_rate(self) -> float:
@@ -163,6 +183,18 @@ class BacktestSummary:
             "short_win_rate": round(self.short_win_rate, 4),
             "by_session": self.by_session,
             "by_silver_bullet": self.by_silver_bullet,
+            "by_month": self.by_month,
+            "by_week": self.by_week,
+            "by_day_of_week": self.by_day_of_week,
+            "by_hour": self.by_hour,
+            # The window is stored on the ``Backtest`` row, not in this blob --
+            # except for these two, which are properties of the *trades* and so
+            # have no column of their own.
+            "n_bars": self.n_bars,
+            "first_entry_utc": (self.first_entry_utc.isoformat()
+                                if self.first_entry_utc else None),
+            "last_exit_utc": (self.last_exit_utc.isoformat()
+                              if self.last_exit_utc else None),
             "equity_curve": [[t, round(eq, 4)] for t, eq in self.equity_curve],
         }
 
@@ -216,12 +248,77 @@ def _silver_bullet_key(entry_time_utc: datetime) -> str:
     return key or OUTSIDE_SESSION
 
 
-def _breakdown(trades: list["BacktestTrade"],
-               key_fn: Callable[[datetime], str]) -> dict[str, dict[str, Any]]:
-    """Group closed trades into per-bucket statistics, best total R first.
+# --------------------------------------------------------------------------- #
+# Period keys (entry time, on the project NY clock)
+# --------------------------------------------------------------------------- #
+def _month_key(entry_time_utc: datetime) -> str:
+    """Calendar month of the entry, e.g. ``2026-01``."""
+    return tu.utc_to_ny(entry_time_utc).strftime("%Y-%m")
 
-    Deterministic ordering (total R, then bucket name) so two runs over the same
-    trades render identically.
+
+def _week_key(entry_time_utc: datetime) -> str:
+    """ISO week of the entry, e.g. ``2026-W03``.
+
+    ISO weeks start on Monday and belong to the year containing their Thursday,
+    which is why this is built from ``isocalendar()`` rather than from the
+    month/strftime pair: those two disagree about the turn of the year.
+    """
+    iso = tu.utc_to_ny(entry_time_utc).isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def _weekday_key(entry_time_utc: datetime) -> str:
+    """Weekday of the entry, e.g. ``Mon``."""
+    return DAY_NAMES[tu.utc_to_ny(entry_time_utc).weekday()]
+
+
+def _hour_key(entry_time_utc: datetime) -> str:
+    """Hour of the entry on the NY clock, e.g. ``14:00``."""
+    return f"{tu.utc_to_ny(entry_time_utc).hour:02d}:00"
+
+
+def _chronological(bucket: tuple[str, dict[str, Any]]) -> Any:
+    """Ordering key for buckets whose key string already sorts into time order.
+
+    ``2026-01``, ``2026-W03`` and ``14:00`` all sort correctly as text, which is
+    exactly why the key functions above pad the week and the hour. Weekdays do
+    not, and use :func:`_weekday_order`.
+    """
+    return bucket[0]
+
+
+def _weekday_order(bucket: tuple[str, dict[str, Any]]) -> int:
+    """Ordering key placing weekdays in Mon..Sun order, not alphabetically."""
+    key = bucket[0]
+    return DAY_NAMES.index(key) if key in DAY_NAMES else len(DAY_NAMES)
+
+
+#: The period breakdowns, as ``(summary attribute, bucket key, ordering key)``.
+#:
+#: A table rather than four hand-written blocks so a fifth granularity is one
+#: line here plus a template toggle. ``_summarize`` loops it, ``tidy`` and the
+#: templates read the resulting attributes by name.
+PERIOD_BREAKDOWNS: tuple[tuple[str, Callable[[datetime], str],
+                              Callable[[tuple[str, dict[str, Any]]], Any]], ...] = (
+    ("by_month", _month_key, _chronological),
+    ("by_week", _week_key, _chronological),
+    ("by_day_of_week", _weekday_key, _weekday_order),
+    ("by_hour", _hour_key, _chronological),
+)
+
+
+def _breakdown(trades: list["BacktestTrade"],
+               key_fn: Callable[[datetime], str],
+               order: Callable[[tuple[str, dict[str, Any]]], Any] | None = None,
+               ) -> dict[str, dict[str, Any]]:
+    """Group closed trades into per-bucket statistics.
+
+    Buckets are ordered by ``order`` when given, and otherwise best total R
+    first (then bucket name, so two runs over the same trades render
+    identically). The two callers want different things from the same numbers:
+    sessions are a *ranking* — where is the edge? — but periods are a *time
+    series*, and a month-by-month breakdown read out of date order states
+    something different from the same figures read in sequence.
     """
     grouped: dict[str, list[BacktestTrade]] = {}
     for t in trades:
@@ -238,7 +335,16 @@ def _breakdown(trades: list["BacktestTrade"],
             "total_r": round(total_r, 4),
             "expectancy": round(total_r / len(rows), 4) if rows else 0.0,
         }
+    if order is not None:
+        return dict(sorted(out.items(), key=order))
     return dict(sorted(out.items(), key=lambda kv: (-kv[1]["total_r"], kv[0])))
+
+
+def _period_breakdowns(closed: list["BacktestTrade"],
+                       ) -> dict[str, dict[str, dict[str, Any]]]:
+    """Every :data:`PERIOD_BREAKDOWNS` entry for ``closed``, keyed by attribute."""
+    return {name: _breakdown(closed, key_fn, order)
+            for name, key_fn, order in PERIOD_BREAKDOWNS}
 
 
 def _max_consecutive_losses(closed_by_time: list["BacktestTrade"]) -> int:
@@ -358,7 +464,8 @@ class BacktestRunner:
             following = candles[sig_idx + 1:]
             trades.append(simulate(sig, following, self.max_hold_m1))
 
-        summary = self._summarize(signals, trades, start_utc, end_utc)
+        summary = self._summarize(signals, trades, start_utc, end_utc,
+                                  n_bars=len(candles))
         summary.params = {
             "max_hold_m1": self.max_hold_m1,
             "asset_overrides": dict(self.asset.overrides),
@@ -368,7 +475,8 @@ class BacktestRunner:
 
     # ------------------------------------------------------------------ #
     def _summarize(self, signals: list, trades: list[BacktestTrade],
-                   start_utc: datetime | None, end_utc: datetime | None) -> BacktestSummary:
+                   start_utc: datetime | None, end_utc: datetime | None,
+                   n_bars: int = 0) -> BacktestSummary:
         closed = [t for t in trades if t.outcome in ("WIN", "LOSS")]
         wins = [t for t in closed if t.outcome == "WIN"]
         losses = [t for t in closed if t.outcome == "LOSS"]
@@ -383,6 +491,11 @@ class BacktestRunner:
 
         long_trades = [t for t in closed if t.direction == "buy"]
         short_trades = [t for t in closed if t.direction == "sell"]
+
+        # The span the strategy actually traded in. Usually narrower than the
+        # replayed window at both ends, and the difference is the point: a run
+        # that signals nothing for its first three weeks says so here.
+        exits = [t.exit_time_utc for t in closed + open_trades if t.exit_time_utc]
 
         s = BacktestSummary(
             asset=self.asset.name,
@@ -411,5 +524,10 @@ class BacktestRunner:
                            if closed else 0.0),
             by_session=_breakdown(closed, _bucket_key),
             by_silver_bullet=_breakdown(closed, _silver_bullet_key),
+            n_bars=n_bars,
+            first_entry_utc=min((t.entry_time_utc for t in closed),
+                                default=None),
+            last_exit_utc=max(exits, default=None),
+            **_period_breakdowns(closed),
         )
         return s

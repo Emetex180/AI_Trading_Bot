@@ -202,7 +202,8 @@ def test_summary_exposes_the_comparison_metrics_end_to_end():
                 "n_long", "n_short", "long_r", "short_r", "long_win_rate",
                 "short_win_rate", "max_consecutive_losses", "best_trade_r",
                 "worst_trade_r", "avg_bars_held", "by_session",
-                "by_silver_bullet"):
+                "by_silver_bullet", "by_month", "by_week", "by_day_of_week",
+                "by_hour", "n_bars", "first_entry_utc", "last_exit_utc"):
         assert key in d, f"summary_json is missing {key}"
 
     assert d["expectancy"] == d["avg_r"] == d["total_r"]  # one closed winner
@@ -215,6 +216,41 @@ def test_summary_exposes_the_comparison_metrics_end_to_end():
     # a real ICT session rather than falling through to "outside".
     assert sum(b["n_trades"] for b in d["by_session"].values()) == 1
     assert "outside" not in d["by_session"]
+    # Every period breakdown covers that same single closed trade, so they all
+    # agree with the session picture about how many trades happened.
+    for key in ("by_month", "by_week", "by_day_of_week", "by_hour"):
+        assert sum(b["n_trades"] for b in d[key].values()) == 1, key
+
+
+def test_summary_reports_the_window_it_replayed_and_traded():
+    """The window is stated as facts, not left for the reader to derive.
+
+    The replayed window and the traded span are different things: a run can
+    replay three months and signal on the last day of them, and the page has to
+    be able to say so.
+    """
+    warm, feed = build_scenario()
+    rows, prev = [], 101.7
+    for _ in range(45):
+        o, prev = prev, prev + 0.35
+        rows.append((o, o + 0.4, o - 0.1, prev))
+    candles = warm + feed + _after(feed[-1].t_ny, rows)
+
+    summary, trades = _runner().run(candles)
+    d = summary.to_dict()
+
+    assert summary.n_bars == len(candles) == d["n_bars"]
+    closed = trades[0]
+    assert d["first_entry_utc"] == closed.entry_time_utc.isoformat()
+    assert d["last_exit_utc"] == closed.exit_time_utc.isoformat()
+    # The trade starts after the replay did, which is the whole reason the two
+    # spans are reported separately.
+    assert summary.start_utc < closed.entry_time_utc
+    # The period keys are derived from that entry, so the trade lands in exactly
+    # one bucket of each -- an entry can never be in two months.
+    assert sum(b["n_trades"] for b in d["by_month"].values()) == 1
+    assert sum(b["n_trades"] for b in d["by_week"].values()) == 1
+    assert sum(b["n_trades"] for b in d["by_hour"].values()) == 1
 
 
 def test_simulate_buy_loss_on_mirror_geometry():

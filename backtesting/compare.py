@@ -25,8 +25,14 @@ _FLOAT_KEYS = (
 )
 _INT_KEYS = (
     "n_signals", "n_trades", "n_open", "n_wins", "n_losses", "n_long",
-    "n_short", "max_consecutive_losses",
+    "n_short", "max_consecutive_losses", "n_bars",
 )
+
+#: Breakdown maps, all with the same bucket -> stats shape. Period keys are read
+#: by the same code paths as session keys, so they must survive ``tidy`` the same
+#: way whether or not the row that produced them knew about them.
+_BREAKDOWN_KEYS = ("by_session", "by_silver_bullet", "by_month", "by_week",
+                   "by_day_of_week", "by_hour")
 
 
 def _num(summary: dict, key: str, default: float = 0.0) -> float:
@@ -51,9 +57,13 @@ def tidy(summary: dict | None) -> dict:
         out[key] = _num(summary, key)
     for key in _INT_KEYS:
         out[key] = int(_num(summary, key))
-    out.setdefault("by_session", {})
-    out.setdefault("by_silver_bullet", {})
+    for key in _BREAKDOWN_KEYS:
+        out.setdefault(key, {})
     out.setdefault("equity_curve", [])
+    # ISO strings of the first entry and last exit, or None when the run never
+    # traded. Deliberately not parsed: they are rendered, never ranked on.
+    out.setdefault("first_entry_utc", None)
+    out.setdefault("last_exit_utc", None)
     return out
 
 

@@ -6,7 +6,7 @@ backtest campaign says to trade, and that it never says so on no evidence.
 """
 from datetime import datetime, timedelta
 
-from backtesting.compare import batch_totals, rank_assets
+from backtesting.compare import batch_totals, rank_assets, tidy
 from backtesting.engine import OUTSIDE_SESSION, BacktestRunner, BacktestTrade
 from trading.asset_manager import Asset
 
@@ -111,6 +111,81 @@ def test_breakdown_is_empty_without_trades():
 
 
 # --------------------------------------------------------------------------- #
+# Period breakdowns
+# --------------------------------------------------------------------------- #
+def test_period_buckets_use_the_ny_clock():
+    """The bucket is the NY period the setup triggered in, not the UTC one.
+
+    An entry at 03:00 UTC on 1 January is 23:00 on 31 December in NY, so reading
+    the UTC clock would file it in the wrong month *and* the wrong year. The
+    offset is exactly what breaks here, so it is what gets pinned.
+    """
+    d = _summary_dict([_trade(outcome="WIN", pnl_r=1.0,
+                              at_ny=datetime(2025, 12, 31, 23, 0))])
+
+    assert list(d["by_month"]) == ["2025-12"]
+    assert list(d["by_hour"]) == ["23:00"]
+    assert list(d["by_day_of_week"]) == ["Wed"]
+
+
+def test_iso_week_can_disagree_with_the_month_at_a_year_boundary():
+    """The two keys answer different questions and are allowed to differ.
+
+    ISO weeks belong to the year holding their Thursday, so 31 December 2025
+    (a Wednesday) sits in 2026-W01 while its calendar month is 2025-12.
+    Deriving the week from the month would report the wrong one of these.
+    """
+    d = _summary_dict([_trade(outcome="WIN", pnl_r=1.0,
+                              at_ny=datetime(2025, 12, 31, 23, 0))])
+
+    assert list(d["by_month"]) == ["2025-12"]
+    assert list(d["by_week"]) == ["2026-W01"]
+
+
+def test_period_breakdown_reads_chronologically():
+    """Periods are a time series, so they are ordered by date, not by R.
+
+    Ranked the way sessions are, these three months would read March, January,
+    February -- so a chronological result is a real statement about the ordering
+    rule rather than an accident of the data.
+    """
+    trades = [
+        _trade(outcome="WIN", pnl_r=1.0, at_ny=datetime(2026, 1, 5, 9, 0)),
+        _trade(outcome="LOSS", pnl_r=-1.0, at_ny=datetime(2026, 2, 5, 9, 0)),
+        _trade(outcome="WIN", pnl_r=3.0, at_ny=datetime(2026, 3, 5, 9, 0)),
+    ]
+    d = _summary_dict(trades)
+
+    assert list(d["by_month"]) == ["2026-01", "2026-02", "2026-03"]
+    assert [b["total_r"] for b in d["by_month"].values()] == [1.0, -1.0, 3.0]
+
+    # The session breakdown keeps the opposite rule: where the edge lives is a
+    # ranking, and best total R first is how it is read.
+    assert list(_summary_dict([
+        _trade(outcome="WIN", pnl_r=1.0, at_ny=datetime(2026, 1, 5, 9, 0)),
+        _trade(outcome="WIN", pnl_r=5.0, at_ny=datetime(2026, 1, 5, 14, 0)),
+    ])["by_session"]) == ["ny_pm", "ny_am"]
+
+
+def test_weekdays_are_ordered_by_calendar_not_alphabetically():
+    """Fri/Sat/Sun sort wrongly as text, so the weekday order is explicit."""
+    trades = [
+        _trade(outcome="WIN", pnl_r=1.0, at_ny=datetime(2026, 3, 6, 9, 0)),  # Fri
+        _trade(outcome="WIN", pnl_r=1.0, at_ny=datetime(2026, 3, 2, 9, 0)),  # Mon
+    ]
+    assert list(_summary_dict(trades)["by_day_of_week"]) == ["Mon", "Fri"]
+
+
+def test_period_breakdowns_exclude_open_trades():
+    """An open trade has no outcome, so it cannot inform a period's edge."""
+    d = _summary_dict([
+        _trade(outcome="OPEN", pnl_r=0.0, at_ny=datetime(2026, 1, 5, 9, 0)),
+    ])
+    assert d["n_open"] == 1
+    assert d["by_month"] == {} and d["by_hour"] == {}
+
+
+# --------------------------------------------------------------------------- #
 # Ranking
 # --------------------------------------------------------------------------- #
 def _asset(asset, n_trades, expectancy, total_r):
@@ -152,6 +227,19 @@ def test_rank_assets_tolerates_summaries_written_before_the_new_metrics():
     assert row["max_consecutive_losses"] == 0
     assert row["by_session"] == {} and row["equity_curve"] == []
     assert row["tested"] is True
+
+
+def test_tidy_fills_the_period_breakdowns_on_a_legacy_row():
+    """Period breakdowns post-date the session ones, so a stored row can have
+    the first pair and not the second. ``tidy`` is the seam that keeps the
+    detail page from tripping over its own history."""
+    row = tidy({"asset": "OLD", "n_trades": 1})
+    for key in ("by_month", "by_week", "by_day_of_week", "by_hour"):
+        assert row[key] == {}, f"{key} was not defaulted"
+    assert row["n_bars"] == 0
+    # Absent, not empty-string: the template renders these through the `ny`
+    # filter, which maps None to "" and would print an empty cell otherwise.
+    assert row["first_entry_utc"] is None and row["last_exit_utc"] is None
 
 
 def test_rank_assets_of_nothing_is_empty():

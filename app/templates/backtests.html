@@ -103,7 +103,10 @@
           {% if b.is_single %}<span class="badge tone-secondary ms-1">single</span>{% endif %}
         </td>
         <td class="mono">{{ b.n_assets }}</td>
-        <td class="mono text-muted small">{{ b.start_utc | ny }} → {{ b.end_utc | ny }}</td>
+        <td class="mono">
+          {{ b.start_utc | ny }} → {{ b.end_utc | ny }}
+          {% if b.duration %}<span class="sub-value">{{ b.duration }}</span>{% endif %}
+        </td>
         <td class="mono">{{ t.n_signals }}</td>
         <td class="mono">{{ t.n_trades }}</td>
         <td class="mono">{{ '%.1f%%' | format(t.win_rate * 100) }}</td>

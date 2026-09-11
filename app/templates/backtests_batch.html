@@ -5,7 +5,7 @@
 <div class="page-head">
   <div>
     <h1 class="page-title">Backtest comparison</h1>
-    <p class="page-sub mono">{{ comparison | length }} asset(s) · {{ start_utc | ny }} → {{ end_utc | ny }}</p>
+    <p class="page-sub mono">{{ comparison | length }} asset(s) · {{ start_utc | ny }} → {{ end_utc | ny }} (NY){% if duration %} · {{ duration }}{% endif %}</p>
   </div>
   <div class="page-actions">
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('backtests_page') }}">← All backtests</a>
@@ -233,15 +233,18 @@
     if (!canvas) return;
 
     var PALETTE = window.ictChartTheme.palette;
+    var utc = window.ictUtc;
 
     var datasets = curves
       .filter(function (c) { return c.points && c.points.length; })
       .map(function (c, i) {
         return {
           label: c.asset,
-          // x is epoch ms so the axis needs no date adapter; y is cumulative R.
+          // x is epoch ms so the axis needs no date adapter; `utc.parse` reads
+          // the stored naive-UTC stamp as UTC rather than as local time, and
+          // `utc.label` renders ticks on the same NY clock as the tables.
           data: c.points.map(function (p) {
-            return { x: Date.parse(p[0]), y: p[1] };
+            return { x: utc.parse(p[0]), y: p[1] };
           }),
           borderColor: PALETTE[i % PALETTE.length],
           backgroundColor: 'transparent',
@@ -262,16 +265,24 @@
         responsive: true,
         maintainAspectRatio: false,
         interaction: { mode: 'nearest', intersect: false },
-        plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, padding: 16 } } },
+        plugins: {
+          legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, padding: 16 } },
+          tooltip: {
+            callbacks: {
+              title: function (items) { return utc.label(items[0].parsed.x); },
+            },
+          },
+        },
         scales: {
           x: {
             type: 'linear',
-            title: { display: true, text: 'Entry time' },
+            title: {
+              display: true,
+              text: 'Exit time · {{ start_utc | ny }} → {{ end_utc | ny }} (NY)',
+            },
             ticks: {
               maxRotation: 0,
-              callback: function (value) {
-                return new Date(value).toLocaleDateString();
-              },
+              callback: function (value) { return utc.label(value); },
             },
           },
           y: { title: { display: true, text: 'Cumulative R' } },

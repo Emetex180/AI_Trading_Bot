@@ -60,6 +60,11 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+{# The browser labels chart axes in time, and the server's `ny` filter stamps
+   every table cell. Both must use the one offset from trading.time_utils, or a
+   chart point and the row it came from would read as different instants. The
+   default guards a render path that never went through the app factory. #}
+<script>window.ictClock = { nyOffsetHours: {{ ny_offset_hours | default(-4) }} };</script>
 <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 {% block scripts %}{% endblock %}
 </body>
