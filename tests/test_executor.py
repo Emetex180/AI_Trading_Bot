@@ -45,13 +45,30 @@ def _signal(**kw) -> Signal:
     return Signal(**base)
 
 
-def _settings(auto_trading: bool):
+def _settings(auto_trading: bool, auto_trading_override=None):
     from types import SimpleNamespace
 
     # The executor builds its own RiskManager from these when none is injected,
     # and reads order_deviation when composing the order request.
-    return SimpleNamespace(auto_trading=auto_trading, min_rr=1.5,
-                           risk_percent=1.0, order_deviation=20)
+    #
+    # ``auto_trading_override`` mirrors the runtime field on the real Settings:
+    # ``None`` there means "no override, follow the baseline", which is exactly
+    # how the gate must read a stand-in that sets it.
+    return SimpleNamespace(auto_trading=auto_trading,
+                           auto_trading_override=auto_trading_override,
+                           min_rr=1.5, risk_percent=1.0, order_deviation=20)
+
+
+class _SendingExecutor(Executor):
+    """Records the orders it would have placed, instead of placing them."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.calls = []
+
+    def _order_send(self, symbol, signal, lots):
+        self.calls.append((symbol, signal.entry, lots))
+        return type("R", (), {"retcode": 10009})()
 
 
 class _SpyExecutor(Executor):
@@ -85,6 +102,59 @@ def test_no_symbol_and_off_still_disabled_first():
     res = ex.execute(_signal(), symbol=None)
     assert res.status == EXECUTION_SKIPPED
     assert res.reason == "auto_trading_disabled"
+
+
+# --------------------------------------------------------------------------- #
+# The master switch is an *override* over the .env baseline, not a second one.
+# --------------------------------------------------------------------------- #
+def test_an_override_arms_the_bot_where_env_says_off():
+    ex = _SendingExecutor(settings=_settings(auto_trading=False,
+                                             auto_trading_override=True),
+                          risk_manager=RiskManager(min_rr=1.5, risk_percent=1.0))
+    res = ex.execute(_signal(), symbol="USTEC", equity=1000.0)
+    assert res.status == EXECUTION_SENT
+    assert len(ex.calls) == 1
+
+
+def test_an_override_disarms_the_bot_where_env_says_on():
+    """Disarming has to work too, or .env would be the floor and not a baseline."""
+    ex = _SpyExecutor(settings=_settings(auto_trading=True,
+                                         auto_trading_override=False),
+                      risk_manager=RiskManager(min_rr=1.5))
+    res = ex.execute(_signal(), symbol="USTEC")
+    assert res.status == EXECUTION_SKIPPED
+    assert res.reason == "auto_trading_disabled"
+    assert ex.send_called is False
+
+
+def test_clearing_the_override_returns_the_env_baseline():
+    """What "Follow .env" does, without a restart."""
+    settings = _settings(auto_trading=False, auto_trading_override=True)
+    ex = _SendingExecutor(settings=settings,
+                          risk_manager=RiskManager(min_rr=1.5, risk_percent=1.0))
+    assert ex.execute(_signal(), symbol="USTEC", equity=1000.0).status == EXECUTION_SENT
+
+    settings.auto_trading_override = None
+
+    res = ex.execute(_signal(), symbol="USTEC", equity=1000.0)
+    assert res.status == EXECUTION_SKIPPED
+    assert res.reason == "auto_trading_disabled"
+
+
+def test_the_switch_reads_a_settings_object_with_no_override_attribute():
+    """The gate is duck-typed so a partial settings stand-in still works.
+
+    Guards the reason ``auto_trading_enabled`` uses ``getattr`` rather than
+    ``settings.effective_auto_trading``: an AttributeError raised inside the
+    execution gate would fall through to the broker path, not away from it.
+    """
+    from types import SimpleNamespace
+
+    settings = SimpleNamespace(auto_trading=True, min_rr=1.5, risk_percent=1.0,
+                               order_deviation=20)
+    ex = _SendingExecutor(settings=settings,
+                          risk_manager=RiskManager(min_rr=1.5, risk_percent=1.0))
+    assert ex.execute(_signal(), symbol="USTEC", equity=1000.0).status == EXECUTION_SENT
 
 
 def test_rejects_unapproved_signal_even_when_on():

@@ -14,8 +14,9 @@ from sqlalchemy.orm import sessionmaker
 from config import reload_settings
 from database.models import Base
 from database.repository import Repository, get_engine
-from runner import (BT_DONE, BT_ERROR, BT_QUEUED, LIVE_ERROR, LIVE_RUNNING,
-                    LIVE_STOPPED, JobManager)
+from runner import (ACCOUNT_DONE, ACCOUNT_ERROR, ACCOUNT_IDLE, BROKER_DONE,
+                    BROKER_ERROR, BT_DONE, BT_ERROR, BT_QUEUED, LIVE_ERROR,
+                    LIVE_RUNNING, LIVE_STOPPED, JobManager)
 from trading.asset_manager import Asset
 from trading.bars import make_candle
 
@@ -43,6 +44,15 @@ class _FakeClient:
 
     def account_info(self):
         return None
+
+    def terminal_trade_allowed(self):
+        """The terminal toolbar's Algo Trading switch.
+
+        Defaults to ``True`` so a test that does not care about this gate is not
+        accidentally exercising the "MT5 will reject orders" warning; the tests
+        that do care override it.
+        """
+        return True
 
     def copy_rates_range(self, symbol, timeframe, date_from, date_to):
         """Empty by default — the market fake supplies the candles."""
@@ -275,7 +285,8 @@ def test_status_is_readable_while_a_session_runs(tmp_path, monkeypatch):
 
     snapshot = jobs.status()
     assert snapshot["live_running"] is True
-    assert set(snapshot) == {"live", "backtest", "probe", "live_running"}
+    assert set(snapshot) == {"live", "backtest", "probe", "broker", "account",
+                             "live_running"}
     assert snapshot["live"]["state"] == LIVE_RUNNING
     jobs.stop_live(timeout=5)
 
@@ -520,3 +531,273 @@ def test_a_terminal_that_cannot_connect_is_reported_not_raised(tmp_path, monkeyp
     assert jobs.start_live()["ok"] is True
     assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_ERROR)
     assert "MT5 terminal not running" in jobs.live_state()["last_error"]
+
+
+# --------------------------------------------------------------------------- #
+# Broker symbol catalogue
+# --------------------------------------------------------------------------- #
+def _symbol(name, digits=2, contract=1.0, volume_min=0.01):
+    return {"name": name, "digits": digits, "trade_contract_size": contract,
+            "volume_min": volume_min, "volume_step": 0.01, "volume_max": 100.0,
+            "visible": True, "trade_mode": 4}
+
+
+class _CatalogClient(_FakeClient):
+    """A terminal that offers a fixed symbol list."""
+
+    def __init__(self, symbols=None, fail=False):
+        super().__init__()
+        # A list, always. A bare dict here would be iterated as its *keys*, so the
+        # scan would return ``["name", "digits", ...]`` and die on the sort with an
+        # opaque AttributeError instead of listing symbols.
+        self._symbols = [_symbol("USTEC")] if symbols is None else list(symbols)
+        self._fail = fail
+        self.scans = 0
+
+    def symbol_catalog(self):
+        self.scans += 1
+        if self._fail:
+            raise RuntimeError("terminal refused the symbol list")
+        return list(self._symbols)
+
+
+def test_broker_scan_populates_the_catalogue(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    client = _CatalogClient([_symbol("XAUUSDm"), _symbol("EURUSDm", digits=5)])
+    jobs = _jobs(settings, maker, client_factory=lambda s: client)
+
+    assert jobs.request_broker_scan()["ok"] is True
+    assert _wait_for(lambda: jobs.broker_state()["state"] == BROKER_DONE)
+
+    assert jobs.broker_state()["n_symbols"] == 2
+    # Sorted, so the browser table does not reshuffle between scans.
+    assert [s["name"] for s in jobs.broker_catalog()] == ["EURUSDm", "XAUUSDm"]
+    jobs.shutdown(timeout=5)
+
+
+def test_the_status_summary_omits_the_catalogue_but_the_catalog_accessor_has_it(
+        tmp_path, monkeypatch):
+    """The list is hundreds of rows and must not ride on the five-second poll."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker, client_factory=lambda s: _CatalogClient())
+
+    # The verdict is asserted, not discarded: a *refused* scan also leaves the
+    # thread None, and joining None would report "idle" as if it were a hang.
+    assert jobs.request_broker_scan()["ok"] is True
+    # Joined rather than polled: the assertion below then reports the state the
+    # scan actually reached, instead of timing out with no explanation.
+    state = jobs.wait_for_broker_scan(timeout=5)
+    assert state["state"] == BROKER_DONE, state
+
+    assert "symbols" not in state
+    assert "symbols" not in jobs.status()["broker"]
+    assert jobs.broker_catalog()
+    jobs.shutdown(timeout=5)
+
+
+def test_broker_scan_is_refused_while_a_session_runs(tmp_path, monkeypatch):
+    """Refused, not queued: waiting on the lock behind a live session looks like a hang."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+    jobs.start_live()
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+
+    refused = jobs.request_broker_scan()
+    assert refused["ok"] is False
+    assert refused["reason"] == "live_running"
+    jobs.stop_live(timeout=5)
+
+
+def test_broker_scan_holds_the_terminal_open_only_for_its_own_work(tmp_path, monkeypatch):
+    """The client is disconnected even when the scan fails — MT5 is process-global."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    built: list = []
+
+    def factory(_settings):
+        client = _CatalogClient(fail=True)
+        built.append(client)
+        return client
+
+    jobs = _jobs(settings, maker, client_factory=factory)
+    jobs.request_broker_scan()
+    assert _wait_for(lambda: jobs.broker_state()["state"] == BROKER_ERROR)
+
+    assert built and built[0].connected is False
+    assert "symbol list" in jobs.broker_state()["last_error"]
+    jobs.shutdown(timeout=5)
+
+
+def test_a_failed_rescan_keeps_the_catalogue_already_on_screen(tmp_path, monkeypatch):
+    """Blanking the table the user is reading would be worse than stale rows."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    state = {"fail": False}
+
+    class _FlakyClient(_CatalogClient):
+        def symbol_catalog(self):
+            if state["fail"]:
+                raise RuntimeError("terminal hiccup")
+            return super().symbol_catalog()
+
+    client = _FlakyClient([_symbol("USTEC"), _symbol("US500")])
+    jobs = _jobs(settings, maker, client_factory=lambda s: client)
+
+    jobs.request_broker_scan()
+    assert _wait_for(lambda: jobs.broker_state()["state"] == BROKER_DONE)
+    assert len(jobs.broker_catalog()) == 2
+
+    state["fail"] = True
+    jobs.request_broker_scan()
+    assert _wait_for(lambda: jobs.broker_state()["state"] == BROKER_ERROR)
+
+    assert len(jobs.broker_catalog()) == 2      # retained
+    assert jobs.broker_state()["n_symbols"] == 2
+    jobs.shutdown(timeout=5)
+
+
+# --------------------------------------------------------------------------- #
+# Account snapshot
+# --------------------------------------------------------------------------- #
+class _Account:
+    """The shape ``MT5Client.account_info`` returns, without MT5."""
+
+    def __init__(self, balance=10_000.0, equity=9_842.15, margin_free=9_842.15):
+        self.login = 12345
+        self.server = "Broker-Demo"
+        self.name = "Test Account"
+        self.currency = "USD"
+        self.balance = balance
+        self.equity = equity
+        self.leverage = 100
+        self.margin_free = margin_free
+
+
+class _AccountClient(_FakeClient):
+    """A terminal that reports an account."""
+
+    def __init__(self, fail=False):
+        super().__init__()
+        self._summary = _Account()
+        self._fail = fail
+        self.reads = 0
+
+    def account_info(self):
+        self.reads += 1
+        if self._fail:
+            raise RuntimeError("terminal refused the account")
+        return self._summary
+
+
+class _NoAccountClient(_FakeClient):
+    """A terminal that is connected but has no account to report (logged out)."""
+
+    def account_info(self):
+        return None
+
+
+def test_account_refresh_publishes_balance_and_equity(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker, client_factory=lambda s: _AccountClient())
+
+    # Nothing is read until it is asked for: the account is not on the status poll's
+    # path, so an idle dashboard never opens the terminal.
+    assert jobs.account_state()["balance"] is None
+    assert jobs.account_state()["state"] == ACCOUNT_IDLE
+
+    assert jobs.request_account_refresh()["ok"] is True
+    state = jobs.wait_for_account(timeout=5)
+
+    assert state["state"] == ACCOUNT_DONE
+    assert state["balance"] == 10_000.0
+    assert state["equity"] == 9_842.15
+    assert state["currency"] == "USD"
+    assert state["login"] == 12345
+    assert state["fetched_at_utc"] is not None
+    assert state["last_error"] == ""
+    jobs.shutdown(timeout=5)
+
+
+def test_account_refresh_is_refused_while_a_session_runs(tmp_path, monkeypatch):
+    """A live session owns the terminal; it publishes its own, fresher snapshot."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker, client_factory=lambda s: _AccountClient())
+    jobs.start_live()
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+
+    refused = jobs.request_account_refresh()
+    assert refused["ok"] is False
+    assert refused["reason"] == "live_running"
+    jobs.stop_live(timeout=5)
+    jobs.shutdown(timeout=5)
+
+
+def test_the_live_session_snapshots_the_account_without_a_signal(tmp_path, monkeypatch):
+    """The tile has to stay current through a quiet session, not only on signals."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    client = _AccountClient()
+    jobs = _jobs(settings, maker, client_factory=lambda s: client)
+
+    jobs.start_live()
+    # One read during warm-up; the poll loop must supply more of its own accord,
+    # because the fake market never produces a signal and so never calls `equity`.
+    assert _wait_for(lambda: jobs.account_state()["balance"] == 10_000.0)
+    assert _wait_for(lambda: client.reads > 1)
+
+    jobs.stop_live(timeout=5)
+    jobs.shutdown(timeout=5)
+
+
+def test_a_failed_account_read_keeps_the_figures_already_on_screen(tmp_path, monkeypatch):
+    """Dropping the balance tile to a dash would read as "your account is gone"."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    state = {"fail": False}
+
+    class _FlakyClient(_AccountClient):
+        def account_info(self):
+            if state["fail"]:
+                self.reads += 1
+                raise RuntimeError("terminal hiccup")
+            return super().account_info()
+
+    jobs = _jobs(settings, maker, client_factory=lambda s: _FlakyClient())
+
+    jobs.request_account_refresh()
+    assert _wait_for(lambda: jobs.account_state()["state"] == ACCOUNT_DONE)
+
+    state["fail"] = True
+    jobs.request_account_refresh()
+    assert _wait_for(lambda: jobs.account_state()["state"] == ACCOUNT_ERROR)
+
+    assert jobs.account_state()["balance"] == 10_000.0        # retained
+    assert "hiccup" in jobs.account_state()["last_error"]
+    jobs.shutdown(timeout=5)
+
+
+def test_account_refresh_holds_the_terminal_open_only_for_its_own_work(tmp_path, monkeypatch):
+    """The client is disconnected even when the read fails — MT5 is process-global."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    built: list = []
+
+    def factory(_settings):
+        client = _AccountClient(fail=True)
+        built.append(client)
+        return client
+
+    jobs = _jobs(settings, maker, client_factory=factory)
+    jobs.request_account_refresh()
+    assert _wait_for(lambda: jobs.account_state()["state"] == ACCOUNT_ERROR)
+
+    assert built and built[0].connected is False
+    jobs.shutdown(timeout=5)
+
+
+def test_an_account_the_terminal_will_not_name_is_an_error(tmp_path, monkeypatch):
+    """A logged-out terminal answers with ``None``; that is not a zero balance."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker, client_factory=lambda s: _NoAccountClient())
+
+    jobs.request_account_refresh()
+    assert _wait_for(lambda: jobs.account_state()["state"] == ACCOUNT_ERROR)
+
+    assert jobs.account_state()["balance"] is None
+    assert "logged in" in jobs.account_state()["last_error"]
+    jobs.shutdown(timeout=5)

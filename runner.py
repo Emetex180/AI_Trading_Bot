@@ -22,9 +22,11 @@ follow, and both matter:
 Because only one MT5 job may run at a time, a backtest requested during a live
 session is **queued** and launched automatically when the session stops.
 
-Safety posture is unchanged: signals flow through :class:`scanner.AssetScanner`
-into the existing :class:`trading.executor.Executor`, which records ``SKIPPED``
-whenever ``AUTO_TRADING`` is off. Nothing here can enable trading.
+Safety posture: signals flow through :class:`scanner.AssetScanner` into the
+existing :class:`trading.executor.Executor`, which records ``SKIPPED`` whenever
+the master switch is off. :meth:`JobManager.set_auto_trading` can operate that
+one switch, session-only (it is never written back to ``.env``); nothing here
+can reach any other gate in the executor.
 """
 from __future__ import annotations
 
@@ -61,6 +63,18 @@ PROBE_IDLE = "idle"
 PROBE_RUNNING = "running"
 PROBE_DONE = "done"
 PROBE_ERROR = "error"
+
+# Broker-catalogue states (read-only "what symbols does the broker offer?").
+BROKER_IDLE = "idle"
+BROKER_RUNNING = "running"
+BROKER_DONE = "done"
+BROKER_ERROR = "error"
+
+# Account-snapshot states (read-only "what does the terminal say my account is?").
+ACCOUNT_IDLE = "idle"
+ACCOUNT_RUNNING = "running"
+ACCOUNT_DONE = "done"
+ACCOUNT_ERROR = "error"
 
 # Seconds to wait for a live thread to unwind on stop before reporting a timeout.
 STOP_TIMEOUT_SECONDS = 30.0
@@ -158,6 +172,57 @@ class ProbeState:
     finished_at_utc: datetime | None = None
 
 
+@dataclass
+class BrokerState:
+    """State for the read-only "what symbols does the broker offer?" job.
+
+    Deliberately holds only the *summary* of the scan. The catalogue itself is
+    hundreds of rows and lives in a plain attribute on the manager instead, so
+    that ``asdict`` here stays cheap enough to serialise on every ``/api/status``
+    poll — deep-copying a thousand dicts every five seconds to throw them away
+    would be pure waste.
+    """
+
+    state: str = BROKER_IDLE
+    n_symbols: int = 0
+    last_error: str = ""
+    finished_at_utc: datetime | None = None
+
+
+@dataclass
+class AccountState:
+    """The most recent account snapshot for the dashboard balance tile.
+
+    A *snapshot*, not a live value, and that is forced by the threading contract
+    above: MT5 is process-global and single-owner, so the browser's five-second
+    ``/api/status`` poll can never read the account itself. Instead whoever holds
+    the terminal writes here — the live worker on every poll of its session, or a
+    manual refresh on the dashboard — and the UI renders the figure together with
+    :attr:`fetched_at_utc` so a stale number can never be mistaken for a current
+    one.
+
+    Every money field is ``None`` until the first successful read, which is
+    deliberately distinct from a genuine zero balance.
+    """
+
+    state: str = ACCOUNT_IDLE
+    balance: float | None = None
+    equity: float | None = None
+    margin_free: float | None = None
+    currency: str | None = None
+    login: int | None = None
+    server: str | None = None
+    name: str | None = None
+    last_error: str = ""
+    fetched_at_utc: datetime | None = None
+    # The terminal's own Algo Trading button, read in the same MT5 session that
+    # produced the figures above. ``None`` means "not known" (never read, or the
+    # terminal could not be asked) — which is why it defaults to None rather
+    # than False: the dashboard must not claim the terminal is blocking orders
+    # when it simply has not checked.
+    trade_allowed: bool | None = None
+
+
 class JobManager:
     """Start/stop the live scanner and run backtests off the request thread."""
 
@@ -187,11 +252,18 @@ class JobManager:
         self._live_thread: threading.Thread | None = None
         self._bt_thread: threading.Thread | None = None
         self._probe_thread: threading.Thread | None = None
+        self._broker_thread: threading.Thread | None = None
+        self._account_thread: threading.Thread | None = None
         self._pending_backtest: dict[str, Any] | None = None
 
         self._live = LiveState()
         self._backtest = BacktestState()
         self._probe = ProbeState()
+        self._broker = BrokerState()
+        self._account = AccountState()
+        # The scanned symbol catalogue, kept out of BrokerState so no poll pays
+        # to deep-copy it. Guarded by ``_state_lock`` like the state dataclasses.
+        self._broker_symbols: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ #
     # State access (no MT5, no DB — safe to call from any thread)
@@ -211,6 +283,26 @@ class JobManager:
         with self._state_lock:
             return asdict(self._probe)
 
+    def broker_state(self) -> dict[str, Any]:
+        """Summary of the last broker scan — safe to put on the status poll."""
+        with self._state_lock:
+            return asdict(self._broker)
+
+    def broker_catalog(self) -> list[dict[str, Any]]:
+        """The scanned broker symbol list.
+
+        Separate from :meth:`broker_state` on purpose: this is hundreds of rows,
+        so it is fetched on demand by the assets page rather than riding along on
+        the five-second ``/api/status`` poll.
+        """
+        with self._state_lock:
+            return list(self._broker_symbols)
+
+    def account_state(self) -> dict[str, Any]:
+        """The last account snapshot — small enough to ride the status poll."""
+        with self._state_lock:
+            return asdict(self._account)
+
     def is_live_running(self) -> bool:
         with self._state_lock:
             thread = self._live_thread
@@ -223,8 +315,37 @@ class JobManager:
             "live": self.live_state(),
             "backtest": self.backtest_state(),
             "probe": self.probe_state(),
+            "broker": self.broker_state(),
+            "account": self.account_state(),
             "live_running": self.is_live_running(),
         }
+
+    def _remember_account(self, acc, *, trade_allowed: bool | None = None) -> None:
+        """Publish an ``AccountSummary`` as the current snapshot.
+
+        Called *only* from worker threads that already hold the terminal (see the
+        threading contract above), so a dashboard request can never reach MT5
+        through here. ``None`` — a terminal that is closed or logged out — leaves
+        the previous snapshot in place rather than blanking the tile to zeros.
+
+        ``trade_allowed`` is the terminal's toolbar switch, read by the caller in
+        the same MT5 session. It rides along here rather than getting its own
+        writer so the snapshot and its flags can never disagree about which read
+        they came from.
+        """
+        if acc is None:
+            return
+        with self._state_lock:
+            self._account.balance = getattr(acc, "balance", None)
+            self._account.equity = getattr(acc, "equity", None)
+            self._account.margin_free = getattr(acc, "margin_free", None)
+            self._account.currency = getattr(acc, "currency", None)
+            self._account.login = getattr(acc, "login", None)
+            self._account.server = getattr(acc, "server", None)
+            self._account.name = getattr(acc, "name", None)
+            self._account.trade_allowed = trade_allowed
+            self._account.last_error = ""
+            self._account.fetched_at_utc = tu.now_utc()
 
     # ------------------------------------------------------------------ #
     # Live session
@@ -278,11 +399,11 @@ class JobManager:
     def _mt5_session(self):
         """Own the MT5 terminal for the duration of the block.
 
-        The three jobs that touch the terminal (live, backtest, history probe)
-        all need the same four things, and getting any of them wrong is how a
-        session ends up half-initialised: take ``_mt5_lock``, build the client
-        *inside* the worker thread that will use it, connect, and guarantee a
-        disconnect. Yields ``(client, market)``.
+        The four jobs that touch the terminal (live, backtest, history probe,
+        broker catalogue) all need the same four things, and getting any of them
+        wrong is how a session ends up half-initialised: take ``_mt5_lock``,
+        build the client *inside* the worker thread that will use it, connect,
+        and guarantee a disconnect. Yields ``(client, market)``.
 
         A failing ``disconnect`` is swallowed deliberately — it must not replace
         the exception that actually ended the job.
@@ -312,11 +433,37 @@ class JobManager:
             with self._mt5_session() as (client, market):
                 repo = self._repo_factory()
                 self._log(repo, "INFO", "scanner",
-                          f"starting; auto_trading={self.settings.auto_trading}")
+                          f"starting; auto_trading="
+                          f"{self.settings.effective_auto_trading}")
+
+                def account_snapshot():
+                    """Read the account, publishing it as the dashboard snapshot.
+
+                    A terminal hiccup must never take down a live session: a failed
+                    read returns ``None`` and leaves the previous snapshot in place,
+                    which surfaces as an unchanged balance rather than a dead scanner.
+
+                    The terminal's Algo Trading switch is read alongside the
+                    account so the dashboard can explain a rejection that
+                    ``AUTO_TRADING`` alone would not account for. It may be
+                    ``None`` if the terminal will not answer — recorded as
+                    unknown, never as a guess.
+                    """
+                    try:
+                        acc = client.account_info()
+                        trade_allowed = client.terminal_trade_allowed()
+                    except Exception:
+                        return None
+                    self._remember_account(acc, trade_allowed=trade_allowed)
+                    return acc
 
                 def equity():
-                    acc = client.account_info()
+                    acc = account_snapshot()
                     return acc.equity if acc else None
+
+                # Seed the dashboard tile the moment the terminal is ours, so the
+                # balance is on screen during warm-up rather than one poll later.
+                account_snapshot()
 
                 warm_count = self.settings.warmup_m1_bars
                 scanners: dict[str, Any] = {}
@@ -350,10 +497,16 @@ class JobManager:
                     self._live.assets = list(scanners)
                     self._live.state = LIVE_RUNNING
 
-                self._emit(f"[scan] LIVE — AUTO_TRADING={self.settings.auto_trading}.")
+                self._emit(f"[scan] LIVE — AUTO_TRADING="
+                           f"{self.settings.effective_auto_trading}.")
 
                 poll = self.settings.scanner_poll_interval_ms / 1000.0
                 while not self._stop_event.is_set():
+                    # Once per poll, not only when a signal fires (which is what
+                    # `equity` is for): a quiet session would otherwise leave the
+                    # dashboard's balance tile frozen at whenever the last signal
+                    # happened to appear.
+                    account_snapshot()
                     for name, sc in scanners.items():
                         candles = market.poll_closed_candles(sc.symbol, lookback=5)
                         handled = sc.feed_new(candles)
@@ -595,13 +748,189 @@ class JobManager:
                 self._probe.state = PROBE_ERROR if error else PROBE_DONE
 
     # ------------------------------------------------------------------ #
+    # Broker catalogue (read-only)
+    # ------------------------------------------------------------------ #
+    def request_broker_scan(self) -> dict[str, Any]:
+        """List every symbol the broker offers, for the dashboard asset browser.
+
+        Read-only, but it still owns MT5, so it runs on its own thread under
+        ``_mt5_lock``. Like the history probe it is **refused** rather than
+        queued while another MT5 job runs — blocking on the lock instead would
+        look like a hang, because a live session holds it for its whole life.
+        """
+        with self._state_lock:
+            if self.is_live_running():
+                return {"ok": False, "reason": "live_running",
+                        "message": "A live session owns the MT5 terminal. "
+                                   "Stop it to browse broker symbols.",
+                        "broker": self.broker_state()}
+            if self._backtest.state in (BT_STARTING, BT_RUNNING):
+                return {"ok": False, "reason": "backtest_running",
+                        "message": "A backtest is running. Wait for it to finish.",
+                        "broker": self.broker_state()}
+            if self._probe.state == PROBE_RUNNING:
+                return {"ok": False, "reason": "probe_running",
+                        "message": "A history check is running. Wait for it to "
+                                   "finish.",
+                        "broker": self.broker_state()}
+            if self._broker.state == BROKER_RUNNING:
+                return {"ok": False, "reason": "already_running",
+                        "message": "Already reading the broker's symbol list.",
+                        "broker": self.broker_state()}
+
+            self._broker = BrokerState(state=BROKER_RUNNING)
+            thread = threading.Thread(target=self._broker_worker,
+                                      name="broker-catalogue", daemon=True)
+            self._broker_thread = thread
+
+        thread.start()
+        return {"ok": True, "message": "Reading the broker's symbol list…",
+                "broker": self.broker_state()}
+
+    def _broker_worker(self) -> None:
+        error = ""
+        symbols: list[dict[str, Any]] = []
+        try:
+            with self._mt5_session() as (client, _market):
+                symbols = client.symbol_catalog()
+                if not symbols:
+                    raise RuntimeError(
+                        "The terminal returned no symbols — is a symbol list "
+                        "available on this account?")
+                # Sorted here so the browser is stable between scans; MT5's own
+                # ordering is not guaranteed and would reshuffle the table.
+                symbols.sort(key=lambda s: str(s.get("name", "")).upper())
+        except Exception as exc:  # surfaced in the dashboard, never fatal
+            error = f"{type(exc).__name__}: {exc}"
+        finally:
+            with self._state_lock:
+                # A failed scan keeps the previous catalogue rather than blanking
+                # the table the user is reading.
+                if not error:
+                    self._broker_symbols = symbols
+                self._broker.n_symbols = len(self._broker_symbols)
+                self._broker.last_error = error
+                self._broker.finished_at_utc = tu.now_utc()
+                self._broker.state = BROKER_ERROR if error else BROKER_DONE
+
+    # ------------------------------------------------------------------ #
+    # Account snapshot (read-only)
+    # ------------------------------------------------------------------ #
+    def request_account_refresh(self) -> dict[str, Any]:
+        """Read balance / equity / free margin from the terminal, once.
+
+        Read-only, but it still owns MT5, so it follows the same rules as the
+        broker scan: its own thread under ``_mt5_lock``, and **refused** rather
+        than queued while another job holds the terminal. Blocking on the lock
+        would look like a hang, because a live session holds it for its whole
+        life — which is also why a live session is the one refusal that is not a
+        failure. The live worker publishes its own snapshot every poll, so the
+        dashboard already holds a fresher figure than this route could fetch.
+        """
+        with self._state_lock:
+            if self.is_live_running():
+                return {"ok": False, "reason": "live_running",
+                        "message": "A live session owns the terminal — showing "
+                                   "the account it reports.",
+                        "account": self.account_state()}
+            if self._backtest.state in (BT_STARTING, BT_RUNNING):
+                return {"ok": False, "reason": "backtest_running",
+                        "message": "A backtest is running. Wait for it to finish.",
+                        "account": self.account_state()}
+            if self._probe.state == PROBE_RUNNING:
+                return {"ok": False, "reason": "probe_running",
+                        "message": "A history check is running. Wait for it to "
+                                   "finish.",
+                        "account": self.account_state()}
+            if self._broker.state == BROKER_RUNNING:
+                return {"ok": False, "reason": "broker_running",
+                        "message": "A broker symbol scan is running. Wait for it "
+                                   "to finish.",
+                        "account": self.account_state()}
+            if self._account.state == ACCOUNT_RUNNING:
+                return {"ok": False, "reason": "already_running",
+                        "message": "Already reading the account.",
+                        "account": self.account_state()}
+
+            # In place, not a fresh ``AccountState``: the figures on screen stay
+            # up while the read is in flight, so pressing Refresh never blanks a
+            # balance the user is looking at.
+            self._account.state = ACCOUNT_RUNNING
+            self._account.last_error = ""
+            thread = threading.Thread(target=self._account_worker,
+                                      name="account-snapshot", daemon=True)
+            self._account_thread = thread
+
+        thread.start()
+        return {"ok": True, "message": "Reading the account from the terminal…",
+                "account": self.account_state()}
+
+    def _account_worker(self) -> None:
+        error = ""
+        summary = None
+        trade_allowed = None
+        try:
+            with self._mt5_session() as (client, _market):
+                summary = client.account_info()
+                if summary is None:
+                    raise RuntimeError(
+                        "The terminal reported no account — is it logged in?")
+                # Only meaningful alongside an account, and read after the check
+                # above so "no account" stays the reported cause of a failure.
+                trade_allowed = client.terminal_trade_allowed()
+        except Exception as exc:  # surfaced in the dashboard, never fatal
+            error = f"{type(exc).__name__}: {exc}"
+        finally:
+            with self._state_lock:
+                # A failed read keeps the previous figures rather than blanking a
+                # balance the user may be reading; only the error is new.
+                if not error:
+                    self._remember_account(summary, trade_allowed=trade_allowed)
+                self._account.last_error = error
+                self._account.state = ACCOUNT_ERROR if error else ACCOUNT_DONE
+
+    # ------------------------------------------------------------------ #
+    # Auto-trading override (session-only)
+    # ------------------------------------------------------------------ #
+    def set_auto_trading(self, enabled: bool | None) -> dict[str, Any]:
+        """Set or clear the runtime override for the master trading switch.
+
+        ``None`` clears it, handing control back to the ``AUTO_TRADING`` value
+        read from ``.env`` at startup. The override is **never** written back to
+        ``.env`` — it lives on the settings object for this process only, so a
+        restart always returns to the baseline and the bot cannot come back up
+        armed.
+
+        Mutating that shared settings object is precisely what lets this reach a
+        *running* session, and it is why the switch is a field rather than a
+        parameter threaded down into the executor: the live worker builds its
+        scanners once per session and they hold this object by reference, while
+        the executor re-reads the switch on every ``execute()``. So the next
+        signal obeys the new value with no restart and no re-wiring.
+
+        Only the master switch is reachable from here. Every other gate in
+        :mod:`trading.executor` — signal approved, risk-approved, registry symbol,
+        risk-manager sizing — is untouched and cannot be influenced this way.
+        """
+        with self._state_lock:
+            self.settings.auto_trading_override = enabled
+            return {
+                "ok": True,
+                "auto_trading": self.settings.effective_auto_trading,
+                "baseline": self.settings.auto_trading,
+                "override": enabled,
+                "live_running": self.is_live_running(),
+            }
+
+    # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #
     def shutdown(self, timeout: float = STOP_TIMEOUT_SECONDS) -> None:
         """Stop any running job (tests / interpreter exit)."""
         if self.is_live_running():
             self.stop_live(timeout=timeout)
-        for thread in (self._bt_thread, self._probe_thread):
+        for thread in (self._bt_thread, self._probe_thread, self._broker_thread,
+                       self._account_thread):
             if thread is not None and thread.is_alive():
                 thread.join(timeout)
 
@@ -618,6 +947,20 @@ class JobManager:
         if thread is not None:
             thread.join(timeout)
         return self.probe_state()
+
+    def wait_for_broker_scan(self, timeout: float | None = None) -> dict[str, Any]:
+        """Block until the current broker scan finishes (tests / CLI)."""
+        thread = self._broker_thread
+        if thread is not None:
+            thread.join(timeout)
+        return self.broker_state()
+
+    def wait_for_account(self, timeout: float | None = None) -> dict[str, Any]:
+        """Block until the current account refresh finishes (tests / CLI)."""
+        thread = self._account_thread
+        if thread is not None:
+            thread.join(timeout)
+        return self.account_state()
 
     # ------------------------------------------------------------------ #
     # Helpers

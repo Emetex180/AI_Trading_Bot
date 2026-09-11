@@ -1,164 +1,213 @@
 {
-  "_comment": "Asset registry — the ONLY place instruments are configured. Each key is the STRATEGY name used across the bot (dashboard, DB, backtests); 'broker_symbol' is the base symbol requested from MT5. When SYMBOL_AUTO_RESOLVE=true the bot asks the terminal for the broker's actual spelling (e.g. XAUUSD -> XAUUSDm) and selects it in Market Watch, so a registry entry is portable between brokers. 'enabled' controls whether the scanner analyzes/trades the asset. Contract fields are FALLBACKS used only when the broker's own specification is unavailable; live sessions read contract size and volume limits straight from MT5. Add/remove assets here or via the dashboard API — no strategy code changes needed. Enable the whole list with: python run.py assets --enable-all",
   "assets": [
     {
       "name": "USTEC",
       "broker_symbol": "USTEC",
       "enabled": true,
       "digits": 2,
-      "contract_size": 1
+      "contract_size": 1.0,
+      "volume_min": 0.0,
+      "volume_step": 0.0,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "US500",
       "broker_symbol": "US500",
-      "enabled": false,
+      "enabled": true,
       "digits": 2,
-      "contract_size": 1
+      "contract_size": 1.0,
+      "volume_min": 0.0,
+      "volume_step": 0.0,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "US30",
       "broker_symbol": "US30",
-      "enabled": false,
+      "enabled": true,
       "digits": 2,
-      "contract_size": 1
+      "contract_size": 1.0,
+      "volume_min": 0.0,
+      "volume_step": 0.0,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "GER40",
       "broker_symbol": "GER40",
-      "enabled": false,
+      "enabled": true,
       "digits": 2,
-      "contract_size": 1
+      "contract_size": 1.0,
+      "volume_min": 0.0,
+      "volume_step": 0.0,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "UK100",
       "broker_symbol": "UK100",
-      "enabled": false,
+      "enabled": true,
       "digits": 2,
-      "contract_size": 1
+      "contract_size": 1.0,
+      "volume_min": 0.0,
+      "volume_step": 0.0,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "JP225",
       "broker_symbol": "JP225",
-      "enabled": false,
+      "enabled": true,
       "digits": 2,
-      "contract_size": 1
+      "contract_size": 1.0,
+      "volume_min": 0.0,
+      "volume_step": 0.0,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "XAUUSD",
       "broker_symbol": "XAUUSD",
-      "enabled": false,
+      "enabled": true,
       "digits": 2,
-      "contract_size": 100,
+      "contract_size": 100.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "XAGUSD",
       "broker_symbol": "XAGUSD",
-      "enabled": false,
+      "enabled": true,
       "digits": 3,
-      "contract_size": 5000,
+      "contract_size": 5000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "EURUSD",
       "broker_symbol": "EURUSD",
-      "enabled": false,
+      "enabled": true,
       "digits": 5,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "GBPUSD",
       "broker_symbol": "GBPUSD",
-      "enabled": false,
+      "enabled": true,
       "digits": 5,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "AUDUSD",
       "broker_symbol": "AUDUSD",
-      "enabled": false,
+      "enabled": true,
       "digits": 5,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "NZDUSD",
       "broker_symbol": "NZDUSD",
-      "enabled": false,
+      "enabled": true,
       "digits": 5,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "USDCAD",
       "broker_symbol": "USDCAD",
-      "enabled": false,
+      "enabled": true,
       "digits": 5,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "USDCHF",
       "broker_symbol": "USDCHF",
-      "enabled": false,
+      "enabled": true,
       "digits": 5,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "USDJPY",
       "broker_symbol": "USDJPY",
-      "enabled": false,
+      "enabled": true,
       "digits": 3,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "EURJPY",
       "broker_symbol": "EURJPY",
-      "enabled": false,
+      "enabled": true,
       "digits": 3,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "GBPJPY",
       "broker_symbol": "GBPJPY",
-      "enabled": false,
+      "enabled": true,
       "digits": 3,
-      "contract_size": 100000,
+      "contract_size": 100000.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "BTCUSD",
       "broker_symbol": "BTCUSD",
-      "enabled": false,
+      "enabled": true,
       "digits": 2,
-      "contract_size": 1,
+      "contract_size": 1.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     },
     {
       "name": "ETHUSD",
       "broker_symbol": "ETHUSD",
-      "enabled": false,
+      "enabled": true,
       "digits": 2,
-      "contract_size": 1,
+      "contract_size": 1.0,
       "volume_min": 0.01,
-      "volume_step": 0.01
+      "volume_step": 0.01,
+      "volume_max": 0.0,
+      "overrides": {}
     }
   ]
 }

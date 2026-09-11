@@ -15,6 +15,111 @@
 
 {% set live = job_state.live %}
 {% set live_active = live.state in ('starting', 'running', 'stopping') %}
+{% set account = job_state.account %}
+{# Read from the terminal only when asked: MT5 is single-owner (see runner.py), so
+   this is a snapshot with the time it was taken, not a live figure. #}
+<div class="card mb-4" id="account-card">
+  <div class="card-header">
+    <span>Account</span>
+    <span class="d-flex align-items-center gap-2">
+      <span id="account-fetched" class="small text-muted mono">
+        {{ 'as of ' ~ (account.fetched_at_utc | ny) if account.fetched_at_utc else 'not read yet' }}
+      </span>
+      <button type="button" id="account-refresh"
+              class="btn btn-sm btn-outline-secondary">Refresh</button>
+    </span>
+  </div>
+  <div class="card-body">
+    <div class="stat-grid">
+      {{ stat('Balance', account.balance | money, 'info',
+              account.currency or '', id='account-balance',
+              sub_id='account-balance-currency') }}
+      {{ stat('Equity', account.equity | money, '',
+              account.currency or '', id='account-equity',
+              sub_id='account-equity-currency') }}
+      {{ stat('Free margin', account.margin_free | money, '',
+              account.currency or '', id='account-margin-free',
+              sub_id='account-margin-free-currency') }}
+    </div>
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
+      {# Plain text, not markup: the poller rewrites this line with `textContent`,
+         so anything richer here would be flattened on the next tick anyway. #}
+      <span class="small text-muted" id="account-who">
+        {%- if account.login -%}
+          {{ account.name or 'Account' }} · {{ account.login }}
+          {%- if account.server %} · {{ account.server }}{% endif %}
+        {%- else -%}
+          No account read yet — press Refresh to read it from the terminal.
+        {%- endif -%}
+      </span>
+      <span id="account-message" class="small ms-1"></span>
+    </div>
+    <div id="account-error"
+         class="alert alert-danger mt-3 mb-0 {% if not account.last_error %}d-none{% endif %}">
+      {{ account.last_error }}
+    </div>
+  </div>
+</div>
+
+{# ---------------------------------------------------------------------- #}
+{# Auto-trading — the master switch. Session-only by construction: nothing  #}
+{# here is written back to .env, so a restart returns to the baseline.      #}
+{# ---------------------------------------------------------------------- #}
+<div class="card mb-4" id="auto-trading-card">
+  <div class="card-header">
+    <span>Auto-trading</span>
+    <span id="auto-trading-state-badge"
+          class="badge tone-{{ 'danger' if cfg.effective_auto_trading else 'success' }}">
+      {{ 'enabled' if cfg.effective_auto_trading else 'off' }}
+    </span>
+  </div>
+  <div class="card-body">
+    <p class="card-note">
+      Whether approved signals are actually sent to the broker. This is the
+      master switch only — a signal still has to be approved, risk-approved and
+      sized by the risk manager before an order reaches MT5.
+    </p>
+
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+      <button type="button" id="auto-trading-toggle"
+              class="btn btn-sm btn-outline-{{ 'secondary' if cfg.effective_auto_trading else 'danger' }}">
+        {{ 'Turn off' if cfg.effective_auto_trading else 'Turn on' }}
+      </button>
+      <button type="button" id="auto-trading-reset"
+              class="btn btn-sm btn-outline-secondary {{ 'd-none' if cfg.auto_trading_override is none }}">
+        Follow .env
+      </button>
+      <span id="auto-trading-message" class="small ms-1"></span>
+    </div>
+
+    <dl class="meta-grid">
+      <div>
+        <dt>AUTO_TRADING in .env</dt>
+        <dd class="mono" id="auto-trading-baseline">
+          {{ 'true' if cfg.auto_trading else 'false' }}
+        </dd>
+      </div>
+      <div>
+        <dt>This session</dt>
+        <dd class="mono" id="auto-trading-override">
+          {{ 'follow .env' if cfg.auto_trading_override is none
+             else ('forced on' if cfg.auto_trading_override else 'forced off') }}
+        </dd>
+      </div>
+    </dl>
+
+    {# Hidden until the terminal has actually been asked: the toolbar's Algo
+       Trading button is not something this app can turn on, and while it is off
+       MT5 rejects every order however the switch above is set. #}
+    <div id="auto-trading-terminal-warning"
+         class="alert alert-warning mt-3 mb-0 d-none">
+      <strong>MT5 will reject orders.</strong> Algo Trading is switched off in
+      your terminal's toolbar. Turn it on there — it cannot be set from here —
+      or nothing the switch above turns on will reach the broker.
+    </div>
+  </div>
+</div>
+
 <div class="card mb-4" id="live-card">
   <div class="card-header">
     <span>Live session</span>
@@ -138,20 +243,31 @@
       </ul>
     </div>
 
-    <div class="card mb-4">
+    <div class="card mb-4" id="assets-card">
       <div class="card-header">
-        <span>Enabled assets</span>
-        <span class="badge tone-secondary">{{ stats.assets_enabled }}</span>
+        <span>Assets</span>
+        <span class="badge tone-secondary">{{ stats.assets_enabled }} / {{ assets | length }}</span>
       </div>
-      <ul class="list-group list-group-flush">
-        {% for a in assets %}
-        <li class="list-group-item d-flex justify-content-between align-items-center">
-          <span>{{ a.name }}</span>
-          <span class="mono text-muted small">{{ a.broker_symbol }}</span></li>
-        {% else %}
-        <li class="list-group-item text-muted">None enabled.</li>
-        {% endfor %}
-      </ul>
+      {# The whole registry, enabled and disabled alike: a count alone cannot show
+         which instruments exist, and an asset that is off is one the scanner is
+         deliberately ignoring rather than one that is missing. #}
+      <div class="list-scroll">
+        <ul class="list-group list-group-flush">
+          {% for a in assets %}
+          <li class="list-group-item d-flex justify-content-between align-items-center gap-2">
+            <span>{{ a.name }}</span>
+            <span class="d-flex align-items-center gap-2">
+              <span class="mono text-muted small">{{ a.broker_symbol }}</span>
+              <span class="badge tone-{{ 'success' if a.enabled else 'secondary' }}">
+                {{ 'enabled' if a.enabled else 'disabled' }}
+              </span>
+            </span>
+          </li>
+          {% else %}
+          <li class="list-group-item text-muted">No assets in the registry.</li>
+          {% endfor %}
+        </ul>
+      </div>
     </div>
 
     <div class="card">

@@ -10,9 +10,12 @@ Two properties matter here:
 * :func:`api_status` is polled by the browser every few seconds. It reads the
   in-memory job state plus cheap DB queries and **never touches MT5**, so it
   keeps answering while the terminal is closed or a session is mid-warm-up.
-* Auto-trading is not exposed. ``AUTO_TRADING`` remains a ``.env`` setting; there
-  is no route here that can enable it. Signals are alerts, and the executor
-  records ``SKIPPED`` for each one.
+* The master trading switch is operable but not *persisted*. ``AUTO_TRADING`` in
+  ``.env`` remains the baseline, and :func:`api_auto_trading` can set a
+  session-only override on top of it — so the executor still records
+  ``SKIPPED`` for every signal unless the switch is deliberately on, and a
+  restart always returns the bot to the ``.env`` value. No route here can reach
+  any other gate in :mod:`trading.executor`.
 """
 from __future__ import annotations
 
@@ -303,19 +306,28 @@ def register_api(app) -> None:
         except AssetRegistryError as exc:
             return None, str(exc)
 
-    def _sync_asset(repo, name: str) -> None:
-        """Mirror one registry entry into the DB (best-effort, never fatal)."""
+    def _sync_assets(repo, names: list[str] | None = None) -> None:
+        """Mirror registry entries into the DB (best-effort, never fatal).
+
+        ``names=None`` mirrors the whole registry. The DB ``assets`` table backs
+        the dashboard's historical views, so a bulk registry change that mirrored
+        only the row it touched would leave the UI contradicting the scanner.
+        """
         from trading.asset_manager import AssetManager, AssetRegistryError
 
         try:
-            asset = AssetManager(settings=cfg).get(name)
+            manager = AssetManager(settings=cfg)
         except AssetRegistryError:
             return
-        try:
-            repo.upsert_asset(asset.name, asset.broker_symbol, asset.enabled,
-                              digits=asset.digits, overrides=asset.overrides)
-        except Exception:  # a mirror failure must not undo a registry write
-            pass
+        for name in (manager.names() if names is None else names):
+            if not manager.has(name):
+                continue
+            asset = manager.get(name)
+            try:
+                repo.upsert_asset(asset.name, asset.broker_symbol, asset.enabled,
+                                  digits=asset.digits, overrides=asset.overrides)
+            except Exception:  # a mirror failure must not undo a registry write
+                pass
 
     @app.post("/api/assets/add")
     def api_assets_add():
@@ -349,7 +361,7 @@ def register_api(app) -> None:
                             "message": f"{name} is already in the registry."}), 409
 
         manager.add_asset(name, symbol, enabled=enabled, digits=digits)
-        _sync_asset(g.repo, name)
+        _sync_assets(g.repo, [name])
         g.repo.log_event("INFO", "dashboard",
                          f"asset added: {name} -> {symbol} "
                          f"({'enabled' if enabled else 'disabled'})")
@@ -373,7 +385,7 @@ def register_api(app) -> None:
                             "message": f"Unknown asset {name!r}."}), 404
 
         manager.set_enabled(name, enabled)
-        _sync_asset(g.repo, name)
+        _sync_assets(g.repo, [name])
         g.repo.log_event("INFO", "dashboard",
                          f"asset {name} {'enabled' if enabled else 'disabled'}")
         return jsonify({"ok": True,
@@ -406,6 +418,188 @@ def register_api(app) -> None:
         return jsonify({"ok": True, "message": f"Removed {name}.",
                         "assets": asset_choices(cfg, g.repo)})
 
+    @app.post("/api/assets/set-all")
+    def api_assets_set_all():
+        """Enable or disable every registry entry in one action.
+
+        Disabling the whole list is allowed: it is a one-click pause, and the
+        live worker already reports "No enabled assets" cleanly. Removing the
+        last asset stays refused (see ``api_assets_remove``) because that one is
+        destructive rather than merely reversible.
+        """
+        if not _origin_allowed():
+            abort(403)
+        enabled = str(_payload().get("enabled", "")).strip().lower() in {
+            "1", "true", "yes", "on"}
+
+        manager, error = _registry()
+        if manager is None:
+            return jsonify({"ok": False, "reason": "registry_unreadable",
+                            "message": error}), 500
+
+        changed = manager.set_all_enabled(enabled)
+        _sync_assets(g.repo)
+        verb = "enabled" if enabled else "disabled"
+        g.repo.log_event("INFO", "dashboard",
+                         f"bulk {verb}: {len(changed)} asset(s)")
+        return jsonify({"ok": True,
+                        "message": f"{verb.capitalize()} {len(changed)} asset(s).",
+                        "assets": asset_choices(cfg, g.repo)})
+
+    # ------------------------------------------------------------------ #
+    # Broker symbol catalogue
+    #
+    # The registry can only ever offer what someone typed into it. These routes
+    # let the dashboard show what the *broker* actually offers, so any instrument
+    # can be picked rather than only the hand-listed ones.
+    # ------------------------------------------------------------------ #
+    @app.get("/api/assets/broker")
+    def api_broker_catalog():
+        """The symbol list from the last scan, plus that scan's state.
+
+        Fetched on demand rather than polled: a full broker catalogue is hundreds
+        of rows and would dominate the five-second ``/api/status`` payload.
+
+        ``in_registry`` is resolved here so the browser can mark and filter rows
+        without shipping the registry to the client a second time. A registry
+        entry claims both its own name and its ``broker_symbol``: ``GOLD``
+        pointing at ``XAUUSDm`` means that symbol is already covered, and
+        offering to add it again would create a second entry for one instrument.
+        """
+        from trading.asset_manager import AssetManager, AssetRegistryError
+
+        try:
+            entries = AssetManager(settings=cfg).list_assets()
+            known = {a.name for a in entries} | {a.broker_symbol for a in entries}
+        except AssetRegistryError:
+            known = set()
+
+        symbols = []
+        for row in jobs.broker_catalog():
+            entry = dict(row)
+            entry["in_registry"] = entry.get("name") in known
+            symbols.append(entry)
+        return jsonify({"ok": True, "broker": jobs.broker_state(),
+                        "symbols": symbols})
+
+    @app.post("/api/assets/broker/scan")
+    def api_broker_scan():
+        if not _origin_allowed():
+            abort(403)
+        result = jobs.request_broker_scan()
+        g.repo.log_event("INFO" if result["ok"] else "WARN", "dashboard",
+                         f"broker scan: {result.get('reason') or 'started'}")
+        return jsonify(result), (200 if result["ok"] else 409)
+
+    @app.post("/api/assets/add-broker")
+    def api_assets_add_broker():
+        """Add one of the broker's own symbols to the registry.
+
+        Separate from ``/api/assets/add`` because that route upper-cases the name
+        — right for a hand-typed label, wrong for ``EURUSD.pro`` — and knows
+        nothing about the broker's contract numbers. Here the registry name *is*
+        the broker symbol, verbatim, so symbol resolution hits its exact-match
+        tier immediately, and the broker's own spec is persisted as the offline
+        fallback that ``SymbolSpec.from_asset`` reads when no terminal is present.
+        """
+        from trading.symbol_spec import SymbolSpec
+
+        if not _origin_allowed():
+            abort(403)
+        symbol = (_payload().get("symbol") or "").strip()
+        if not symbol:
+            return jsonify({"ok": False, "reason": "missing_symbol",
+                            "message": "Pick a symbol to add."}), 400
+
+        # Validate against the scanned catalogue so a browser page left open
+        # cannot inject a symbol the broker was never shown to offer.
+        row = next((r for r in jobs.broker_catalog()
+                    if str(r.get("name", "")) == symbol), None)
+        if row is None:
+            return jsonify({"ok": False, "reason": "unknown_symbol",
+                            "message": f"{symbol} is not in the scanned symbol "
+                                       "list. Re-scan the broker and try again."}), 404
+
+        manager, error = _registry()
+        if manager is None:
+            return jsonify({"ok": False, "reason": "registry_unreadable",
+                            "message": error}), 500
+
+        # Matching the broker symbol as well as the name: ``GOLD`` already
+        # pointing at ``XAUUSDm`` means adding ``XAUUSDm`` would put two registry
+        # entries on one instrument, and the scanner would trade it twice.
+        existing = next((a for a in manager.list_assets()
+                         if a.name == symbol or a.broker_symbol == symbol), None)
+        if existing is not None:
+            return jsonify({"ok": False, "reason": "already_exists",
+                            "message": f"{symbol} is already covered by "
+                                       f"{existing.name}."}), 409
+
+        spec = SymbolSpec.from_mt5_info(symbol, row)
+        manager.add_asset(
+            symbol, symbol,
+            # Added switched off: the scanner should only pick up an instrument
+            # the user deliberately turned on (see the note in assets.json).
+            enabled=False,
+            digits=spec.digits,
+            contract_size=spec.contract_size,
+            volume_min=spec.volume_min,
+            volume_step=spec.volume_step,
+            volume_max=spec.volume_max,
+        )
+        _sync_assets(g.repo, [symbol])
+        g.repo.log_event("INFO", "dashboard",
+                         f"asset added from broker: {symbol} (disabled)")
+        return jsonify({"ok": True,
+                        "message": f"Added {symbol} — enable it to start scanning.",
+                        "assets": asset_choices(cfg, g.repo)})
+
+    @app.post("/api/account/refresh")
+    def api_account_refresh():
+        """Take a fresh account snapshot for the dashboard balance tile.
+
+        Explicitly requested rather than polled. Reading the account means
+        holding the MT5 terminal, which the live session and the background jobs
+        contend for, so it cannot ride along on the five-second ``/api/status``
+        poll. While a live session runs the worker snapshots the account every
+        poll of its own, and this route says so rather than failing.
+        """
+        if not _origin_allowed():
+            abort(403)
+        result = jobs.request_account_refresh()
+        g.repo.log_event("INFO" if result["ok"] else "WARN", "dashboard",
+                         f"account refresh: {result.get('reason') or 'started'}")
+        return jsonify(result), (200 if result["ok"] else 409)
+
+    @app.post("/api/auto-trading")
+    def api_auto_trading():
+        """Set or clear the runtime auto-trading override.
+
+        This *operates* the master switch rather than weakening it. Every gate
+        below it in :mod:`trading.executor` still applies to every signal, and
+        the override is session-only — it is never written to ``.env``, so a
+        restart puts the bot back on the ``.env`` baseline and it cannot come
+        back up armed.
+
+        Presence carries the tri-state: a body with no ``enabled`` key clears
+        the override and hands control back to ``.env``, which is the only way
+        to reach that state without restarting.
+        """
+        if not _origin_allowed():
+            abort(403)
+        raw = _payload().get("enabled", None)
+        enabled = (None if raw is None
+                   else str(raw).strip().lower() in {"1", "true", "yes", "on"})
+
+        result = jobs.set_auto_trading(enabled)
+        # Arming is the notable event, so it is recorded as a warning; disarming
+        # and resetting are routine, and recorded as information.
+        g.repo.log_event(
+            "WARN" if result["auto_trading"] else "INFO", "dashboard",
+            f"auto-trading override: {enabled!r} (effective="
+            f"{result['auto_trading']}, baseline={result['baseline']})")
+        return jsonify(result)
+
     @app.get("/api/status")
     def api_status():
         payload = jobs.status()
@@ -417,6 +611,9 @@ def register_api(app) -> None:
         payload["probe"] = _add_ny_times(payload["probe"],
                                          ("oldest_utc", "newest_utc",
                                           "finished_at_utc"))
+        # The balance tile is only meaningful with the time it was read, so the NY
+        # rendering of the snapshot timestamp travels with the snapshot itself.
+        payload["account"] = _add_ny_times(payload["account"], ("fetched_at_utc",))
 
         after = request.args.get("after_signal_id", type=int)
         payload["signals"] = {
@@ -433,8 +630,12 @@ def register_api(app) -> None:
             "enabled": cfg.telegram_enabled,
             "configured": bool(cfg.telegram_bot_token and cfg.telegram_chat_id),
         }
-        # Surfaced read-only: the dashboard displays this, and no route can set it.
-        payload["auto_trading"] = cfg.auto_trading
+        # The effective switch and the .env baseline both travel, so the
+        # dashboard can show "overridden" rather than silently disagreeing with
+        # .env. Only the deliberate route above can move the effective value.
+        payload["auto_trading"] = cfg.effective_auto_trading
+        payload["auto_trading_baseline"] = cfg.auto_trading
+        payload["auto_trading_override"] = cfg.auto_trading_override
         payload["assets"] = asset_choices(cfg, g.repo)
         payload["backtest_defaults"] = {"bars": cfg.backtest_m1_bars}
         payload["ai"] = ai_status(cfg)

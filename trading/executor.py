@@ -4,12 +4,20 @@
 
 Safety contract (hard constraint, must never be relaxed):
 
-* ``AUTO_TRADING=false`` (the default) ⇒ :meth:`Executor.execute` NEVER calls
-  ``order_send``. It returns a :class:`ExecutionResult` with
+* The master switch must be on ⇒ :meth:`Executor.execute` NEVER calls
+  ``order_send`` otherwise. It returns a :class:`ExecutionResult` with
   ``executed=False`` and ``reason="auto_trading_disabled"`` so the intent is
   recorded (dashboard / audit trail) but no order reaches the broker.
-* Even with ``AUTO_TRADING=true`` an order is placed ONLY when **every** gate
-  passes:
+
+  The switch is :func:`config.auto_trading_enabled`: the ``AUTO_TRADING``
+  baseline from ``.env``, unless a runtime override is set. The dashboard may
+  set that override (session-only — it is never written back to ``.env``), which
+  makes this gate *operable*, not weaker: it is still a hard gate that no signal,
+  no AI output and no code path here can bypass, and it is read fresh on every
+  call so a running session obeys it on its next signal.
+* Even with the switch on, an order is placed ONLY when **every** gate
+  passes: and this is where the override's authority stops — the dashboard
+  cannot reach any gate below.
     - the :class:`~trading.signal_engine.Signal` exists and is ``APPROVED``,
     - the signal was deterministically risk-approved (``risk_approved``), and
       the risk manager independently re-checks the geometry (AI can never
@@ -32,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from config import Settings, get_settings
+from config import Settings, auto_trading_enabled, get_settings
 
 from . import time_utils as tu
 from .risk_manager import RiskManager
@@ -89,7 +97,7 @@ class Executor:
         now = tu.now_utc()
 
         # ---- Gate 1: hard safety switch ---------------------------------- #
-        if not self.settings.auto_trading:
+        if not auto_trading_enabled(self.settings):
             return self._skipped(signal, symbol, 0.0, "auto_trading_disabled", now)
 
         # ---- Gate 2: signal must be fully approved deterministically ------ #

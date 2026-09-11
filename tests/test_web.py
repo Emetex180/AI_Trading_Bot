@@ -205,9 +205,49 @@ class _FakeJobs:
         self.probe = {"state": "idle", "asset": None, "symbol": None,
                       "n_bars": 0, "oldest_utc": None, "newest_utc": None,
                       "last_error": "", "finished_at_utc": None}
+        self.broker = {"state": "idle", "n_symbols": 0, "last_error": "",
+                       "finished_at_utc": None}
+        self.account = {"state": "idle", "balance": None, "equity": None,
+                        "margin_free": None, "currency": None, "login": None,
+                        "server": None, "name": None, "last_error": "",
+                        "fetched_at_utc": None}
+        self.symbols = []
+        self.scan_result = {"ok": True, "message": "Reading the broker's symbol list…"}
+        self.account_result = {"ok": True, "message": "Reading the account…"}
         self.start_result = {"ok": True, "message": "Live session starting."}
         self.requests = []
         self.probe_requests = []
+        self.scan_requests = 0
+        self.account_requests = 0
+
+    def broker_state(self):
+        return dict(self.broker)
+
+    def broker_catalog(self):
+        return [dict(s) for s in self.symbols]
+
+    def request_account_refresh(self):
+        self.account_requests += 1
+        result = dict(self.account_result)
+        result["account"] = self.account_state()
+        if result["ok"]:
+            self.account = {**self.account, "state": "done", "balance": 10_000.0,
+                            "equity": 9_842.15, "margin_free": 9_842.15,
+                            "currency": "USD", "login": 12345,
+                            "server": "Broker-Demo"}
+        return result
+
+    def account_state(self):
+        return dict(self.account)
+
+    def request_broker_scan(self):
+        self.scan_requests += 1
+        result = dict(self.scan_result)
+        result["broker"] = self.broker_state()
+        if result["ok"]:
+            self.broker["state"] = "done"
+            self.broker["n_symbols"] = len(self.symbols)
+        return result
 
     def start_live(self):
         result = dict(self.start_result)
@@ -239,7 +279,8 @@ class _FakeJobs:
 
     def status(self):
         return {"live": dict(self.live), "backtest": dict(self.backtest),
-                "probe": dict(self.probe),
+                "probe": dict(self.probe), "broker": self.broker_state(),
+                "account": self.account_state(),
                 "live_running": self.live["state"] == "running"}
 
     def is_live_running(self):
@@ -397,6 +438,55 @@ def test_dashboard_warns_when_telegram_unconfigured():
     """Signals would be detected but silently go nowhere; the UI must say so."""
     body = _api_client(_repo()).get("/").get_data(as_text=True)
     assert "Telegram is not configured" in body
+
+
+def test_dashboard_lists_every_asset_not_only_the_enabled_ones(registry_cfg):
+    """A disabled asset must read as switched off, not as absent.
+
+    The card used to render the enabled slice alone, so the dashboard showed a
+    fraction of the registry with nothing to say the rest existed.
+    """
+    body = _registry_client(_repo(), _FakeJobs(), registry_cfg).get(
+        "/").get_data(as_text=True)
+
+    assert ">USTEC</span>" in body      # enabled
+    assert ">GOLD</span>" in body       # disabled, and still listed
+    assert "1 / 2" in body              # enabled / total
+    assert "disabled" in body
+
+
+def test_dashboard_renders_the_account_tile_and_its_refresh_control():
+    body = _api_client(_repo()).get("/").get_data(as_text=True)
+    assert 'id="account-card"' in body
+    assert 'id="account-refresh"' in body
+    assert 'id="account-balance"' in body
+    assert 'id="account-equity"' in body
+    assert 'id="account-margin-free"' in body
+
+
+def test_the_account_tile_says_so_when_nothing_has_been_read_yet():
+    """An em dash, never a fabricated 0.00 — the account may be funded."""
+    body = _api_client(_repo()).get("/").get_data(as_text=True)
+    assert "not read yet" in body
+    assert ">0.00<" not in body
+
+
+def test_the_account_tile_paints_the_snapshot_it_was_given(registry_cfg):
+    jobs = _FakeJobs()
+    jobs.account = {**jobs.account, "state": "done", "balance": 10_000.0,
+                    "equity": 9_842.15, "margin_free": 9_842.15,
+                    "currency": "USD", "login": 12345, "name": "Test Account",
+                    "server": "Broker-Demo",
+                    "fetched_at_utc": datetime(2026, 1, 6, 18, 32)}
+
+    body = _registry_client(_repo(), jobs, registry_cfg).get("/").get_data(
+        as_text=True)
+
+    assert "10,000.00" in body          # thousands-separated, not 10000.0
+    assert "9,842.15" in body
+    assert "USD" in body
+    assert "12345" in body
+    assert "as of 2026-01-06 14:32" in body      # project NY clock, as elsewhere
 
 
 def test_backtests_page_renders_run_form():
@@ -632,3 +722,187 @@ def test_dropdowns_read_the_registry_not_a_stale_db_row(registry_cfg):
 
     assert "USTEC" in body
     assert "GHOST" not in body
+
+
+# --------------------------------------------------------------------------- #
+# Broker symbol catalogue
+# --------------------------------------------------------------------------- #
+def _scanned_jobs(symbols=None):
+    """A job manager whose last broker scan is already complete."""
+    jobs = _FakeJobs()
+    jobs.symbols = symbols if symbols is not None else [
+        {"name": "EURUSD.pro", "digits": 5, "trade_contract_size": 100000.0,
+         "volume_min": 0.01, "volume_step": 0.01, "volume_max": 100.0},
+        {"name": "XAUUSDm", "digits": 2, "trade_contract_size": 100.0,
+         "volume_min": 0.01, "volume_step": 0.01, "volume_max": 50.0},
+    ]
+    jobs.broker = {"state": "done", "n_symbols": len(jobs.symbols),
+                   "last_error": "", "finished_at_utc": None}
+    return jobs
+
+
+def test_broker_catalog_marks_what_is_already_in_the_registry(registry_cfg):
+    """The browser filters on this, so the server resolves it once."""
+    payload = _registry_client(_repo(), _scanned_jobs(), registry_cfg) \
+        .get("/api/assets/broker").get_json()
+
+    assert payload["ok"] is True
+    by_name = {s["name"]: s for s in payload["symbols"]}
+    assert by_name["XAUUSDm"]["in_registry"] is True     # GOLD maps to it
+    assert by_name["EURUSD.pro"]["in_registry"] is False
+
+
+def test_adding_a_broker_symbol_keeps_its_case_and_stays_disabled(registry_cfg):
+    """The name is the broker symbol verbatim, so resolution hits its exact tier.
+
+    Upper-casing it (what ``/api/assets/add`` does for a typed label) would send
+    ``EURUSD.PRO`` to the resolver instead of the name the broker actually uses.
+    """
+    resp = _registry_client(_repo(), _scanned_jobs(), registry_cfg).post(
+        "/api/assets/add-broker", headers=_same_origin(),
+        data={"symbol": "EURUSD.pro"})
+
+    assert resp.status_code == 200
+    stored = _read_registry(registry_cfg)["EURUSD.pro"]
+    assert stored["broker_symbol"] == "EURUSD.pro"    # case preserved
+    assert stored["enabled"] is False                 # opt-in, never automatic
+    assert stored["digits"] == 5                      # the broker's own precision
+    assert stored["contract_size"] == 100000.0        # offline sizing fallback
+    assert stored["volume_min"] == 0.01
+
+
+def test_adding_a_broker_symbol_mirrors_it_into_the_database(registry_cfg):
+    repo = _repo()
+    _registry_client(repo, _scanned_jobs(), registry_cfg).post(
+        "/api/assets/add-broker", headers=_same_origin(),
+        data={"symbol": "EURUSD.pro"})
+
+    assert {a.name for a in repo.list_assets()} == {"EURUSD.pro"}
+
+
+def test_adding_a_symbol_the_broker_never_listed_is_refused(registry_cfg):
+    """A browser page left open must not inject a symbol the scan never saw."""
+    resp = _registry_client(_repo(), _scanned_jobs(), registry_cfg).post(
+        "/api/assets/add-broker", headers=_same_origin(), data={"symbol": "NOPE"})
+
+    assert resp.status_code == 404
+    assert resp.get_json()["reason"] == "unknown_symbol"
+    assert "NOPE" not in _read_registry(registry_cfg)
+
+
+def test_adding_a_symbol_already_covered_by_another_entry_is_refused(registry_cfg):
+    """``GOLD`` already points at ``XAUUSDm``.
+
+    Adding that broker symbol as its own entry would put two registry rows on one
+    instrument, and the scanner would trade it twice.
+    """
+    resp = _registry_client(_repo(), _scanned_jobs(), registry_cfg).post(
+        "/api/assets/add-broker", headers=_same_origin(),
+        data={"symbol": "XAUUSDm"})
+
+    assert resp.status_code == 409
+    assert resp.get_json()["reason"] == "already_exists"
+    assert "GOLD" in resp.get_json()["message"]
+
+
+def test_bulk_toggle_flips_the_whole_registry(registry_cfg):
+    resp = _registry_client(_repo(), _scanned_jobs(), registry_cfg).post(
+        "/api/assets/set-all", headers=_same_origin(), data={"enabled": "true"})
+
+    assert resp.status_code == 200
+    assert all(a["enabled"] for a in _read_registry(registry_cfg).values())
+
+
+def test_bulk_toggle_mirrors_every_asset_not_just_one(registry_cfg):
+    """The home page counts the DB mirror; a partial sync is what made it lie."""
+    repo = _repo()
+    _registry_client(repo, _scanned_jobs(), registry_cfg).post(
+        "/api/assets/set-all", headers=_same_origin(), data={"enabled": "true"})
+
+    assert {a.name for a in repo.list_assets()} == {"USTEC", "GOLD"}
+    assert all(a.enabled for a in repo.list_assets())
+
+
+def test_the_broker_scan_endpoint_starts_a_scan(registry_cfg):
+    jobs = _FakeJobs()
+    resp = _registry_client(_repo(), jobs, registry_cfg).post(
+        "/api/assets/broker/scan", headers=_same_origin())
+
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert jobs.scan_requests == 1
+
+
+def test_the_broker_scan_reports_a_refusal_rather_than_queuing(registry_cfg):
+    jobs = _FakeJobs()
+    jobs.scan_result = {"ok": False, "reason": "live_running",
+                        "message": "A live session owns the MT5 terminal."}
+    resp = _registry_client(_repo(), jobs, registry_cfg).post(
+        "/api/assets/broker/scan", headers=_same_origin())
+
+    assert resp.status_code == 409
+    assert resp.get_json()["reason"] == "live_running"
+
+
+@pytest.mark.parametrize("path,payload", [
+    ("/api/assets/add-broker", {"symbol": "XAUUSDm"}),
+    ("/api/assets/set-all", {"enabled": "true"}),
+    ("/api/assets/broker/scan", {}),
+    ("/api/account/refresh", {}),
+])
+def test_the_new_asset_routes_are_refused_cross_origin(registry_cfg, path, payload):
+    resp = _registry_client(_repo(), _scanned_jobs(), registry_cfg).post(
+        path, headers={"Origin": "http://evil.example.com"}, data=payload)
+    assert resp.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# Account snapshot
+# --------------------------------------------------------------------------- #
+def test_the_account_refresh_endpoint_reads_the_account(registry_cfg):
+    jobs = _FakeJobs()
+    resp = _registry_client(_repo(), jobs, registry_cfg).post(
+        "/api/account/refresh", headers=_same_origin())
+
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert jobs.account_requests == 1
+
+
+def test_the_account_refresh_reports_a_refusal_rather_than_queuing(registry_cfg):
+    """While a live session runs the terminal is its to own, so this says so."""
+    jobs = _FakeJobs()
+    jobs.account_result = {
+        "ok": False, "reason": "live_running",
+        "message": "A live session owns the terminal — showing the account it reports."}
+    resp = _registry_client(_repo(), jobs, registry_cfg).post(
+        "/api/account/refresh", headers=_same_origin())
+
+    assert resp.status_code == 409
+    assert resp.get_json()["reason"] == "live_running"
+
+
+def test_status_carries_the_account_and_its_ny_read_time(registry_cfg):
+    """The tile is only meaningful with the time it was taken, on the NY clock."""
+    jobs = _FakeJobs()
+    jobs.account = {**jobs.account, "state": "done", "balance": 10_000.0,
+                    "equity": 9_842.15, "margin_free": 9_842.15,
+                    "currency": "USD", "login": 12345, "server": "Broker-Demo",
+                    "fetched_at_utc": datetime(2026, 1, 6, 18, 32)}
+
+    payload = _registry_client(_repo(), jobs, registry_cfg).get(
+        "/api/status").get_json()
+
+    assert payload["account"]["balance"] == 10_000.0
+    assert payload["account"]["currency"] == "USD"
+    # 18:32 UTC is 14:32 on the project's NY clock, which the tile displays.
+    assert payload["account"]["fetched_at_ny"] == "2026-01-06 14:32"
+
+
+def test_an_unread_account_reports_none_rather_than_a_zero_balance(registry_cfg):
+    """Zero is a real balance; ``None`` is "we have never asked the terminal"."""
+    payload = _registry_client(_repo(), _FakeJobs(), registry_cfg).get(
+        "/api/status").get_json()
+
+    assert payload["account"]["balance"] is None
+    assert payload["account"]["state"] == "idle"

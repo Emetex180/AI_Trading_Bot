@@ -84,6 +84,26 @@ class MT5Client:
         except Exception:
             return False
 
+    def terminal_trade_allowed(self) -> bool | None:
+        """Whether the terminal's own Algo Trading button is on.
+
+        Deliberately *not* ``AccountInfo.trade_allowed``: that one reports the
+        account's permission to trade, which stays ``True`` even when the
+        toolbar toggle is off. This is the toolbar toggle, and while it is off
+        every ``order_send`` is rejected no matter what ``AUTO_TRADING`` says —
+        which is exactly the state that looks like "auto-trading is on but
+        nothing happens".
+
+        ``None`` means "could not ask" (no terminal), which the dashboard must
+        render as unknown rather than as a reassuring ``False`` or ``True``.
+        """
+        if not self.is_connected():
+            return None
+        info = _mt5.terminal_info()
+        if info is None:
+            return None
+        return bool(info.trade_allowed)
+
     def disconnect(self) -> None:
         if _mt5 is not None:
             _mt5.shutdown()
@@ -109,18 +129,16 @@ class MT5Client:
             margin_free=acc.margin_free,
         )
 
-    def symbol_info(self, symbol: str) -> dict[str, Any] | None:
-        """Everything the rest of the bot needs to know about one symbol.
+    @staticmethod
+    def _info_dict(info: Any) -> dict[str, Any]:
+        """Normalise one MT5 ``SymbolInfo`` object into the dict the bot passes around.
 
         The contract fields (``trade_contract_size``, ``volume_*``, ``tick_*``)
         are what make position sizing correct per asset class — see
-        :mod:`trading.symbol_spec`. They are read here and nowhere else.
+        :mod:`trading.symbol_spec`. Shared by :meth:`symbol_info` and
+        :meth:`symbol_catalog` so the two can never report different contract
+        numbers for the same instrument; ``SymbolSpec.from_mt5_info`` reads either.
         """
-        if not self.is_connected():
-            return None
-        info = _mt5.symbol_info(symbol)
-        if info is None:
-            return None
         return {
             "name": info.name,
             "digits": info.digits,
@@ -138,6 +156,15 @@ class MT5Client:
             "currency_profit": getattr(info, "currency_profit", ""),
         }
 
+    def symbol_info(self, symbol: str) -> dict[str, Any] | None:
+        """Everything the rest of the bot needs to know about one symbol."""
+        if not self.is_connected():
+            return None
+        info = _mt5.symbol_info(symbol)
+        if info is None:
+            return None
+        return self._info_dict(info)
+
     def symbol_names(self) -> list[str]:
         """Every symbol name the terminal offers (used for broker-symbol lookup).
 
@@ -150,6 +177,26 @@ class MT5Client:
         if symbols is None:
             return []
         return [s.name for s in symbols]
+
+    def symbol_catalog(self) -> list[dict[str, Any]]:
+        """Every symbol the terminal offers, each with its contract fields.
+
+        ``symbols_get()`` returns *populated* info objects, so the contract
+        numbers arrive in the same single call that lists the names. Reading
+        :meth:`symbol_info` once per symbol would be thousands of terminal round
+        trips over a broker's full catalogue, which is why the dashboard browser
+        reads this instead.
+
+        Returns ``[]`` rather than raising when the terminal is unavailable —
+        the same degrade-don't-fail contract as :meth:`symbol_names`, so the
+        dashboard shows an empty list instead of an error page.
+        """
+        if not self.is_connected():
+            return []
+        symbols = _mt5.symbols_get()
+        if symbols is None:
+            return []
+        return [self._info_dict(s) for s in symbols]
 
     def ensure_symbol(self, symbol: str) -> bool:
         """Make ``symbol`` visible in Market Watch; return whether it now is.

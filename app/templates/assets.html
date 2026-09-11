@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat, empty %}
+{% block title %}Assets — ICT Scanner{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Assets</h1>
+    <p class="page-sub">Choose which instruments the scanner watches — from the
+      registry, or straight from your broker's symbol list.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-outline-secondary"
+       href="{{ url_for('backtests_page') }}">Run a backtest</a>
+  </div>
+</div>
+
+<div class="stat-grid mb-4">
+  {{ stat('Assets enabled', assets_enabled ~ ' / ' ~ assets | length, 'info',
+          id='assets-enabled-count') }}
+  {{ stat('Broker symbols', broker.n_symbols, '',
+          id='assets-broker-count') }}
+</div>
+
+<div class="row g-4">
+  {# ------------------------------------------------------------------ #}
+  {# Registry — what the scanner will actually run                       #}
+  {# ------------------------------------------------------------------ #}
+  <div class="col-xl-6">
+    <div class="card h-100">
+      <div class="card-header">
+        <span>Registry</span>
+        <span class="badge tone-secondary">{{ assets | length }}</span>
+      </div>
+      <div class="card-body pb-0">
+        <p class="card-note">
+          <code>assets.json</code> is the only place instruments are configured —
+          the scanner and backtester both read it. An asset only trades while it
+          is <strong>enabled</strong>.
+        </p>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+          <button type="button" id="registry-enable-all"
+                  class="btn btn-sm btn-outline-primary">Enable all</button>
+          <button type="button" id="registry-disable-all"
+                  class="btn btn-sm btn-outline-secondary">Disable all</button>
+          <span id="registry-message" class="small ms-1"></span>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="table table-hover">
+          <thead>
+            <tr><th>Name</th><th>Broker symbol</th><th>Digits</th>
+                <th>State</th><th class="text-end">Actions</th></tr>
+          </thead>
+          <tbody id="registry-rows">
+          {% for a in assets %}
+            <tr>
+              <td class="fw-semibold">{{ a.name }}</td>
+              <td class="mono text-muted">{{ a.broker_symbol }}</td>
+              <td class="mono">{{ a.digits }}</td>
+              <td>
+                <span class="badge tone-{{ 'success' if a.enabled else 'secondary' }}">
+                  {{ 'enabled' if a.enabled else 'disabled' }}
+                </span>
+              </td>
+              <td class="text-end">
+                <button type="button"
+                        class="btn btn-sm btn-outline-{{ 'secondary' if a.enabled else 'success' }}"
+                        data-registry-toggle data-asset="{{ a.name }}"
+                        data-enabled="{{ 'true' if a.enabled else 'false' }}"
+                        >{{ 'Disable' if a.enabled else 'Enable' }}</button>
+                <button type="button" class="btn btn-sm btn-outline-danger"
+                        data-registry-remove data-asset="{{ a.name }}"
+                        >Remove</button>
+              </td>
+            </tr>
+          {% else %}
+            {{ empty(5, 'The registry is empty. Add a symbol from the broker list.') }}
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {# ------------------------------------------------------------------ #}
+  {# Broker catalogue — everything the terminal offers                    #}
+  {# ------------------------------------------------------------------ #}
+  <div class="col-xl-6">
+    <div class="card h-100" id="broker-card">
+      <div class="card-header">
+        <span>Broker symbols</span>
+        <span id="broker-state-badge" class="badge tone-secondary">{{ broker.state }}</span>
+      </div>
+      <div class="card-body pb-0">
+        <p class="card-note">
+          Every symbol your terminal offers, with the contract numbers MT5 reports
+          for it. Anything here can be added to the registry — no code changes.
+          A symbol is added <strong>disabled</strong>, so nothing starts scanning
+          until you enable it.
+        </p>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+          <button type="button" id="broker-scan" class="btn btn-sm btn-primary">
+            Scan broker</button>
+          <span id="broker-message" class="small ms-1"></span>
+        </div>
+        <div class="row g-2 align-items-end mb-3">
+          <div class="col-12 col-sm">
+            <label class="form-label d-block" for="broker-search">Find a symbol</label>
+            <input type="search" class="form-control" id="broker-search"
+                   placeholder="e.g. XAUUSD, EUR, BTC" autocomplete="off">
+          </div>
+          <div class="col-12 col-sm-auto">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="broker-hide-added">
+              <label class="form-check-label small" for="broker-hide-added">
+                Hide already added</label>
+            </div>
+          </div>
+        </div>
+        <div id="broker-error"
+             class="alert alert-danger {% if not broker.last_error %}d-none{% endif %}">
+          {{ broker.last_error }}
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="table table-hover">
+          <thead>
+            <tr><th>Symbol</th><th>Digits</th><th>Contract</th><th>Min lot</th>
+                <th class="text-end">Add</th></tr>
+          </thead>
+          <tbody id="broker-rows">
+            <tr>
+              <td colspan="5" class="empty-state">
+                No symbols loaded yet. Click <strong>Scan broker</strong> to read
+                the list from your terminal.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# The scanned catalogue, handed to the browser as data rather than markup: a
+   full broker list runs to hundreds of rows, and the search box and "hide
+   already added" filter both need it in memory to re-render without another
+   terminal round trip. Same inline-JSON pattern as the batch curves. #}
+<script id="broker-catalog" type="application/json">{{ catalog | tojson }}</script>
+{% endblock %}

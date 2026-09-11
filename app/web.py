@@ -5,10 +5,12 @@ and — through :mod:`app.api` — can also **operate** the bot: start/stop a li
 session and launch backtests. Those routes delegate to
 :class:`runner.JobManager`, which owns the background threads.
 
-What it still cannot do: enable auto-trading. ``AUTO_TRADING`` remains a
-``.env``-only setting and no route here can change it, so every approved signal
-continues to be recorded as ``SKIPPED`` unless that flag was set deliberately
-outside the browser. Session state is displayed read-only.
+What it still cannot do: reach past the master switch. ``AUTO_TRADING`` in
+``.env`` is the baseline, and the dashboard can set a session-only override on
+top of it (:func:`app.api.api_auto_trading`) — deliberately never persisted, so
+a restart returns the bot to the ``.env`` value. No route here can touch any
+other gate in :mod:`trading.executor`, and session state is otherwise displayed
+read-only.
 
 Routes that render pages touch no MT5, AI or Telegram, so they keep working when
 the terminal is closed; the control routes start work on a background thread
@@ -103,6 +105,21 @@ def _num(value, digits: int = 4):
         return ""
     try:
         return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _money(value, digits: int = 2):
+    """Render an account figure with thousands separators.
+
+    ``None`` means "never read from the terminal", which is deliberately not the
+    same as a zero balance — the tile must be able to show an em dash rather than
+    claim the account is empty.
+    """
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):,.{digits}f}"
     except (TypeError, ValueError):
         return str(value)
 
@@ -207,6 +224,7 @@ def create_app(settings: Settings | None = None,
 
     app.jinja_env.filters["ny"] = _ny_str
     app.jinja_env.filters["num"] = _num
+    app.jinja_env.filters["money"] = _money
     app.jinja_env.filters["price"] = _price
     app.jinja_env.filters["status"] = _status_label
     app.jinja_env.filters["pf"] = _profit_factor
@@ -245,7 +263,10 @@ def create_app(settings: Settings | None = None,
     @app.get("/")
     def index():
         repo = g.repo
-        assets = repo.list_assets()
+        # The registry, not the DB mirror. ``assets.json`` is what the scanner and
+        # the backtester actually read, so these counts must describe that list —
+        # otherwise the dashboard reports assets the engine will never run.
+        assets = asset_choices(cfg, repo)
         stats = {
             "signals_total": repo.count_signals(),
             "signals_approved": repo.count_signals("APPROVED"),
@@ -254,7 +275,7 @@ def create_app(settings: Settings | None = None,
             "trades_sent": repo.count_trades("SENT"),
             "trades_skipped": repo.count_trades("SKIPPED"),
             "backtests": repo.count_backtests(),
-            "assets_enabled": sum(1 for a in assets if a.enabled),
+            "assets_enabled": sum(1 for a in assets if a["enabled"]),
             "assets_total": len(assets),
         }
         # Rendered once so the page is useful before the first poll returns.
@@ -265,7 +286,11 @@ def create_app(settings: Settings | None = None,
             job_state=job_state,
             recent_signals=repo.recent_signals(12),
             recent_events=repo.recent_events(8),
-            assets=[a for a in assets if a.enabled],
+            # The whole registry, not just the enabled slice: the card marks each
+            # entry on/off, so a disabled asset is visibly present rather than
+            # silently missing. ``job_state`` already carries the last account
+            # snapshot, so the balance tile paints on the first byte too.
+            assets=assets,
             telegram_ready=(cfg.telegram_enabled and cfg.telegram_bot_token
                             and cfg.telegram_chat_id),
         )
@@ -279,7 +304,7 @@ def create_app(settings: Settings | None = None,
         return render_template(
             "signals.html",
             rows=rows,
-            assets=repo.list_assets(),
+            assets=asset_choices(cfg, repo),
             filter_asset=asset,
             filter_status=status,
         )
@@ -360,6 +385,30 @@ def create_app(settings: Settings | None = None,
             params=bt.params_json or {},
             trades=trades,
             curve=curve,
+        )
+
+    @app.get("/assets")
+    def assets_page():
+        """Manage the registry, and browse what the broker actually offers.
+
+        Renders ``assets.json`` (authoritative) plus whatever the last broker scan
+        produced. No MT5 is touched here, so the page still loads with the
+        terminal closed — the scan itself is kicked from the browser, and its
+        result arrives through ``/api/assets/broker``.
+        """
+        registry = asset_choices(cfg, g.repo)
+        # An entry claims its own name and its broker symbol, so a symbol already
+        # covered by a differently-named entry is still shown as taken.
+        known = ({a["name"] for a in registry}
+                 | {a["broker_symbol"] for a in registry})
+        catalog = [dict(row, in_registry=row.get("name") in known)
+                   for row in jobs.broker_catalog()]
+        return render_template(
+            "assets.html",
+            assets=registry,
+            catalog=catalog,
+            broker=jobs.broker_state(),
+            assets_enabled=sum(1 for a in registry if a["enabled"]),
         )
 
     @app.get("/health")

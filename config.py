@@ -76,6 +76,23 @@ def _env_list(key: str, default: list[str]) -> list[str]:
     return [item.strip().lower() for item in raw.split(",") if item.strip()]
 
 
+def auto_trading_enabled(settings: Any) -> bool:
+    """The effective auto-trading switch, honouring a runtime override.
+
+    A dashboard override wins over the ``.env`` baseline when one is set;
+    ``None`` means no override has been requested, so the baseline stands.
+
+    Duck-typed rather than typed as :class:`Settings` on purpose: the executor
+    tests build a ``SimpleNamespace`` stand-in, and a settings object with no
+    ``auto_trading_override`` attribute must read as "no override" rather than
+    raising ``AttributeError`` inside the execution gate.
+    """
+    override = getattr(settings, "auto_trading_override", None)
+    if override is None:
+        return bool(getattr(settings, "auto_trading", False))
+    return bool(override)
+
+
 # --------------------------------------------------------------------------- #
 # Settings object
 # --------------------------------------------------------------------------- #
@@ -136,6 +153,26 @@ class Settings:
     asset_env: dict[str, str] = field(default_factory=dict)
 
     extra: dict[str, Any] = field(default_factory=dict)
+
+    # --- Runtime overrides ----------------------------------------------------
+    # Set from the dashboard, and deliberately NOT persisted: a restart drops
+    # back to the ``auto_trading`` baseline read from ``.env``, so the bot can
+    # never come back up armed. ``None`` means "follow the baseline".
+    #
+    # Declared last because a defaulted field cannot precede the non-default
+    # ones above; every construction site uses keywords, so position is free.
+    auto_trading_override: bool | None = None
+
+    @property
+    def effective_auto_trading(self) -> bool:
+        """The value every gate, log line and badge must read.
+
+        Not ``auto_trading`` itself: the baseline is what ``.env`` said, and the
+        override is what the operator asked for at runtime. Rendering the
+        baseline on the dashboard would show a stale posture the moment the
+        override is used.
+        """
+        return auto_trading_enabled(self)
 
     def asset_overrides_for(self, asset_name: str) -> dict[str, Any]:
         """Per-asset strategy overrides read from ``ASSET_<NAME>_...`` env keys.

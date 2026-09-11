@@ -31,12 +31,15 @@
 {%- endmacro %}
 
 {# `id` is optional and lands on the value element, so the dashboard poller can
-   update a figure in place (see `stat-signals-total` in dashboard.js). #}
-{% macro stat(label, value, tone='', sub='', id='') -%}
+   update a figure in place (see `stat-signals-total` in dashboard.js).
+   `sub_id` does the same for the sub-line. Passing it alone still emits the
+   (empty) element, because the account tiles need a currency label that can
+   appear when a balance arrives *after* the first paint. #}
+{% macro stat(label, value, tone='', sub='', id='', sub_id='') -%}
   <div class="stat-card {{ tone }}">
     <div class="stat-label"><span class="tone-dot"></span>{{ label }}</div>
     <div class="stat-value"{% if id %} id="{{ id }}"{% endif %}>{{ value }}</div>
-    {%- if sub %}<div class="stat-sub">{{ sub }}</div>{% endif %}
+    {%- if sub or sub_id %}<div class="stat-sub"{% if sub_id %} id="{{ sub_id }}"{% endif %}>{{ sub }}</div>{% endif %}
   </div>
 {%- endmacro %}
 

@@ -32,15 +32,31 @@ POLLER_IDS = {
     "dashboard": ["live-pill", "live-pill-text", "live-state-badge",
                   "live-started", "live-assets", "live-last-candle",
                   "live-signals", "live-start", "live-stop", "live-message",
-                  "live-error", "new-signals", "stat-signals-total"],
+                  "live-error", "new-signals", "stat-signals-total",
+                  "account-card", "account-refresh", "account-balance",
+                  "account-equity", "account-margin-free", "account-who",
+                  "account-fetched", "account-message", "account-error",
+                  "account-balance-currency", "account-equity-currency",
+                  "account-margin-free-currency",
+                  "auto-trading-card", "auto-trading-state-badge",
+                  "auto-trading-toggle", "auto-trading-reset",
+                  "auto-trading-message", "auto-trading-baseline",
+                  "auto-trading-override", "auto-trading-terminal-warning"],
     "backtests": ["backtest-form", "bt-asset", "bt-bars", "bt-hold",
                   "bt-start", "bt-end", "bt-run", "backtest-message",
                   "backtest-state-badge", "backtest-progress",
                   "backtest-progress-bar", "backtest-error"],
+    "assets": ["broker-catalog", "broker-scan", "broker-search",
+               "broker-hide-added", "broker-rows", "broker-message",
+               "broker-state-badge", "broker-error", "registry-rows",
+               "registry-message", "registry-enable-all", "registry-disable-all",
+               "assets-enabled-count", "assets-broker-count"],
 }
 
-#: Provided by the navbar, so present whatever the route.
-GLOBAL_IDS = ["live-pill", "live-pill-text", "auto-trading-pill"]
+#: Provided by the navbar, so present whatever the route. The pill's label is
+#: polled on every page, not just the dashboard, so it belongs here too.
+GLOBAL_IDS = ["live-pill", "live-pill-text", "auto-trading-pill",
+              "auto-trading-pill-text"]
 
 
 @pytest.fixture
@@ -91,6 +107,7 @@ def dashboard(populated_repo):
         "backtests": "/backtests",
         "backtest_detail": f"/backtests/{bt_id}",
         "batch": "/backtests/batch/batch-1",
+        "assets": "/assets",
     }
     html = {}
     for name, path in paths.items():
@@ -103,7 +120,7 @@ def dashboard(populated_repo):
 # --------------------------------------------------------------------------- #
 # The poller's DOM contract
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("page", ["dashboard", "signals", "backtests"])
+@pytest.mark.parametrize("page", ["dashboard", "signals", "backtests", "assets"])
 def test_the_topbar_status_ids_exist_on_every_page(dashboard, page):
     """The live pill and the auto-trading warning are global, not per-route."""
     html = dashboard["html"][page]
@@ -118,7 +135,7 @@ def test_the_poller_finds_every_element_it_looks_up(dashboard, page, ids):
         assert f'id="{element}"' in html, f"{element} missing from {page}"
 
 
-@pytest.mark.parametrize("page", ["dashboard", "signals", "backtests"])
+@pytest.mark.parametrize("page", ["dashboard", "signals", "backtests", "assets"])
 def test_the_auto_trading_state_is_visible_on_every_page(dashboard, page):
     """A safety indicator shown only on the dashboard is a liability."""
     assert "AUTO-TRADING" in dashboard["html"][page]
@@ -146,6 +163,22 @@ def test_each_chart_dataset_is_valid_json(dashboard):
     equity = re.search(r'<script id="equity-data"[^>]*>(.*?)</script>',
                        dashboard["html"]["backtest_detail"], re.S).group(1)
     assert isinstance(json.loads(equity), list)
+
+
+def test_the_broker_catalogue_reaches_the_browser_as_data(dashboard):
+    """The assets page parses this to build the symbol table and filter it.
+
+    Embedded as JSON rather than rendered as rows because a full broker list runs
+    to hundreds of entries, and the search box re-renders it without another
+    terminal round trip.
+    """
+    import json
+
+    html = dashboard["html"]["assets"]
+    payload = re.search(r'<script id="broker-catalog"[^>]*>(.*?)</script>',
+                        html, re.S)
+    assert payload, "the broker catalogue script tag is missing"
+    assert isinstance(json.loads(payload.group(1)), list)
 
 
 # --------------------------------------------------------------------------- #
@@ -194,6 +227,7 @@ def test_the_design_system_components_render(dashboard):
         "row-highlight": "batch",
         "card-note": "batch",
         "chart-box": "backtest_detail",
+        "table-scroll": "assets",
     }
     for token, page in expected.items():
         assert token in html[page], f"{token} missing from {page}"

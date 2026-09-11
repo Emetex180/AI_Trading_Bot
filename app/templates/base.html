@@ -30,15 +30,20 @@
          href="{{ url_for('signals_page') }}">Signals</a>
       <a class="topbar-link {{ 'active' if nav in ('backtests_page', 'backtest_detail', 'backtest_batch_page') }}"
          href="{{ url_for('backtests_page') }}">Backtests</a>
+      <a class="topbar-link {{ 'active' if nav == 'assets_page' }}"
+         href="{{ url_for('assets_page') }}">Assets</a>
     </nav>
 
     <div class="topbar-status">
       {% if cfg is defined and cfg is not none %}
       {# The safety state is the single most important thing on screen, so it is
-         shown on every page rather than only the dashboard. #}
+         shown on every page rather than only the dashboard. Reads the
+         *effective* switch, not the .env baseline, or it would contradict the
+         dashboard the moment the override is used. #}
       <span id="auto-trading-pill"
-            class="pill {{ 'tone-danger' if cfg.auto_trading else 'tone-success' }}">
-        <span class="dot"></span>{{ 'AUTO-TRADING ENABLED' if cfg.auto_trading else 'AUTO-TRADING OFF · ALERT ONLY' }}
+            class="pill {{ 'tone-danger' if cfg.effective_auto_trading else 'tone-success' }}">
+        {# Only the inner label is rewritten by the poller, so the dot survives. #}
+        <span class="dot"></span><span id="auto-trading-pill-text">{{ 'AUTO-TRADING ENABLED' if cfg.effective_auto_trading else 'AUTO-TRADING OFF · ALERT ONLY' }}</span>
       </span>
       {% endif %}
       {# Only the inner label is rewritten by the poller, so the status dot survives. #}

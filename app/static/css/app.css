@@ -500,6 +500,15 @@ input[type="number"] {
   z-index: 2;
 }
 
+/* A narrow-column list that can outgrow its card — the dashboard's asset list
+   carries every registry entry, not just the enabled ones, so it needs a much
+   lower ceiling than a table does. Scrolls in place rather than pushing the
+   cards below it off the page. */
+.list-scroll {
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
 /* Rows that navigate on click. */
 .row-link { cursor: pointer; }
 .row-link:hover { background: var(--c-surface-2); }
