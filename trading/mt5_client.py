@@ -134,6 +134,20 @@ class MT5Client:
         except KeyError as exc:
             raise MT5Error(f"Unsupported timeframe {timeframe!r}") from exc
 
+    def _copy_rates_from_pos_raw(self, symbol: str, timeframe: str, pos: int,
+                                 count: int) -> list[tuple]:
+        """``copy_rates_from_pos`` that returns ``[]`` instead of raising.
+
+        Probing for the edges of history asks for positions that legitimately do
+        not exist, so "no rows here" must be distinguishable from a failure.
+        """
+        if not self.is_connected():
+            raise MT5Error("Not connected to MT5")
+        rates = _mt5.copy_rates_from_pos(symbol, self._timeframe_code(timeframe), pos, count)
+        if rates is None:
+            return []
+        return [tuple(r) for r in rates]
+
     def copy_rates_from_pos(self, symbol: str, timeframe: str, pos: int, count: int) -> list[tuple]:
         """Return raw MT5 rate rows (chronological ascending) for ``symbol``.
 
@@ -141,12 +155,58 @@ class MT5Client:
         where ``time`` is the server-clock epoch. May include the currently
         forming bar at the newest position — callers decide what is 'closed'.
         """
+        rates = self._copy_rates_from_pos_raw(symbol, timeframe, pos, count)
+        if not rates:
+            raise MT5Error(f"copy_rates_from_pos failed for {symbol} {timeframe}: {_mt5.last_error()}")
+        return rates
+
+    def copy_rates_range(self, symbol: str, timeframe: str, date_from, date_to) -> list[tuple]:
+        """Return raw MT5 rate rows between two **server-clock** datetimes.
+
+        ``MetaTrader5.copy_rates_range`` filters bars against the *broker server*
+        clock, not UTC — callers must convert before calling (see
+        :meth:`trading.market_data.MarketData.fetch_m1_range`).
+
+        An empty list is a legitimate answer ("the broker holds no bars in this
+        window") and is returned as-is; only a hard failure raises.
+        """
         if not self.is_connected():
             raise MT5Error("Not connected to MT5")
-        rates = _mt5.copy_rates_from_pos(symbol, self._timeframe_code(timeframe), pos, count)
-        if rates is None or len(rates) == 0:
-            raise MT5Error(f"copy_rates_from_pos failed for {symbol} {timeframe}: {_mt5.last_error()}")
+        rates = _mt5.copy_rates_range(symbol, self._timeframe_code(timeframe),
+                                      date_from, date_to)
+        if rates is None:
+            raise MT5Error(
+                f"copy_rates_range failed for {symbol} {timeframe} "
+                f"{date_from}..{date_to}: {_mt5.last_error()}")
         return [tuple(r) for r in rates]
+
+    def history_bar_count(self, symbol: str, timeframe: str,
+                          ceiling: int = 5_000_000) -> int:
+        """How many bars of ``timeframe`` the broker holds for ``symbol``.
+
+        MT5 offers no "how much history do you have" call, but
+        ``copy_rates_from_pos`` indexes backwards from the newest bar, so the
+        count is the largest ``pos`` that still returns a row. Found by
+        exponential probing followed by a bisection — about ``2*log2(N)``
+        one-bar requests, which is cheap next to paging the history itself.
+        """
+        if not self._copy_rates_from_pos_raw(symbol, timeframe, 0, 1):
+            return 0
+
+        # Index 0 is known to exist, so the count is at least 1. Bisect between
+        # the largest index known to exist (`lo`) and one known not to (`hi`).
+        lo, hi = 0, 1
+        while hi < ceiling and self._copy_rates_from_pos_raw(symbol, timeframe, hi, 1):
+            lo, hi = hi, min(hi * 2, ceiling)
+
+        # Invariant: `lo` exists, `hi` does not (or `hi` hit the ceiling).
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if self._copy_rates_from_pos_raw(symbol, timeframe, mid, 1):
+                lo = mid
+            else:
+                hi = mid
+        return lo + 1
 
 
 def row_time_to_server_naive(row_time_epoch: int) -> Any:

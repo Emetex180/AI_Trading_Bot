@@ -43,6 +43,16 @@ def broker_to_utc(broker_dt: datetime, offset_hours: float | None = None) -> dat
     return broker_dt - server_offset(offset_hours)
 
 
+def utc_to_broker(utc_dt: datetime, offset_hours: float | None = None) -> datetime:
+    """Real UTC -> broker server clock (naive).
+
+    The exact inverse of :func:`broker_to_utc`. Needed wherever a *time range*
+    has to be handed to MT5, because ``copy_rates_range`` filters bars on the
+    broker clock rather than on UTC.
+    """
+    return utc_dt + server_offset(offset_hours)
+
+
 def broker_to_ny(broker_dt: datetime, offset_hours: float | None = None) -> datetime:
     """Broker server time -> project NY clock (naive, UTC-4).
 

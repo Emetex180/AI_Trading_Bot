@@ -7,7 +7,7 @@ queueing logic in ``runner.py`` without a terminal, network or clock dependency.
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import sessionmaker
 
@@ -17,16 +17,22 @@ from database.repository import Repository, get_engine
 from runner import (BT_DONE, BT_ERROR, BT_QUEUED, LIVE_ERROR, LIVE_RUNNING,
                     LIVE_STOPPED, JobManager)
 from trading.asset_manager import Asset
+from trading.bars import make_candle
 
 ASSET = Asset(name="TEST", broker_symbol="TEST", enabled=True)
 
 
-# --------------------------------------------------------------------------- #
-# Fakes
-# --------------------------------------------------------------------------- #
+def _m1(index: int):
+    """One synthetic M1 candle, ``index`` minutes after a fixed UTC epoch."""
+    t = datetime(2026, 1, 1, 12, 0) + timedelta(minutes=index)
+    return make_candle(t_utc=t, open_=100.0, high=101.0, low=99.0, close=100.5,
+                       volume=1)
+
+
 class _FakeClient:
     def __init__(self):
         self.connected = False
+        self.range_calls: list[tuple] = []
 
     def connect(self):
         self.connected = True
@@ -38,6 +44,11 @@ class _FakeClient:
     def account_info(self):
         return None
 
+    def copy_rates_range(self, symbol, timeframe, date_from, date_to):
+        """Empty by default — the market fake supplies the candles."""
+        self.range_calls.append((symbol, timeframe, date_from, date_to))
+        return []
+
 
 class _BrokenClient(_FakeClient):
     """Simulates a closed MT5 terminal."""
@@ -47,14 +58,38 @@ class _BrokenClient(_FakeClient):
 
 
 class _FakeMarket:
-    def __init__(self):
+    """Fake market data with a fixed M1 history.
+
+    Returns real :class:`Candle` objects rather than empty lists, because the
+    backtest worker skips an asset whose window came back empty (that is a
+    "broker has no data here" result, not a zero-trade strategy result).
+    """
+
+    def __init__(self, candles=None, n_bars=0):
         self.polls = 0
+        self._candles = (list(candles) if candles is not None
+                         else [_m1(i) for i in range(3)])
+        self.n_bars = n_bars
+        # Recorded so tests can assert which window was actually requested.
+        self.range_calls: list[tuple] = []
+        self.pos_calls: list[tuple] = []
 
     def symbol_exists(self, symbol):
         return True
 
     def fetch_m1_closed(self, symbol, count, drop_forming=True):
-        return []
+        self.pos_calls.append((symbol, count))
+        return list(self._candles)
+
+    def fetch_m1_range(self, symbol, start_utc, end_utc, drop_forming=True):
+        self.range_calls.append((symbol, start_utc, end_utc))
+        return list(self._candles)
+
+    def probe_m1_bounds(self, symbol):
+        oldest = self._candles[0].t_utc if self._candles else None
+        newest = self._candles[-1].t_utc if self._candles else None
+        return {"symbol": symbol, "n_bars": self.n_bars,
+                "oldest_utc": oldest, "newest_utc": newest}
 
     def poll_closed_candles(self, symbol, lookback=3):
         self.polls += 1
@@ -238,7 +273,7 @@ def test_status_is_readable_while_a_session_runs(tmp_path, monkeypatch):
 
     snapshot = jobs.status()
     assert snapshot["live_running"] is True
-    assert set(snapshot) == {"live", "backtest", "live_running"}
+    assert set(snapshot) == {"live", "backtest", "probe", "live_running"}
     assert snapshot["live"]["state"] == LIVE_RUNNING
     jobs.stop_live(timeout=5)
 

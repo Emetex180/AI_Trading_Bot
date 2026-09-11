@@ -1,7 +1,9 @@
 """Flask dashboard tests (test client + in-memory SQLite; no MT5/network)."""
+import json
 from dataclasses import replace
 from datetime import datetime
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -9,6 +11,7 @@ from app.web import create_app
 from config import get_settings
 from database.models import Base
 from database.repository import Repository
+from trading import time_utils as tu
 from trading.executor import ExecutionResult
 
 from test_database import _signal
@@ -191,13 +194,18 @@ class _FakeJobs:
                      "stopped_at_utc": None, "assets": [],
                      "last_candle_utc": None, "signals_session": 0,
                      "last_error": ""}
-        self.backtest = {"state": "idle", "asset": None, "bars": None,
+        self.backtest = {"state": "idle", "asset": None, "mode": "bars",
+                         "bars": None, "start_utc": None, "end_utc": None,
                          "max_hold_m1": None, "queued": False,
                          "queued_reason": "", "progress_done": 0,
                          "progress_total": 0, "last_backtest_id": None,
                          "last_error": "", "finished_at_utc": None}
+        self.probe = {"state": "idle", "asset": None, "symbol": None,
+                      "n_bars": 0, "oldest_utc": None, "newest_utc": None,
+                      "last_error": "", "finished_at_utc": None}
         self.start_result = {"ok": True, "message": "Live session starting."}
         self.requests = []
+        self.probe_requests = []
 
     def start_live(self):
         result = dict(self.start_result)
@@ -215,12 +223,21 @@ class _FakeJobs:
         self.requests.append(kw)
         state = dict(self.backtest)
         state.update({k: v for k, v in kw.items() if v is not None})
+        state["mode"] = "range" if kw.get("start_utc") else "bars"
         self.backtest = state
         return {"ok": True, "queued": False, "message": "Backtest starting.",
                 "backtest": dict(state)}
 
+    def request_data_probe(self, asset):
+        self.probe_requests.append(asset)
+        self.probe = {**self.probe, "state": "done", "asset": asset,
+                      "symbol": asset, "n_bars": 1000}
+        return {"ok": True, "message": "Checking available history…",
+                "probe": dict(self.probe)}
+
     def status(self):
         return {"live": dict(self.live), "backtest": dict(self.backtest),
+                "probe": dict(self.probe),
                 "live_running": self.live["state"] == "running"}
 
     def is_live_running(self):
@@ -231,6 +248,9 @@ class _FakeJobs:
 
     def backtest_state(self):
         return dict(self.backtest)
+
+    def probe_state(self):
+        return dict(self.probe)
 
 
 def _api_client(repo, jobs=None, cfg=None):
@@ -316,7 +336,9 @@ def test_backtest_run_passes_validated_parameters():
         data={"asset": "USTEC", "bars": "1500", "max_hold_m1": "60"},
     )
     assert resp.status_code == 200
-    assert jobs.requests == [{"asset": "USTEC", "bars": 1500, "max_hold_m1": 60}]
+    assert jobs.requests == [{"asset": "USTEC", "bars": 1500,
+                              "start_utc": None, "end_utc": None,
+                              "max_hold_m1": 60}]
 
 
 def test_backtest_run_rejects_unknown_asset():
@@ -381,3 +403,230 @@ def test_backtests_page_renders_run_form():
     assert 'id="backtest-form"' in body
     assert "USTEC" in body            # asset dropdown populated from the registry
     assert "Use the form above" in body
+
+
+# --------------------------------------------------------------------------- #
+# Backtest date range
+# --------------------------------------------------------------------------- #
+def test_backtest_accepts_an_explicit_date_range():
+    """The core fix: a start/end window instead of only 'the last N bars'."""
+    jobs = _FakeJobs()
+    resp = _api_client(_repo(), jobs).post(
+        "/api/backtest/run", headers=_same_origin(),
+        data={"asset": "USTEC", "start": "2024-01-01", "end": "2024-06-30"},
+    )
+    assert resp.status_code == 200
+
+    sent = jobs.requests[0]
+    assert sent["bars"] is None          # the range wins over the bar count
+    # A bare NY date covers the whole NY day, both ends.
+    assert sent["start_utc"] == tu.ny_to_utc(datetime(2024, 1, 1, 0, 0))
+    assert sent["end_utc"] == tu.ny_to_utc(datetime(2024, 6, 30, 23, 59))
+
+
+def test_backtest_accepts_a_precise_start_time():
+    jobs = _FakeJobs()
+    _api_client(_repo(), jobs).post(
+        "/api/backtest/run", headers=_same_origin(),
+        data={"asset": "USTEC", "start": "2024-01-01T09:30", "end": "2024-01-02"},
+    )
+    assert jobs.requests[0]["start_utc"] == tu.ny_to_utc(datetime(2024, 1, 1, 9, 30))
+
+
+@pytest.mark.parametrize("payload", [
+    {"start": "2024-01-01"},                                      # one-sided
+    {"end": "2024-01-01"},                                        # one-sided
+    {"start": "2024-06-30", "end": "2024-01-01"},                 # reversed
+    {"start": "2024-01-01", "end": "2024-01-01"},                 # same day
+    {"start": "not-a-date", "end": "2024-01-02"},
+    {"start": "2024-01-01", "end": "2099-01-01"},                 # absurd span
+])
+def test_backtest_rejects_a_bad_date_range(payload):
+    jobs = _FakeJobs()
+    resp = _api_client(_repo(), jobs).post("/api/backtest/run",
+                                           headers=_same_origin(), data=payload)
+    assert resp.status_code == 400
+    assert resp.get_json()["reason"] == "bad_range"
+    assert jobs.requests == []          # nothing was queued
+
+
+def test_backtest_still_accepts_the_bar_count():
+    jobs = _FakeJobs()
+    resp = _api_client(_repo(), jobs).post(
+        "/api/backtest/run", headers=_same_origin(),
+        data={"asset": "USTEC", "bars": "1500"},
+    )
+    assert resp.status_code == 200
+    assert jobs.requests[0]["bars"] == 1500
+    assert jobs.requests[0]["start_utc"] is None
+
+
+def test_range_error_is_a_sentence_a_user_can_act_on():
+    resp = _api_client(_repo(), _FakeJobs()).post(
+        "/api/backtest/run", headers=_same_origin(),
+        data={"start": "2024-06-30", "end": "2024-01-01"})
+    assert "after the start" in resp.get_json()["message"]
+
+
+# --------------------------------------------------------------------------- #
+# History probe
+# --------------------------------------------------------------------------- #
+def test_probe_reports_available_history():
+    jobs = _FakeJobs()
+    resp = _api_client(_repo(), jobs).post("/api/data/probe",
+                                           headers=_same_origin(),
+                                           data={"asset": "USTEC"})
+    assert resp.status_code == 200
+    assert jobs.probe_requests == ["USTEC"]
+    assert resp.get_json()["probe"]["n_bars"] == 1000
+
+
+def test_probe_requires_an_asset():
+    jobs = _FakeJobs()
+    resp = _api_client(_repo(), jobs).post("/api/data/probe",
+                                           headers=_same_origin(), data={})
+    assert resp.status_code == 400
+    assert jobs.probe_requests == []
+
+
+def test_probe_rejects_an_unknown_asset():
+    jobs = _FakeJobs()
+    resp = _api_client(_repo(), jobs).post("/api/data/probe",
+                                           headers=_same_origin(),
+                                           data={"asset": "NOPE"})
+    assert resp.status_code == 400
+    assert resp.get_json()["reason"] == "unknown_asset"
+    assert jobs.probe_requests == []
+
+
+def test_probe_is_refused_cross_origin():
+    jobs = _FakeJobs()
+    resp = _api_client(_repo(), jobs).post(
+        "/api/data/probe", headers={"Origin": "http://evil.example.com"},
+        data={"asset": "USTEC"})
+    assert resp.status_code == 403
+    assert jobs.probe_requests == []
+
+
+def test_status_publishes_probe_and_ai_state():
+    payload = _api_client(_repo()).get("/api/status").get_json()
+    assert "probe" in payload
+    assert set(payload["ai"]) == {"enabled", "model", "provider_host"}
+    # The credential must never leave the server.
+    assert "llm_api_key" not in json.dumps(payload)
+
+
+# --------------------------------------------------------------------------- #
+# Asset registry management
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def registry_cfg(tmp_path):
+    """Settings pointing at a throwaway registry file."""
+    path = tmp_path / "assets.json"
+    path.write_text(json.dumps({"assets": [
+        {"name": "USTEC", "broker_symbol": "USTEC", "enabled": True, "digits": 2},
+        {"name": "GOLD", "broker_symbol": "XAUUSDm", "enabled": False, "digits": 2},
+    ]}), encoding="utf-8")
+    return replace(get_settings(), assets_file=path,
+                   telegram_enabled=False, telegram_bot_token="",
+                   telegram_chat_id="")
+
+
+def _registry_client(repo, jobs, cfg):
+    return create_app(settings=cfg, repository=repo, setup_db=False,
+                      jobs=jobs).test_client()
+
+
+def _read_registry(cfg) -> dict:
+    raw = json.loads(cfg.assets_file.read_text(encoding="utf-8"))
+    return {a["name"]: a for a in raw["assets"]}
+
+
+def test_assets_add_writes_to_the_registry(registry_cfg):
+    resp = _registry_client(_repo(), _FakeJobs(), registry_cfg).post(
+        "/api/assets/add", headers=_same_origin(),
+        data={"name": "eurusd", "broker_symbol": "EURUSDm", "digits": "5",
+              "enabled": "on"})
+
+    assert resp.status_code == 200
+    stored = _read_registry(registry_cfg)["EURUSD"]   # name is upper-cased
+    assert stored["broker_symbol"] == "EURUSDm"
+    assert stored["enabled"] is True
+    assert stored["digits"] == 5
+
+
+def test_assets_add_rejects_a_duplicate(registry_cfg):
+    resp = _registry_client(_repo(), _FakeJobs(), registry_cfg).post(
+        "/api/assets/add", headers=_same_origin(),
+        data={"name": "USTEC", "broker_symbol": "USTEC"})
+    assert resp.status_code == 409
+    assert resp.get_json()["reason"] == "already_exists"
+
+
+@pytest.mark.parametrize("payload", [
+    {"name": "", "broker_symbol": "XAUUSDm"},
+    {"name": "GOLD", "broker_symbol": ""},
+    {},
+])
+def test_assets_add_requires_a_name_and_symbol(registry_cfg, payload):
+    resp = _registry_client(_repo(), _FakeJobs(), registry_cfg).post(
+        "/api/assets/add", headers=_same_origin(), data=payload)
+    assert resp.status_code == 400
+    assert resp.get_json()["reason"] == "missing_fields"
+
+
+def test_assets_toggle_enables_a_disabled_asset(registry_cfg):
+    resp = _registry_client(_repo(), _FakeJobs(), registry_cfg).post(
+        "/api/assets/toggle", headers=_same_origin(),
+        data={"name": "GOLD", "enabled": "true"})
+
+    assert resp.status_code == 200
+    assert _read_registry(registry_cfg)["GOLD"]["enabled"] is True
+
+
+def test_assets_toggle_rejects_an_unknown_asset(registry_cfg):
+    resp = _registry_client(_repo(), _FakeJobs(), registry_cfg).post(
+        "/api/assets/toggle", headers=_same_origin(),
+        data={"name": "NOPE", "enabled": "true"})
+    assert resp.status_code == 404
+
+
+def test_assets_remove_deletes_a_disabled_asset(registry_cfg):
+    resp = _registry_client(_repo(), _FakeJobs(), registry_cfg).post(
+        "/api/assets/remove", headers=_same_origin(), data={"name": "GOLD"})
+
+    assert resp.status_code == 200
+    assert "GOLD" not in _read_registry(registry_cfg)
+
+
+def test_assets_remove_refuses_the_last_enabled_asset(registry_cfg):
+    """Removing it would leave the scanner with nothing to scan."""
+    resp = _registry_client(_repo(), _FakeJobs(), registry_cfg).post(
+        "/api/assets/remove", headers=_same_origin(), data={"name": "USTEC"})
+
+    assert resp.status_code == 409
+    assert resp.get_json()["reason"] == "last_enabled"
+    assert "USTEC" in _read_registry(registry_cfg)
+
+
+def test_assets_remove_is_refused_cross_origin(registry_cfg):
+    resp = _registry_client(_repo(), _FakeJobs(), registry_cfg).post(
+        "/api/assets/remove", headers={"Origin": "http://evil.example.com"},
+        data={"name": "GOLD"})
+    assert resp.status_code == 403
+    assert "GOLD" in _read_registry(registry_cfg)
+
+
+def test_dropdowns_read_the_registry_not_a_stale_db_row(registry_cfg):
+    """A DB row the registry does not know about must not be offered.
+
+    The registry is what the engine actually trades, so offering anything else
+    would let the UI request an asset the scanner refuses to run.
+    """
+    repo = _repo()
+    repo.upsert_asset("GHOST", "GHOSTX", enabled=True)
+    body = _registry_client(repo, _FakeJobs(), registry_cfg).get("/backtests") \
+        .get_data(as_text=True)
+
+    assert "USTEC" in body
+    assert "GHOST" not in body

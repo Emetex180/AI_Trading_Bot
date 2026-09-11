@@ -5,7 +5,7 @@ here (through ``trading.bars`` / ``trading.time_utils``); nothing else may do it
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .bars import BarSet, Candle
 from .mt5_client import MT5Client, row_time_to_server_naive
@@ -46,6 +46,54 @@ class MarketData:
         if drop_forming:
             rows = rows[:-1]  # newest row may be the forming bar
         return [row_to_candle(r, self.offset) for r in rows]
+
+    def fetch_m1_range(self, symbol: str, start_utc: datetime, end_utc: datetime,
+                       drop_forming: bool = True) -> list[Candle]:
+        """Return *closed* M1 candles between two instants (UTC, ascending).
+
+        The caller works in UTC, but ``MetaTrader5.copy_rates_range`` filters on
+        the **broker server** clock, so the range is converted before the call.
+        Candles come back through :func:`row_to_candle`, which converts the other
+        way — so the returned ``t_utc`` is the real UTC instant either way.
+
+        Unlike the "last N bars" fetch there is nothing to trim by default: a
+        range ending in the past has no forming bar at all. The newest row is
+        dropped only when it is genuinely still forming, which keeps a range
+        ending *now* honest without silently shortening historical ones.
+        """
+        rows = self.client.copy_rates_range(
+            symbol, "M1",
+            tu.utc_to_broker(start_utc, self.offset),
+            tu.utc_to_broker(end_utc, self.offset),
+        )
+        if drop_forming and rows:
+            last_bar_open = row_time_to_server_naive(rows[-1][0])
+            now_broker = tu.utc_to_broker(tu.now_utc(), self.offset)
+            if last_bar_open + timedelta(minutes=1) > now_broker:
+                rows = rows[:-1]
+        return [row_to_candle(r, self.offset) for r in rows]
+
+    def probe_m1_bounds(self, symbol: str) -> dict:
+        """Describe the M1 history the broker actually holds for ``symbol``.
+
+        This is what lets the dashboard offer real dates instead of asking for a
+        blind count of bars. Returns ``n_bars == 0`` when the broker has nothing,
+        which is also the honest answer for a symbol that is not visible.
+        """
+        bounds = {"symbol": symbol, "n_bars": 0,
+                  "oldest_utc": None, "newest_utc": None}
+        n_bars = self.client.history_bar_count(symbol, "M1")
+        if n_bars <= 0:
+            return bounds
+
+        newest = self.client.copy_rates_from_pos(symbol, "M1", 0, 1)
+        oldest = self.client.copy_rates_from_pos(symbol, "M1", n_bars - 1, 1)
+        if oldest:
+            bounds["oldest_utc"] = row_to_candle(oldest[0], self.offset).t_utc
+        if newest:
+            bounds["newest_utc"] = row_to_candle(newest[0], self.offset).t_utc
+        bounds["n_bars"] = n_bars
+        return bounds
 
     def symbol_exists(self, symbol: str) -> bool:
         info = self.client.symbol_info(symbol)

@@ -16,6 +16,7 @@ Two properties matter here:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from flask import abort, g, jsonify, request, url_for
@@ -28,6 +29,13 @@ MIN_BACKTEST_BARS = 100
 MAX_BACKTEST_BARS = 500_000
 MIN_MAX_HOLD_M1 = 1
 MAX_MAX_HOLD_M1 = 60 * 24 * 7
+
+# A date range must cover at least this long, so "start == end" cannot produce a
+# technically-valid but useless single-minute replay.
+MIN_RANGE_DAYS = 1
+# ...and at most this long. Also expressed in bars (below) because minute bars
+# only exist for market-open minutes, so elapsed days are the looser bound.
+MAX_RANGE_DAYS = 365 * 6
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +75,91 @@ def _parse_int(raw, *, default, minimum: int, maximum: int) -> int | None:
     if not minimum <= value <= maximum:
         return None
     return value
+
+
+def _parse_ny_bound(raw: str, *, end_of_day: bool):
+    """Parse a dashboard date field into a UTC instant on the project NY clock.
+
+    Accepts ``YYYY-MM-DD`` (a whole day) or ``YYYY-MM-DDTHH:MM`` (a precise
+    minute). Both are read as NY-clock values, matching every timestamp the UI
+    displays, and converted to UTC through :mod:`trading.time_utils` so no
+    conversion happens anywhere else.
+
+    Returns ``(utc_datetime, None)`` on success or ``(None, reason)``.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None, "missing"
+
+    parsed: datetime | None = None
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return None, "unparseable"
+
+    if len(text) == 10:  # a bare date covers the whole NY day
+        if end_of_day:
+            parsed = parsed.replace(hour=23, minute=59)
+    return tu.ny_to_utc(parsed), None
+
+
+def _parse_range(data: dict):
+    """Validate the optional ``start``/``end`` form pair.
+
+    Returns ``(start_utc, end_utc, None)`` when absent (the caller should fall
+    back to the bars path) and ``(None, None, reason)`` when present but bad.
+    """
+    raw_start = (data.get("start") or "").strip()
+    raw_end = (data.get("end") or "").strip()
+    if not raw_start and not raw_end:
+        return None, None, None
+
+    if not raw_start or not raw_end:
+        return None, None, "both_required"
+
+    start_utc, why = _parse_ny_bound(raw_start, end_of_day=False)
+    if start_utc is None:
+        return None, None, f"start_{why}"
+    end_utc, why = _parse_ny_bound(raw_end, end_of_day=True)
+    if end_utc is None:
+        return None, None, f"end_{why}"
+
+    if end_utc <= start_utc:
+        return None, None, "end_before_start"
+    if end_utc - start_utc < timedelta(days=MIN_RANGE_DAYS):
+        return None, None, "range_too_short"
+    if end_utc - start_utc > timedelta(days=MAX_RANGE_DAYS):
+        return None, None, "range_too_long"
+    # Minute bars only exist for market-open minutes, so an elapsed span is
+    # always far more bars than it has data for. Bound the elapsed span well
+    # under MAX_BACKTEST_BARS minutes anyway, so a range can never ask for more
+    # replay than the bars path allows.
+    if (end_utc - start_utc) > timedelta(minutes=MAX_BACKTEST_BARS):
+        return None, None, "range_too_long"
+    return start_utc, end_utc, None
+
+
+_RANGE_MESSAGES = {
+    "both_required": "Give both a start and an end date.",
+    "end_before_start": "The end date must be after the start date.",
+    "range_too_short": "Pick a range of at least one day.",
+    "range_too_long": "That range is too long. Pick a shorter window.",
+}
+
+
+def _range_error(reason: str) -> str:
+    """Human message for a range validation failure."""
+    if reason in _RANGE_MESSAGES:
+        return _RANGE_MESSAGES[reason]
+    if reason.startswith("start_") or reason.startswith("end_"):
+        which = "start" if reason.startswith("start_") else "end"
+        return (f"Could not read the {which} date. Use YYYY-MM-DD, or "
+                "YYYY-MM-DDTHH:MM.")
+    return "That date range is not valid."
 
 
 def _signal_json(row) -> dict:
@@ -141,6 +234,13 @@ def register_api(app) -> None:
                 return jsonify({"ok": False, "reason": "unknown_asset",
                                 "message": f"Unknown asset {asset!r}."}), 400
 
+        # A date range and a bar count are two ways to say the same thing; the
+        # range is the more specific request, so it wins when both arrive.
+        start_utc, end_utc, range_error = _parse_range(data)
+        if range_error:
+            return jsonify({"ok": False, "reason": "bad_range",
+                            "message": _range_error(range_error)}), 400
+
         bars = _parse_int(data.get("bars"), default=cfg.backtest_m1_bars,
                           minimum=MIN_BACKTEST_BARS, maximum=MAX_BACKTEST_BARS)
         if bars is None:
@@ -155,11 +255,155 @@ def register_api(app) -> None:
                             "message": f"max_hold_m1 must be between "
                                        f"{MIN_MAX_HOLD_M1} and {MAX_MAX_HOLD_M1}."}), 400
 
-        result = jobs.request_backtest(asset=asset, bars=bars, max_hold_m1=max_hold)
+        result = jobs.request_backtest(asset=asset, bars=bars,
+                                       start_utc=start_utc, end_utc=end_utc,
+                                       max_hold_m1=max_hold)
+        window = (f"{data.get('start')}..{data.get('end')}" if start_utc
+                  else f"last {bars} M1")
         g.repo.log_event("INFO" if result["ok"] else "WARN", "dashboard",
-                         f"backtest request ({asset or 'all enabled'}): "
-                         f"{result.get('message')}")
+                         f"backtest request ({asset or 'all enabled'}) over "
+                         f"{window}: {result.get('message')}")
         return jsonify(result), (200 if result["ok"] else 409)
+
+    @app.post("/api/data/probe")
+    def api_data_probe():
+        """Report the M1 history the broker holds, so a date range can be picked."""
+        if not _origin_allowed():
+            abort(403)
+        asset = ((_payload().get("asset") or "").strip()
+                 or (request.args.get("asset") or "").strip())
+        if not asset:
+            return jsonify({"ok": False, "reason": "no_asset",
+                            "message": "Pick an asset first."}), 400
+
+        from trading.asset_manager import AssetManager, AssetRegistryError
+
+        try:
+            AssetManager(settings=cfg).get(asset)
+        except AssetRegistryError:
+            return jsonify({"ok": False, "reason": "unknown_asset",
+                            "message": f"Unknown asset {asset!r}."}), 400
+
+        result = jobs.request_data_probe(asset)
+        return jsonify(result), (200 if result["ok"] else 409)
+
+    # ------------------------------------------------------------------ #
+    # Asset registry
+    #
+    # ``assets.json`` is authoritative — it is what the scanner and the
+    # backtester read. The ``assets`` DB table is a mirror kept in step here so
+    # the two can never drift into offering an asset the engine will refuse.
+    # ------------------------------------------------------------------ #
+    def _registry():
+        from trading.asset_manager import AssetManager, AssetRegistryError
+
+        try:
+            return AssetManager(settings=cfg), None
+        except AssetRegistryError as exc:
+            return None, str(exc)
+
+    def _sync_asset(repo, name: str) -> None:
+        """Mirror one registry entry into the DB (best-effort, never fatal)."""
+        from trading.asset_manager import AssetManager, AssetRegistryError
+
+        try:
+            asset = AssetManager(settings=cfg).get(name)
+        except AssetRegistryError:
+            return
+        try:
+            repo.upsert_asset(asset.name, asset.broker_symbol, asset.enabled,
+                              digits=asset.digits, overrides=asset.overrides)
+        except Exception:  # a mirror failure must not undo a registry write
+            pass
+
+    @app.post("/api/assets/add")
+    def api_assets_add():
+        if not _origin_allowed():
+            abort(403)
+        data = _payload()
+        name = (data.get("name") or "").strip().upper()
+        symbol = (data.get("broker_symbol") or "").strip()
+        if not name or not symbol:
+            return jsonify({"ok": False, "reason": "missing_fields",
+                            "message": "Both a name and a broker symbol are "
+                                       "required."}), 400
+        if len(name) > 64 or len(symbol) > 64:
+            return jsonify({"ok": False, "reason": "too_long",
+                            "message": "Name and symbol must be 64 characters "
+                                       "or fewer."}), 400
+
+        digits = _parse_int(data.get("digits"), default=0, minimum=0, maximum=8)
+        if digits is None:
+            return jsonify({"ok": False, "reason": "bad_digits",
+                            "message": "digits must be between 0 and 8."}), 400
+        enabled = str(data.get("enabled", "")).strip().lower() in {"1", "true",
+                                                                  "yes", "on"}
+
+        manager, error = _registry()
+        if manager is None:
+            return jsonify({"ok": False, "reason": "registry_unreadable",
+                            "message": error}), 500
+        if manager.has(name):
+            return jsonify({"ok": False, "reason": "already_exists",
+                            "message": f"{name} is already in the registry."}), 409
+
+        manager.add_asset(name, symbol, enabled=enabled, digits=digits)
+        _sync_asset(g.repo, name)
+        g.repo.log_event("INFO", "dashboard",
+                         f"asset added: {name} -> {symbol} "
+                         f"({'enabled' if enabled else 'disabled'})")
+        return jsonify({"ok": True, "message": f"Added {name} ({symbol}).",
+                        "assets": asset_choices(cfg, g.repo)})
+
+    @app.post("/api/assets/toggle")
+    def api_assets_toggle():
+        if not _origin_allowed():
+            abort(403)
+        data = _payload()
+        name = (data.get("name") or "").strip()
+        enabled = str(data.get("enabled", "")).strip().lower() in {"1", "true",
+                                                                   "yes", "on"}
+        manager, error = _registry()
+        if manager is None:
+            return jsonify({"ok": False, "reason": "registry_unreadable",
+                            "message": error}), 500
+        if not manager.has(name):
+            return jsonify({"ok": False, "reason": "unknown_asset",
+                            "message": f"Unknown asset {name!r}."}), 404
+
+        manager.set_enabled(name, enabled)
+        _sync_asset(g.repo, name)
+        g.repo.log_event("INFO", "dashboard",
+                         f"asset {name} {'enabled' if enabled else 'disabled'}")
+        return jsonify({"ok": True,
+                        "message": f"{name} {'enabled' if enabled else 'disabled'}.",
+                        "assets": asset_choices(cfg, g.repo)})
+
+    @app.post("/api/assets/remove")
+    def api_assets_remove():
+        if not _origin_allowed():
+            abort(403)
+        name = (_payload().get("name") or "").strip()
+        manager, error = _registry()
+        if manager is None:
+            return jsonify({"ok": False, "reason": "registry_unreadable",
+                            "message": error}), 500
+        if not manager.has(name):
+            return jsonify({"ok": False, "reason": "unknown_asset",
+                            "message": f"Unknown asset {name!r}."}), 404
+
+        # Removing the last enabled asset would leave the scanner with nothing
+        # to scan (see JobManager._live_worker) — refuse rather than break it.
+        remaining = [a.name for a in manager.enabled_assets() if a.name != name]
+        if manager.get(name).enabled and not remaining:
+            return jsonify({"ok": False, "reason": "last_enabled",
+                            "message": "That is the last enabled asset. Enable "
+                                       "another one before removing it."}), 409
+
+        manager.remove_asset(name)
+        g.repo.log_event("INFO", "dashboard", f"asset removed: {name}")
+        return jsonify({"ok": True, "message": f"Removed {name}.",
+                        "assets": asset_choices(cfg, g.repo)})
 
     @app.get("/api/status")
     def api_status():
@@ -169,6 +413,9 @@ def register_api(app) -> None:
         live["last_candle_ny"] = (tu.utc_to_ny(last_candle).strftime("%Y-%m-%d %H:%M")
                                   if last_candle else "")
         payload["backtest"] = _add_ny_times(payload["backtest"], ("finished_at_utc",))
+        payload["probe"] = _add_ny_times(payload["probe"],
+                                         ("oldest_utc", "newest_utc",
+                                          "finished_at_utc"))
 
         after = request.args.get("after_signal_id", type=int)
         payload["signals"] = {
@@ -184,16 +431,42 @@ def register_api(app) -> None:
         payload["auto_trading"] = cfg.auto_trading
         payload["assets"] = asset_choices(cfg, g.repo)
         payload["backtest_defaults"] = {"bars": cfg.backtest_m1_bars}
+        payload["ai"] = ai_status(cfg)
         return jsonify(payload)
 
 
+def ai_status(cfg: Settings) -> dict:
+    """Read-only description of the analysis layer for the dashboard.
+
+    Never includes ``llm_api_key`` — the dashboard reports *what* is configured,
+    not the credentials. The AI is an advisory overlay that cannot alter entry,
+    SL or TP, so this is presentation only; ``AI_ENABLED`` stays a ``.env``
+    setting with no route that can change it.
+    """
+    host = urlparse(cfg.llm_api_url).netloc or ""
+    return {
+        "enabled": cfg.ai_enabled,
+        "model": cfg.llm_model,
+        "provider_host": host,
+    }
+
+
 def asset_choices(cfg: Settings, repo=None) -> list[dict]:
-    """Assets for the dashboard dropdowns (DB table first, registry as fallback)."""
-    rows = repo.list_assets() if repo is not None else []
+    """Assets for the dashboard dropdowns.
+
+    The **registry is authoritative**: it is what the scanner and backtester
+    actually read, so a dropdown built from any other source could offer an
+    asset the engine will not run. The ``assets`` DB table is only a fallback
+    for a database that has rows but no readable registry file.
+    """
+    rows = registry_assets(cfg)
     if rows:
-        return [{"name": a.name, "broker_symbol": a.broker_symbol, "enabled": a.enabled}
-                for a in rows]
-    return registry_assets(cfg)
+        return rows
+    if repo is not None:
+        return [{"name": a.name, "broker_symbol": a.broker_symbol,
+                 "enabled": a.enabled, "digits": a.digits}
+                for a in repo.list_assets()]
+    return []
 
 
 def registry_assets(cfg: Settings) -> list[dict]:
@@ -201,7 +474,8 @@ def registry_assets(cfg: Settings) -> list[dict]:
     from trading.asset_manager import AssetManager, AssetRegistryError
 
     try:
-        return [{"name": a.name, "broker_symbol": a.broker_symbol, "enabled": a.enabled}
+        return [{"name": a.name, "broker_symbol": a.broker_symbol,
+                 "enabled": a.enabled, "digits": a.digits}
                 for a in AssetManager(settings=cfg).list_assets()]
     except AssetRegistryError:
         return []
