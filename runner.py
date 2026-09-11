@@ -28,8 +28,9 @@ whenever ``AUTO_TRADING`` is off. Nothing here can enable trading.
 """
 from __future__ import annotations
 
-import os
 import threading
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 from uuid import uuid4
@@ -37,6 +38,7 @@ from uuid import uuid4
 from config import Settings, get_settings
 from database.repository import Repository, init_db
 from trading import time_utils as tu
+from trading.instrument import prepare_asset
 
 # Live session states.
 LIVE_IDLE = "idle"
@@ -59,10 +61,6 @@ PROBE_IDLE = "idle"
 PROBE_RUNNING = "running"
 PROBE_DONE = "done"
 PROBE_ERROR = "error"
-
-# Historical M1 candles replayed at attach so the engine's episode state is
-# current. Mirrors the CLI default in ``run.py``.
-DEFAULT_WARMUP_M1_BARS = 5000
 
 # Seconds to wait for a live thread to unwind on stop before reporting a timeout.
 STOP_TIMEOUT_SECONDS = 30.0
@@ -104,60 +102,60 @@ def _default_backtest_factory(asset, max_hold_m1: int):
     return BacktestRunner(asset, max_hold_m1=max_hold_m1)
 
 
-def _blank_live(**kw) -> dict[str, Any]:
-    state = {
-        "state": LIVE_IDLE,
-        "started_at_utc": None,
-        "stopped_at_utc": None,
-        "assets": [],
-        "last_candle_utc": None,
-        "signals_session": 0,
-        "last_error": "",
-    }
-    state.update(kw)
-    return state
+# --------------------------------------------------------------------------- #
+# Job state
+#
+# Dataclasses rather than dicts: a misspelled field is now an immediate
+# ``TypeError``/``AttributeError`` at the typo, instead of a silently-created
+# key that the dashboard dutifully renders as blank. ``asdict`` is what the HTTP
+# layer serialises, so the JSON the browser receives is byte-for-byte unchanged.
+# --------------------------------------------------------------------------- #
+@dataclass
+class LiveState:
+    state: str = LIVE_IDLE
+    started_at_utc: datetime | None = None
+    stopped_at_utc: datetime | None = None
+    assets: list[str] = field(default_factory=list)
+    last_candle_utc: datetime | None = None
+    signals_session: int = 0
+    last_error: str = ""
 
 
-def _blank_backtest(**kw) -> dict[str, Any]:
-    state = {
-        "state": BT_IDLE,
-        "asset": None,
-        # Which selector the run used: "range" (explicit dates) or "bars" (the
-        # last N candles). Reported back so the UI can describe the window.
-        "mode": "bars",
-        "bars": None,
-        "start_utc": None,
-        "end_utc": None,
-        "max_hold_m1": None,
-        # Groups every per-asset row one request produces. Without it a
-        # multi-asset run is N unrelated rows and cannot be ranked.
-        "batch_id": None,
-        "queued": False,
-        "queued_reason": "",
-        "progress_done": 0,
-        "progress_total": 0,
-        "last_backtest_id": None,
-        "last_error": "",
-        "finished_at_utc": None,
-    }
-    state.update(kw)
-    return state
+@dataclass
+class BacktestState:
+    state: str = BT_IDLE
+    asset: str | None = None
+    # Which selector the run used: "range" (explicit dates) or "bars" (the last
+    # N candles). Reported back so the UI can describe the window.
+    mode: str = "bars"
+    bars: int | None = None
+    start_utc: datetime | None = None
+    end_utc: datetime | None = None
+    max_hold_m1: int | None = None
+    # Groups every per-asset row one request produces. Without it a multi-asset
+    # run is N unrelated rows and cannot be ranked.
+    batch_id: str | None = None
+    queued: bool = False
+    queued_reason: str = ""
+    progress_done: int = 0
+    progress_total: int = 0
+    last_backtest_id: int | None = None
+    last_error: str = ""
+    finished_at_utc: datetime | None = None
 
 
-def _blank_probe(**kw) -> dict[str, Any]:
+@dataclass
+class ProbeState:
     """State for the read-only "what history do you have?" job."""
-    state = {
-        "state": PROBE_IDLE,
-        "asset": None,
-        "symbol": None,
-        "n_bars": 0,
-        "oldest_utc": None,
-        "newest_utc": None,
-        "last_error": "",
-        "finished_at_utc": None,
-    }
-    state.update(kw)
-    return state
+
+    state: str = PROBE_IDLE
+    asset: str | None = None
+    symbol: str | None = None
+    n_bars: int = 0
+    oldest_utc: datetime | None = None
+    newest_utc: datetime | None = None
+    last_error: str = ""
+    finished_at_utc: datetime | None = None
 
 
 class JobManager:
@@ -191,31 +189,34 @@ class JobManager:
         self._probe_thread: threading.Thread | None = None
         self._pending_backtest: dict[str, Any] | None = None
 
-        self._live = _blank_live()
-        self._backtest = _blank_backtest()
-        self._probe = _blank_probe()
+        self._live = LiveState()
+        self._backtest = BacktestState()
+        self._probe = ProbeState()
 
     # ------------------------------------------------------------------ #
     # State access (no MT5, no DB — safe to call from any thread)
+    #
+    # Each accessor returns a detached ``dict`` so callers (and the HTTP layer)
+    # can hold it without the worker mutating it underneath them.
     # ------------------------------------------------------------------ #
     def live_state(self) -> dict[str, Any]:
         with self._state_lock:
-            return dict(self._live)
+            return asdict(self._live)
 
     def backtest_state(self) -> dict[str, Any]:
         with self._state_lock:
-            return dict(self._backtest)
+            return asdict(self._backtest)
 
     def probe_state(self) -> dict[str, Any]:
         with self._state_lock:
-            return dict(self._probe)
+            return asdict(self._probe)
 
     def is_live_running(self) -> bool:
         with self._state_lock:
             thread = self._live_thread
             if thread is not None and thread.is_alive():
                 return True
-            return self._live["state"] in (LIVE_STARTING, LIVE_RUNNING, LIVE_STOPPING)
+            return self._live.state in (LIVE_STARTING, LIVE_RUNNING, LIVE_STOPPING)
 
     def status(self) -> dict[str, Any]:
         return {
@@ -234,14 +235,14 @@ class JobManager:
             if self.is_live_running():
                 return {"ok": False, "reason": "already_running",
                         "message": "A live session is already running.",
-                        "live": dict(self._live)}
-            if self._backtest["state"] in (BT_STARTING, BT_RUNNING):
+                        "live": self.live_state()}
+            if self._backtest.state in (BT_STARTING, BT_RUNNING):
                 return {"ok": False, "reason": "backtest_running",
                         "message": "A backtest is running — wait for it to finish.",
-                        "live": dict(self._live)}
+                        "live": self.live_state()}
 
             self._stop_event = threading.Event()
-            self._live = _blank_live(state=LIVE_STARTING, started_at_utc=tu.now_utc())
+            self._live = LiveState(state=LIVE_STARTING, started_at_utc=tu.now_utc())
             thread = threading.Thread(target=self._live_worker, name="live-scanner",
                                       daemon=True)
             self._live_thread = thread
@@ -257,9 +258,9 @@ class JobManager:
             if thread is None or not thread.is_alive():
                 return {"ok": False, "reason": "not_running",
                         "message": "No live session is running.",
-                        "live": dict(self._live)}
+                        "live": self.live_state()}
             self._stop_event.set()
-            self._live["state"] = LIVE_STOPPING
+            self._live.state = LIVE_STOPPING
 
         # Join outside the lock: the worker takes it to publish progress.
         thread.join(timeout)
@@ -273,9 +274,32 @@ class JobManager:
         return {"ok": True, "message": "Live session stopped.",
                 "live": self.live_state()}
 
+    @contextmanager
+    def _mt5_session(self):
+        """Own the MT5 terminal for the duration of the block.
+
+        The three jobs that touch the terminal (live, backtest, history probe)
+        all need the same four things, and getting any of them wrong is how a
+        session ends up half-initialised: take ``_mt5_lock``, build the client
+        *inside* the worker thread that will use it, connect, and guarantee a
+        disconnect. Yields ``(client, market)``.
+
+        A failing ``disconnect`` is swallowed deliberately — it must not replace
+        the exception that actually ended the job.
+        """
+        with self._mt5_lock:
+            client = self._client_factory(self.settings)
+            client.connect()
+            try:
+                yield client, self._market_factory(client, self.settings)
+            finally:
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
+
     def _live_worker(self) -> None:
         repo: Repository | None = None
-        client = None
         error = ""
         try:
             manager = self._manager_factory(self.settings)
@@ -284,11 +308,8 @@ class JobManager:
                 raise RuntimeError(
                     f"No enabled assets in the registry ({self.settings.assets_file}).")
 
-            # Everything MT5 happens inside this thread and this lock.
-            with self._mt5_lock:
-                client = self._client_factory(self.settings)
-                client.connect()
-                market = self._market_factory(client, self.settings)
+            # Everything MT5 happens inside this thread and this session.
+            with self._mt5_session() as (client, market):
                 repo = self._repo_factory()
                 self._log(repo, "INFO", "scanner",
                           f"starting; auto_trading={self.settings.auto_trading}")
@@ -297,30 +318,37 @@ class JobManager:
                     acc = client.account_info()
                     return acc.equity if acc else None
 
-                warm_count = int(os.getenv("WARMUP_M1_BARS",
-                                           str(DEFAULT_WARMUP_M1_BARS)))
+                warm_count = self.settings.warmup_m1_bars
                 scanners: dict[str, Any] = {}
                 for asset in assets:
                     if self._stop_event.is_set():
                         break
-                    if not market.symbol_exists(asset.broker_symbol):
+                    resolved, _spec = prepare_asset(
+                        client, asset, self.settings.symbol_auto_resolve)
+                    if resolved is None:
                         self._log(repo, "WARN", "scanner",
                                   f"{asset.name}: symbol {asset.broker_symbol} "
-                                  "not visible")
+                                  "not offered by the broker")
+                        self._emit(f"[scan] {asset.name} skipped — "
+                                   f"{asset.broker_symbol} not found at broker.")
                         continue
-                    warm = market.fetch_m1_closed(asset.broker_symbol, warm_count,
+                    if resolved.broker_symbol != asset.broker_symbol:
+                        self._log(repo, "INFO", "scanner",
+                                  f"{asset.name}: {asset.broker_symbol} -> "
+                                  f"{resolved.broker_symbol}")
+                    warm = market.fetch_m1_closed(resolved.broker_symbol, warm_count,
                                                   drop_forming=True)
-                    sc = self._scanner_factory(asset, self.settings, repo, equity)
+                    sc = self._scanner_factory(resolved, self.settings, repo, equity)
                     sc.warm(warm)
-                    scanners[asset.name] = sc
+                    scanners[resolved.name] = sc
                     self._log(repo, "INFO", "scanner",
-                              f"{asset.name} warmed ({len(warm)} M1)")
-                    self._emit(f"[scan] {asset.name} ({asset.broker_symbol}) "
+                              f"{resolved.name} warmed ({len(warm)} M1)")
+                    self._emit(f"[scan] {resolved.name} ({resolved.broker_symbol}) "
                                f"warmed with {len(warm)} M1 candles.")
 
                 with self._state_lock:
-                    self._live["assets"] = list(scanners)
-                    self._live["state"] = LIVE_RUNNING
+                    self._live.assets = list(scanners)
+                    self._live.state = LIVE_RUNNING
 
                 self._emit(f"[scan] LIVE — AUTO_TRADING={self.settings.auto_trading}.")
 
@@ -331,9 +359,9 @@ class JobManager:
                         handled = sc.feed_new(candles)
                         last = sc.last_candle_time_utc()
                         with self._state_lock:
-                            self._live["last_candle_utc"] = last
+                            self._live.last_candle_utc = last
                             if handled:
-                                self._live["signals_session"] += handled
+                                self._live.signals_session += handled
                         if handled:
                             self._log(repo, "INFO", "scanner",
                                       f"{name}: {handled} new signal(s)")
@@ -348,17 +376,12 @@ class JobManager:
             if repo is not None:
                 self._log(repo, "ERROR", "scanner", error)
         finally:
-            if client is not None:
-                try:
-                    client.disconnect()
-                except Exception:
-                    pass
             if repo is not None:
                 repo.close()
             with self._state_lock:
-                self._live["stopped_at_utc"] = tu.now_utc()
-                self._live["last_error"] = error
-                self._live["state"] = LIVE_ERROR if error else LIVE_STOPPED
+                self._live.stopped_at_utc = tu.now_utc()
+                self._live.last_error = error
+                self._live.state = LIVE_ERROR if error else LIVE_STOPPED
 
     # ------------------------------------------------------------------ #
     # Backtest
@@ -387,20 +410,20 @@ class JobManager:
             "batch_id": uuid4().hex,
         }
         with self._state_lock:
-            if self._backtest["state"] in (BT_STARTING, BT_RUNNING):
+            if self._backtest.state in (BT_STARTING, BT_RUNNING):
                 return {"ok": False, "reason": "already_running",
                         "message": "A backtest is already running.",
-                        "backtest": dict(self._backtest)}
+                        "backtest": self.backtest_state()}
             if self.is_live_running():
                 self._pending_backtest = req
-                self._backtest = _blank_backtest(
+                self._backtest = BacktestState(
                     state=BT_QUEUED, queued=True,
                     queued_reason="A live session is running — the backtest will "
                                   "start when you stop it.",
                     **req)
                 return {"ok": True, "queued": True,
                         "message": "Backtest queued until the live session stops.",
-                        "backtest": dict(self._backtest)}
+                        "backtest": self.backtest_state()}
 
         self._spawn_backtest(req)
         return {"ok": True, "queued": False, "message": "Backtest starting.",
@@ -415,7 +438,7 @@ class JobManager:
 
     def _spawn_backtest(self, req: dict[str, Any]) -> None:
         with self._state_lock:
-            self._backtest = _blank_backtest(state=BT_STARTING, **req)
+            self._backtest = BacktestState(state=BT_STARTING, **req)
             thread = threading.Thread(target=self._backtest_worker, args=(req,),
                                       name="backtest", daemon=True)
             self._bt_thread = thread
@@ -423,7 +446,6 @@ class JobManager:
 
     def _backtest_worker(self, req: dict[str, Any]) -> None:
         repo: Repository | None = None
-        client = None
         error = ""
         try:
             manager = self._manager_factory(self.settings)
@@ -443,80 +465,71 @@ class JobManager:
                            f"starting over {window} per asset")
 
             with self._state_lock:
-                self._backtest["state"] = BT_RUNNING
-                self._backtest["progress_total"] = len(assets)
+                self._backtest.state = BT_RUNNING
+                self._backtest.progress_total = len(assets)
 
-            with self._mt5_lock:
-                client = self._client_factory(self.settings)
-                client.connect()
-                market = self._market_factory(client, self.settings)
-                try:
-                    for index, asset in enumerate(assets, start=1):
-                        if not market.symbol_exists(asset.broker_symbol):
-                            repo.log_event("WARN", "backtest",
-                                           f"{asset.name}: symbol not visible")
-                            continue
-                        if req["mode"] == "range":
-                            candles = market.fetch_m1_range(
-                                asset.broker_symbol, req["start_utc"],
-                                req["end_utc"], drop_forming=True)
-                        else:
-                            candles = market.fetch_m1_closed(
-                                asset.broker_symbol, req["bars"],
-                                drop_forming=True)
-                        if not candles:
-                            # An empty replay would be stored as a zero-trade
-                            # result, which reads as "the strategy found nothing"
-                            # rather than "the broker had no bars here".
-                            repo.log_event("WARN", "backtest",
-                                           f"{asset.name}: no M1 candles in the "
-                                           "requested window")
-                            self._emit(f"[backtest] {asset.name}: no M1 data in "
-                                       "the requested window")
-                            continue
-                        runner = self._backtest_factory(asset, req["max_hold_m1"])
-                        summary, trades = runner.run(candles, name=asset.name)
-                        row = repo.save_backtest(
-                            name=asset.name,
-                            asset=asset.name,
-                            symbol=asset.broker_symbol,
-                            batch_id=req["batch_id"],
-                            start_utc=summary.start_utc,
-                            end_utc=summary.end_utc,
-                            params=summary.params,
-                            summary=summary.to_dict(),
-                            trades=[t.as_db_dict() for t in trades],
-                        )
-                        d = summary.to_dict()
-                        self._emit(
-                            f"[backtest] {asset.name}: {d['n_signals']} signals, "
-                            f"{d['n_trades']} trades, win {d['win_rate']:.1%}, "
-                            f"PF {d['profit_factor']:.2f}, total R {d['total_r']:.2f}")
-                        with self._state_lock:
-                            self._backtest["progress_done"] = index
-                            self._backtest["last_backtest_id"] = row.id
-                finally:
-                    client.disconnect()
-                    client = None
+            with self._mt5_session() as (client, market):
+                for index, asset in enumerate(assets, start=1):
+                    resolved, _spec = prepare_asset(
+                        client, asset, self.settings.symbol_auto_resolve)
+                    if resolved is None:
+                        repo.log_event("WARN", "backtest",
+                                       f"{asset.name}: symbol not offered "
+                                       "by the broker")
+                        continue
+                    if req["mode"] == "range":
+                        candles = market.fetch_m1_range(
+                            resolved.broker_symbol, req["start_utc"],
+                            req["end_utc"], drop_forming=True)
+                    else:
+                        candles = market.fetch_m1_closed(
+                            resolved.broker_symbol, req["bars"],
+                            drop_forming=True)
+                    if not candles:
+                        # An empty replay would be stored as a zero-trade
+                        # result, which reads as "the strategy found nothing"
+                        # rather than "the broker had no bars here".
+                        repo.log_event("WARN", "backtest",
+                                       f"{resolved.name}: no M1 candles in the "
+                                       "requested window")
+                        self._emit(f"[backtest] {resolved.name}: no M1 data in "
+                                   "the requested window")
+                        continue
+                    runner = self._backtest_factory(resolved, req["max_hold_m1"])
+                    summary, trades = runner.run(candles, name=resolved.name)
+                    row = repo.save_backtest(
+                        name=resolved.name,
+                        asset=resolved.name,
+                        symbol=resolved.broker_symbol,
+                        batch_id=req["batch_id"],
+                        start_utc=summary.start_utc,
+                        end_utc=summary.end_utc,
+                        params=summary.params,
+                        summary=summary.to_dict(),
+                        trades=[t.as_db_dict() for t in trades],
+                    )
+                    d = summary.to_dict()
+                    self._emit(
+                        f"[backtest] {resolved.name}: {d['n_signals']} signals, "
+                        f"{d['n_trades']} trades, win {d['win_rate']:.1%}, "
+                        f"PF {d['profit_factor']:.2f}, total R {d['total_r']:.2f}")
+                    with self._state_lock:
+                        self._backtest.progress_done = index
+                        self._backtest.last_backtest_id = row.id
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             self._emit(f"[backtest] failed: {error}")
             if repo is not None:
                 repo.log_event("ERROR", "backtest", error)
         finally:
-            if client is not None:
-                try:
-                    client.disconnect()
-                except Exception:
-                    pass
             if repo is not None:
                 repo.close()
             with self._state_lock:
-                self._backtest["last_error"] = error
-                self._backtest["queued"] = False
-                self._backtest["queued_reason"] = ""
-                self._backtest["finished_at_utc"] = tu.now_utc()
-                self._backtest["state"] = BT_ERROR if error else BT_DONE
+                self._backtest.last_error = error
+                self._backtest.queued = False
+                self._backtest.queued_reason = ""
+                self._backtest.finished_at_utc = tu.now_utc()
+                self._backtest.state = BT_ERROR if error else BT_DONE
 
     # ------------------------------------------------------------------ #
     # History probe (read-only)
@@ -536,17 +549,17 @@ class JobManager:
                 return {"ok": False, "reason": "live_running",
                         "message": "A live session owns the MT5 terminal. "
                                    "Stop it to inspect history.",
-                        "probe": dict(self._probe)}
-            if self._backtest["state"] in (BT_STARTING, BT_RUNNING):
+                        "probe": self.probe_state()}
+            if self._backtest.state in (BT_STARTING, BT_RUNNING):
                 return {"ok": False, "reason": "backtest_running",
                         "message": "A backtest is running. Wait for it to finish.",
-                        "probe": dict(self._probe)}
-            if self._probe["state"] == PROBE_RUNNING:
+                        "probe": self.probe_state()}
+            if self._probe.state == PROBE_RUNNING:
                 return {"ok": False, "reason": "already_running",
                         "message": "Already checking history.",
-                        "probe": dict(self._probe)}
+                        "probe": self.probe_state()}
 
-            self._probe = _blank_probe(state=PROBE_RUNNING, asset=name)
+            self._probe = ProbeState(state=PROBE_RUNNING, asset=name)
             thread = threading.Thread(target=self._probe_worker, args=(name,),
                                       name="history-probe", daemon=True)
             self._probe_thread = thread
@@ -556,35 +569,30 @@ class JobManager:
                 "probe": self.probe_state()}
 
     def _probe_worker(self, asset_name: str) -> None:
-        client = None
         error = ""
         try:
             manager = self._manager_factory(self.settings)
             asset = manager.get(asset_name)
-            with self._mt5_lock:
-                client = self._client_factory(self.settings)
-                client.connect()
-                market = self._market_factory(client, self.settings)
-                bounds = market.probe_m1_bounds(asset.broker_symbol)
+            with self._mt5_session() as (client, market):
+                resolved, _spec = prepare_asset(
+                    client, asset, self.settings.symbol_auto_resolve)
+                if resolved is None:
+                    raise RuntimeError(
+                        f"Broker does not offer {asset.broker_symbol!r} "
+                        f"(for {asset.name}).")
+                bounds = market.probe_m1_bounds(resolved.broker_symbol)
                 with self._state_lock:
-                    self._probe.update({
-                        "symbol": asset.broker_symbol,
-                        "n_bars": bounds["n_bars"],
-                        "oldest_utc": bounds["oldest_utc"],
-                        "newest_utc": bounds["newest_utc"],
-                    })
+                    self._probe.symbol = resolved.broker_symbol
+                    self._probe.n_bars = bounds["n_bars"]
+                    self._probe.oldest_utc = bounds["oldest_utc"]
+                    self._probe.newest_utc = bounds["newest_utc"]
         except Exception as exc:  # surfaced in the dashboard, never fatal
             error = f"{type(exc).__name__}: {exc}"
         finally:
-            if client is not None:
-                try:
-                    client.disconnect()
-                except Exception:
-                    pass
             with self._state_lock:
-                self._probe["last_error"] = error
-                self._probe["finished_at_utc"] = tu.now_utc()
-                self._probe["state"] = PROBE_ERROR if error else PROBE_DONE
+                self._probe.last_error = error
+                self._probe.finished_at_utc = tu.now_utc()
+                self._probe.state = PROBE_ERROR if error else PROBE_DONE
 
     # ------------------------------------------------------------------ #
     # Lifecycle

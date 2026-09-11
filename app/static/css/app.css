@@ -1,182 +1,900 @@
 /* ==========================================================================
-   ICT Scanner — application stylesheet
+   ICT Multi-Asset Scanner — interface stylesheet
    --------------------------------------------------------------------------
-   Bootstrap 5.3.3 arrives from CDN and supplies the grid, reset and utilities.
-   This file supplies the small set of components this app repeats across every
-   page, so templates stop carrying inline styles and hand-rolled one-off
-   variants of the same card, table and badge.
+   Bootstrap 5.3.3 arrives from the CDN and supplies the grid, reset and
+   utilities. This file does two things on top of that:
 
-   Convention: numeric columns use tabular figures (`.mono` / `.stat-value`) so
-   digits line up down a column and are readable at a glance.
+     1. Re-points Bootstrap's own CSS variables at this app's slate palette, so
+        stock components (buttons, forms, alerts, list groups, progress bars)
+        inherit the design instead of needing a bespoke class each.
+     2. Supplies the handful of components this app repeats on every page —
+        topbar, page header, stat tiles, cards, tables, badges.
+
+   Everything visual resolves through the tokens below. Nothing else in the file
+   hard-codes a colour, so the whole interface re-tones from one block.
+
+   Two conventions worth knowing before editing:
+     - Numeric columns carry `.mono` (or live in `.stat-value`), which switches
+       on tabular figures so digits line up down a column.
+     - Tones are expressed as `.tone-*` on a `.badge`/`.pill`, and as a bare
+       `.tone-*` on a `.stat-card` for the label dot.
    ========================================================================== */
 
-:root {
-  --app-radius: 0.5rem;
-  --app-rule: var(--bs-border-color);
-  --app-muted: var(--bs-secondary-color);
-  --app-gutter: 1rem;
-}
+/* --------------------------------------------------------------------------
+   1. Design tokens
+   -------------------------------------------------------------------------- */
+:root,
+[data-bs-theme="dark"] {
+  /* Surfaces: a cool, desaturated slate ramp. Each step up is a real step, so
+     card-on-page-on-header stays legible without a single heavy border. */
+  --c-bg:          #0a0e17;
+  --c-surface:     #121826;
+  --c-surface-2:   #182131;
+  --c-surface-3:   #1f2a3d;
+  --c-line:        #24314a;
+  --c-line-soft:   #1a2437;
 
-body {
-  padding-top: 4.5rem;
-}
+  /* Text ramp — three steps is all the hierarchy this app needs. */
+  --c-text:        #e8edf7;
+  --c-text-dim:    #97a5bd;
+  --c-text-faint:  #64748b;
 
-/* Every figure that sits in a column of other figures. */
-.mono,
-.stat-value {
-  font-variant-numeric: tabular-nums;
+  /* Accents. Indigo is the interactive colour; emerald/rose carry the
+     profit/loss meaning and are never used decoratively. */
+  --c-accent:      #6366f1;
+  --c-accent-soft: #818cf8;
+  --c-pos:         #10b981;
+  --c-neg:         #f43f5e;
+  --c-warn:        #f59e0b;
+  --c-info:        #38bdf8;
+
+  /* RGB triplets for translucent fills (badges, focus rings, glows). */
+  --rgb-accent:  99, 102, 241;
+  --rgb-pos:     16, 185, 129;
+  --rgb-neg:     244, 63, 94;
+  --rgb-warn:    245, 158, 11;
+  --rgb-info:    56, 189, 248;
+  --rgb-muted:   148, 163, 184;
+
+  --radius:      12px;
+  --radius-sm:   8px;
+  --radius-pill: 999px;
+
+  --shadow:      0 1px 2px rgba(0, 0, 0, .30), 0 12px 32px -20px rgba(0, 0, 0, .70);
+  --shadow-lift: 0 2px 4px rgba(0, 0, 0, .30), 0 20px 44px -24px rgba(0, 0, 0, .80);
+
+  --gutter:      1.5rem;
+  --shell:       1400px;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+               "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", "SF Mono",
+               Consolas, "Liberation Mono", monospace;
+
+  /* --- Bootstrap re-pointing ------------------------------------------- */
+  --bs-body-bg:            var(--c-bg);
+  --bs-body-color:         var(--c-text);
+  --bs-body-font-family:   var(--font-sans);
+  --bs-body-font-size:     0.9375rem;
+  --bs-body-line-height:   1.55;
+  --bs-emphasis-color:     #fff;
+  --bs-heading-color:      var(--c-text);
+  --bs-secondary-color:    var(--c-text-dim);
+  --bs-tertiary-color:     var(--c-text-faint);
+  --bs-tertiary-bg:        var(--c-surface-2);
+  --bs-secondary-bg:       var(--c-surface-2);
+  --bs-border-color:       var(--c-line);
+  --bs-border-color-translucent: rgba(255, 255, 255, .07);
+  --bs-border-radius:      var(--radius);
+  --bs-border-radius-sm:   var(--radius-sm);
+  --bs-border-radius-lg:   var(--radius);
+  --bs-link-color:         var(--c-accent-soft);
+  --bs-link-hover-color:   #a5b4fc;
+  --bs-link-color-rgb:     var(--rgb-accent);
+
+  --bs-primary:            var(--c-accent);
+  --bs-primary-rgb:        var(--rgb-accent);
+  --bs-primary-bg-subtle:  rgba(var(--rgb-accent), .14);
+  --bs-primary-text-emphasis: var(--c-accent-soft);
+  --bs-success:            var(--c-pos);
+  --bs-success-rgb:        var(--rgb-pos);
+  --bs-success-bg-subtle:  rgba(var(--rgb-pos), .14);
+  --bs-success-text-emphasis: #34d399;
+  --bs-danger:             var(--c-neg);
+  --bs-danger-rgb:         var(--rgb-neg);
+  --bs-danger-bg-subtle:   rgba(var(--rgb-neg), .14);
+  --bs-danger-text-emphasis: #fb7185;
+  --bs-warning:            var(--c-warn);
+  --bs-warning-rgb:        var(--rgb-warn);
+  --bs-warning-bg-subtle:  rgba(var(--rgb-warn), .14);
+  --bs-warning-text-emphasis: #fbbf24;
+  --bs-info:               var(--c-info);
+  --bs-info-rgb:           var(--rgb-info);
+  --bs-info-bg-subtle:     rgba(var(--rgb-info), .14);
+  --bs-info-text-emphasis: #7dd3fc;
+  --bs-secondary-rgb:      var(--rgb-muted);
+  --bs-secondary-bg-subtle: rgba(var(--rgb-muted), .14);
+  --bs-secondary-text-emphasis: #cbd5e1;
+  --bs-light-rgb:          226, 232, 240;
+  --bs-focus-ring-color:   rgba(var(--rgb-accent), .40);
+  --bs-focus-ring-width:   3px;
+  --bs-card-bg:            var(--c-surface);
+  --bs-card-border-color:  var(--c-line);
+  --bs-card-border-radius: var(--radius);
+  --bs-card-cap-bg:        transparent;
+  --bs-card-cap-padding-y: 0.9rem;
+  --bs-card-cap-padding-x: 1.25rem;
+  --bs-card-spacer-x:      1.25rem;
+  --bs-card-spacer-y:      1.25rem;
+  --bs-dropdown-bg:        var(--c-surface-2);
+  --bs-dropdown-border-color: var(--c-line);
+  --bs-modal-bg:           var(--c-surface);
+  --bs-code-color:         #a5b4fc;
+  --bs-highlight-bg:       rgba(var(--rgb-warn), .18);
+  --bs-selection-bg:       rgba(var(--rgb-accent), .32);
 }
 
 /* --------------------------------------------------------------------------
-   Stat tiles
-   One canonical markup everywhere:
-     <div class="stat-card [tone]">
-       <div class="stat-label">…</div>
-       <div class="stat-value">…</div>
-       <div class="stat-sub">…</div>   (optional)
+   2. Base
+   -------------------------------------------------------------------------- */
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.005em;
+  min-height: 100vh;
+}
+
+/* A single soft wash behind the top of the page. Costs nothing, and it stops
+   the dark theme reading as a flat black rectangle. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 340px;
+  background: radial-gradient(120% 100% at 50% 0%,
+                              rgba(var(--rgb-accent), .10), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+::selection { background: var(--bs-selection-bg); }
+
+/* Dark scrollbars, so a scrolling table doesn't flash a bright grey bar. */
+* { scrollbar-width: thin; scrollbar-color: var(--c-surface-3) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--c-surface-3);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-pill);
+}
+*::-webkit-scrollbar-thumb:hover { background-clip: content-box; background-color: #2d3b52; }
+
+h1, h2, h3, h4, h5, h6, .h1, .h2, .h3, .h4 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+code, kbd, pre, samp { font-family: var(--font-mono); }
+
+a { text-decoration: none; }
+a:hover { text-decoration: none; }
+
+/* Every figure that sits in a column of other figures. */
+.mono,
+.stat-value,
+.kv-table td,
+input[type="number"] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.mono { font-size: 0.875em; }
+
+/* Semantic number colours, used on table cells all over the app. */
+.text-pos { color: var(--c-pos) !important; }
+.text-neg { color: var(--c-neg) !important; }
+
+/* --------------------------------------------------------------------------
+   3. Shell + topbar
+   -------------------------------------------------------------------------- */
+.shell {
+  width: 100%;
+  max-width: var(--shell);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.page {
+  position: relative;
+  z-index: 1;
+  padding-block: 1.75rem 3rem;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(10, 14, 23, .78);
+  backdrop-filter: saturate(160%) blur(14px);
+  -webkit-backdrop-filter: saturate(160%) blur(14px);
+  border-bottom: 1px solid var(--c-line);
+}
+
+.topbar-inner {
+  display: flex;
+  align-items: stretch;
+  gap: 1.25rem;
+  min-height: 60px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--c-text);
+  font-weight: 600;
+  font-size: 0.9375rem;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+.brand:hover { color: var(--c-text); }
+
+/* Small accent mark standing in for a logo. */
+.brand-mark {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: linear-gradient(140deg, var(--c-accent-soft), var(--c-accent));
+  box-shadow: 0 0 0 4px rgba(var(--rgb-accent), .14);
+  flex: none;
+}
+
+.topbar-nav {
+  display: flex;
+  align-items: stretch;
+  gap: 0.15rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.topbar-nav::-webkit-scrollbar { display: none; }
+
+.topbar-link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-inline: 0.8rem;
+  color: var(--c-text-dim);
+  font-size: 0.875rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color .15s ease;
+}
+.topbar-link:hover { color: var(--c-text); }
+
+/* Active page: accent text plus a 2px rule sitting on the topbar's own border. */
+.topbar-link.active { color: var(--c-text); }
+.topbar-link.active::after {
+  content: "";
+  position: absolute;
+  left: 0.6rem;
+  right: 0.6rem;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--c-accent), var(--c-accent-soft));
+}
+
+.topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+  padding-block: 0.65rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 860px) {
+  .topbar-inner { flex-wrap: wrap; min-height: 0; padding-block: .5rem; }
+  .topbar-status { width: 100%; margin-left: 0; }
+}
+
+/* --------------------------------------------------------------------------
+   4. Page header
+   One canonical markup for every page title:
+     <div class="page-head">
+       <div><h1 class="page-title">…</h1><p class="page-sub">…</p></div>
+       <div class="page-actions">…buttons…</div>
      </div>
    -------------------------------------------------------------------------- */
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.page-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0;
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.page-sub {
+  margin: 0.3rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--c-text-faint);
+}
+
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* --------------------------------------------------------------------------
+   5. Stat tiles
+   -------------------------------------------------------------------------- */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 1rem;
+}
+
 .stat-card {
   display: flex;
   flex-direction: column;
-  gap: 0.1rem;
+  gap: 0.3rem;
   height: 100%;
-  padding: 0.7rem 0.9rem;
-  background: var(--bs-tertiary-bg);
-  border: 1px solid var(--app-rule);
-  border-left: 3px solid var(--bs-primary);
-  border-radius: var(--app-radius);
+  padding: 1.05rem 1.2rem;
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 
+/* A hairline of tone along the top edge — visible, never shouty. */
+.stat-card.success { border-top-color: rgba(var(--rgb-pos), .55); }
+.stat-card.danger  { border-top-color: rgba(var(--rgb-neg), .55); }
+.stat-card.warning { border-top-color: rgba(var(--rgb-warn), .55); }
+.stat-card.info    { border-top-color: rgba(var(--rgb-info), .55); }
+.stat-card.muted   { border-top-color: rgba(var(--rgb-muted), .40); }
+
 .stat-label {
-  font-size: 0.7rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.6875rem;
   font-weight: 600;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--app-muted);
+  color: var(--c-text-faint);
+}
+
+.stat-card.success .stat-label .tone-dot { background: var(--c-pos); }
+.stat-card.danger  .stat-label .tone-dot { background: var(--c-neg); }
+.stat-card.warning .stat-label .tone-dot { background: var(--c-warn); }
+.stat-card.info    .stat-label .tone-dot { background: var(--c-info); }
+.stat-card.muted   .stat-label .tone-dot { background: var(--c-text-faint); }
+
+.tone-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(var(--rgb-muted), .7);
+  flex: none;
 }
 
 .stat-value {
-  font-size: 1.45rem;
-  font-weight: 600;
-  line-height: 1.25;
+  font-size: 1.8rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
 }
 
 .stat-sub {
   font-size: 0.75rem;
-  color: var(--app-muted);
+  color: var(--c-text-dim);
 }
 
-.stat-card.success { border-left-color: var(--bs-success); }
-.stat-card.danger  { border-left-color: var(--bs-danger); }
-.stat-card.warning { border-left-color: var(--bs-warning); }
-.stat-card.info    { border-left-color: var(--bs-info); }
-.stat-card.muted   { border-left-color: var(--bs-secondary); }
+/* --------------------------------------------------------------------------
+   6. Cards
+   -------------------------------------------------------------------------- */
+.card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;     /* so a full-bleed table meets the rounded corners */
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1.25rem;
+  background: var(--c-surface-2);
+  border-bottom: 1px solid var(--c-line);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--c-text);
+}
+
+.card-body { padding: 1.25rem; }
+
+/* A note under a table or chart, inside the card body. */
+.card-note,
+.chart-note {
+  padding: 0.75rem 1.25rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--c-text-faint);
+  border-top: 1px solid var(--c-line-soft);
+}
+
+/* A section label used inside a card body. */
+.section-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+  margin-bottom: 0.6rem;
+}
 
 /* --------------------------------------------------------------------------
-   Tables
-   A light uppercase header rule instead of Bootstrap's `thead.table-dark`,
-   which made every table read as a heavy block.
+   7. Tables
    -------------------------------------------------------------------------- */
-.table.table-compact {
+.table {
+  --bs-table-bg: transparent;
+  --bs-table-color: var(--c-text);
+  --bs-table-border-color: var(--c-line-soft);
+  --bs-table-hover-bg: var(--c-surface-2);
+  --bs-table-hover-color: var(--c-text);
   margin-bottom: 0;
 }
 
-.table.table-compact > :not(caption) > * > * {
-  padding: 0.5rem 0.75rem;
-  border-bottom-color: var(--app-rule);
+.table > :not(caption) > * > * {
+  padding: 0.72rem 1rem;
+  border-bottom-color: var(--c-line-soft);
   vertical-align: middle;
 }
 
-.table.table-compact > thead > tr > th {
-  font-size: 0.7rem;
+.table > thead > tr > th {
+  padding-block: 0.6rem;
+  font-size: 0.6875rem;
   font-weight: 600;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--app-muted);
-  border-bottom: 1px solid var(--bs-border-color);
+  color: var(--c-text-faint);
+  background: var(--c-surface-2);
+  border-bottom: 1px solid var(--c-line);
   white-space: nowrap;
 }
 
-.table.table-compact > tbody > tr:last-child > td {
-  border-bottom: 0;
+.table > tbody > tr:last-child > td { border-bottom: 0; }
+
+/* Table headers that stay put while a long result set scrolls in place.
+   Applied to the scroll wrapper, not the table: the pinned header has to be
+   positioned against the box that actually scrolls. */
+.table-scroll {
+  max-height: 72vh;
+  overflow-y: auto;
+}
+.table-scroll table > thead > tr > th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 /* Rows that navigate on click. */
-.row-link {
-  cursor: pointer;
+.row-link { cursor: pointer; }
+.row-link:hover { background: var(--c-surface-2); }
+.row-link:active { background: var(--c-surface-3); }
+
+/* The winning row in a cross-asset ranking. */
+.row-highlight > td {
+  background: rgba(var(--rgb-pos), .07);
+  box-shadow: inset 3px 0 0 var(--c-pos);
 }
+.row-highlight:hover > td { background: rgba(var(--rgb-pos), .11); }
+
+/* Key/value panels (meta blocks, setup detail). */
+.kv-table th {
+  width: 42%;
+  padding-left: 1.25rem;
+  font-weight: 500;
+  font-size: 0.8125rem;
+  color: var(--c-text-faint);
+}
+.kv-table td { padding-right: 1.25rem; }
 
 /* --------------------------------------------------------------------------
-   States and badges
+   8. Badges, pills, status dots
    -------------------------------------------------------------------------- */
-.empty-state {
-  padding: 2rem 1rem;
-  text-align: center;
-  color: var(--app-muted);
-  font-size: 0.875rem;
+.badge {
+  padding: 0.32em 0.6em;
+  border-radius: var(--radius-pill);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
 }
+
+/* Tinted rather than solid: a solid badge next to a solid badge reads as two
+   blocks of paint, and this app shows a lot of them in one row. */
+.tone-success,
+.tone-danger,
+.tone-warning,
+.tone-info,
+.tone-secondary,
+.tone-accent {
+  color: inherit;
+}
+.tone-success   { background: rgba(var(--rgb-pos), .14);    color: #34d399; box-shadow: inset 0 0 0 1px rgba(var(--rgb-pos), .22); }
+.tone-danger    { background: rgba(var(--rgb-neg), .14);    color: #fb7185; box-shadow: inset 0 0 0 1px rgba(var(--rgb-neg), .22); }
+.tone-warning   { background: rgba(var(--rgb-warn), .14);   color: #fbbf24; box-shadow: inset 0 0 0 1px rgba(var(--rgb-warn), .22); }
+.tone-info      { background: rgba(var(--rgb-info), .14);   color: #7dd3fc; box-shadow: inset 0 0 0 1px rgba(var(--rgb-info), .22); }
+.tone-secondary { background: rgba(var(--rgb-muted), .12);  color: #cbd5e1; box-shadow: inset 0 0 0 1px rgba(var(--rgb-muted), .18); }
+.tone-accent    { background: rgba(var(--rgb-accent), .16); color: #a5b4fc; box-shadow: inset 0 0 0 1px rgba(var(--rgb-accent), .26); }
+
+/* Bootstrap's own badge palette, re-tinted so a stray `text-bg-*` in a template
+   still looks like this app rather than like stock Bootstrap. */
+.badge.text-bg-success { background: rgba(var(--rgb-pos), .14) !important;    color: #34d399 !important; box-shadow: inset 0 0 0 1px rgba(var(--rgb-pos), .22); }
+.badge.text-bg-danger  { background: rgba(var(--rgb-neg), .14) !important;    color: #fb7185 !important; box-shadow: inset 0 0 0 1px rgba(var(--rgb-neg), .22); }
+.badge.text-bg-warning { background: rgba(var(--rgb-warn), .14) !important;   color: #fbbf24 !important; box-shadow: inset 0 0 0 1px rgba(var(--rgb-warn), .22); }
+.badge.text-bg-info    { background: rgba(var(--rgb-info), .14) !important;   color: #7dd3fc !important; box-shadow: inset 0 0 0 1px rgba(var(--rgb-info), .22); }
+.badge.text-bg-secondary,
+.badge.text-bg-light   { background: rgba(var(--rgb-muted), .12) !important;  color: #cbd5e1 !important; box-shadow: inset 0 0 0 1px rgba(var(--rgb-muted), .18); }
+.badge.text-bg-primary { background: rgba(var(--rgb-accent), .16) !important; color: #a5b4fc !important; box-shadow: inset 0 0 0 1px rgba(var(--rgb-accent), .26); }
 
 /* Status dot — replaces the emoji glyphs, which render inconsistently. */
 .dot {
   display: inline-block;
-  width: 0.5rem;
-  height: 0.5rem;
-  margin-right: 0.35rem;
+  width: 6px;
+  height: 6px;
+  margin-right: 0.4rem;
   border-radius: 50%;
   background: currentColor;
-  vertical-align: baseline;
+  vertical-align: middle;
+  flex: none;
 }
 
-.badge {
-  font-weight: 500;
-  letter-spacing: 0.01em;
-}
-
-/* Grey scale-coloured caption text used under a card header. */
-.card-header {
-  font-size: 0.8125rem;
+/* The two navbar pills. Padded more than a badge and never wrapped. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.75rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
-  background: var(--bs-tertiary-bg);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+/* The live pill breathes while a session is actually running. */
+@keyframes pill-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+#live-pill[data-state="running"] .dot,
+#live-pill[data-state="starting"] .dot {
+  animation: pill-pulse 1.8s ease-in-out infinite;
 }
 
 /* --------------------------------------------------------------------------
-   Charts
-   Chart.js is given a fixed-height box so `maintainAspectRatio: false`
-   resizes correctly instead of growing without bound.
+   9. Buttons
+   -------------------------------------------------------------------------- */
+.btn {
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  padding: 0.42rem 0.85rem;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+
+.btn-sm { padding: 0.32rem 0.7rem; font-size: 0.78125rem; }
+
+.btn-primary {
+  --bs-btn-bg: var(--c-accent);
+  --bs-btn-border-color: var(--c-accent);
+  --bs-btn-hover-bg: #5457e5;
+  --bs-btn-hover-border-color: #5457e5;
+  --bs-btn-active-bg: #4f46e5;
+  --bs-btn-active-border-color: #4f46e5;
+  --bs-btn-disabled-bg: rgba(var(--rgb-accent), .45);
+  --bs-btn-disabled-border-color: transparent;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+}
+
+.btn-success {
+  --bs-btn-bg: var(--c-pos);
+  --bs-btn-border-color: var(--c-pos);
+  --bs-btn-hover-bg: #0ea472;
+  --bs-btn-hover-border-color: #0ea472;
+  --bs-btn-color: #04120d;
+  --bs-btn-hover-color: #04120d;
+  --bs-btn-disabled-color: #04120d;
+}
+
+.btn-outline-secondary {
+  --bs-btn-color: var(--c-text-dim);
+  --bs-btn-border-color: var(--c-line);
+  --bs-btn-hover-bg: var(--c-surface-3);
+  --bs-btn-hover-border-color: #2f3d57;
+  --bs-btn-hover-color: var(--c-text);
+  --bs-btn-active-bg: var(--c-surface-3);
+  --bs-btn-active-border-color: #2f3d57;
+  --bs-btn-active-color: var(--c-text);
+}
+
+.btn-outline-primary {
+  --bs-btn-color: var(--c-accent-soft);
+  --bs-btn-border-color: rgba(var(--rgb-accent), .45);
+  --bs-btn-hover-bg: rgba(var(--rgb-accent), .16);
+  --bs-btn-hover-border-color: var(--c-accent);
+  --bs-btn-hover-color: #c7d2fe;
+  --bs-btn-active-bg: rgba(var(--rgb-accent), .22);
+  --bs-btn-active-border-color: var(--c-accent);
+  --bs-btn-active-color: #c7d2fe;
+}
+
+.btn-outline-danger {
+  --bs-btn-color: #fb7185;
+  --bs-btn-border-color: rgba(var(--rgb-neg), .42);
+  --bs-btn-hover-bg: rgba(var(--rgb-neg), .16);
+  --bs-btn-hover-border-color: var(--c-neg);
+  --bs-btn-hover-color: #fecdd3;
+  --bs-btn-active-bg: rgba(var(--rgb-neg), .22);
+  --bs-btn-active-border-color: var(--c-neg);
+  --bs-btn-active-color: #fecdd3;
+}
+
+.btn:disabled, .btn.disabled { opacity: .45; }
+
+/* --------------------------------------------------------------------------
+   10. Forms
+   -------------------------------------------------------------------------- */
+.form-control,
+.form-select {
+  background-color: var(--c-surface-2);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-sm);
+  color: var(--c-text);
+  font-size: 0.8125rem;
+  padding: 0.42rem 0.7rem;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.form-control::placeholder { color: var(--c-text-faint); }
+
+.form-control:focus,
+.form-select:focus {
+  background-color: var(--c-surface-2);
+  border-color: rgba(var(--rgb-accent), .65);
+  color: var(--c-text);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-accent), .18);
+}
+
+.form-select {
+  /* Bootstrap's select uses a background-image chevron; recolour it. */
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%2397a5bd' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+}
+
+.form-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+}
+
+/* The filter bar on the signals page. */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem;
+  padding: 1rem 1.25rem;
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* A hint under a form field. */
+.form-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--c-text-faint);
+}
+
+/* --------------------------------------------------------------------------
+   11. Alerts, list groups, progress
+   -------------------------------------------------------------------------- */
+.alert {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  padding: 0.85rem 1rem;
+}
+.alert strong { font-weight: 600; }
+.alert-warning {
+  background: rgba(var(--rgb-warn), .10);
+  border-color: rgba(var(--rgb-warn), .28);
+  color: #fcd9a0;
+}
+.alert-danger {
+  background: rgba(var(--rgb-neg), .10);
+  border-color: rgba(var(--rgb-neg), .28);
+  color: #fecdd3;
+}
+.alert-info {
+  background: rgba(var(--rgb-info), .10);
+  border-color: rgba(var(--rgb-info), .28);
+  color: #bae6fd;
+}
+.alert-success {
+  background: rgba(var(--rgb-pos), .10);
+  border-color: rgba(var(--rgb-pos), .28);
+  color: #a7f3d0;
+}
+.alert-secondary {
+  background: rgba(var(--rgb-muted), .08);
+  border-color: rgba(var(--rgb-muted), .20);
+  color: var(--c-text-dim);
+}
+
+.list-group-item {
+  background: transparent;
+  border-color: var(--c-line-soft);
+  color: var(--c-text);
+  font-size: 0.8125rem;
+  padding: 0.65rem 1.25rem;
+}
+
+.progress {
+  background: var(--c-surface-3);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+.progress-bar { background: var(--c-accent); transition: width .3s ease; }
+.progress-thin { height: 5px; }
+
+/* --------------------------------------------------------------------------
+   12. Charts
    -------------------------------------------------------------------------- */
 .chart-box {
   position: relative;
-  height: 320px;
+  height: 340px;
 }
 
-.chart-box-sm {
-  position: relative;
-  height: 240px;
-}
+.chart-box-sm { height: 260px; }
 
-/* Legend / note text beneath a chart. */
-.chart-note {
-  font-size: 0.75rem;
-  color: var(--app-muted);
-}
+/* --------------------------------------------------------------------------
+   13. Purpose-built blocks
+   -------------------------------------------------------------------------- */
 
-/* Thin progress bar used for backtest asset progress. */
-.progress-thin {
-  height: 6px;
-}
-
-/* Key-value tables (meta panels) read better with a narrower label column. */
-.kv-table th {
-  width: 45%;
-  font-weight: 500;
-  color: var(--app-muted);
-}
-
-/* AI overlay panel. */
+/* The AI overlay — deliberately set apart, since it is advisory only. */
 .ai-box {
-  background: var(--bs-tertiary-bg);
-  border: 1px solid var(--app-rule);
-  border-radius: var(--app-radius);
+  border-color: rgba(var(--rgb-info), .30);
+}
+.ai-box > .card-header {
+  background: rgba(var(--rgb-info), .07);
+  border-bottom-color: rgba(var(--rgb-info), .20);
+}
+
+/* The parenthetical beside a card title ("advisory only — never overrides risk"). */
+.card-header-note {
+  font-size: 0.6875rem;
+  font-weight: 400;
+  color: var(--c-text-faint);
+}
+
+/* Rules drawn inside a card body, separating groups of fields. */
+.card-body hr {
+  border-color: var(--c-line-soft);
+  opacity: 1;
+}
+
+/* The "best asset" headline on a batch comparison. */
+.headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 1.35rem 1.5rem;
+  background:
+    linear-gradient(120deg, rgba(var(--rgb-pos), .10), transparent 55%),
+    var(--c-surface);
+  border: 1px solid rgba(var(--rgb-pos), .28);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.headline .tone-dot { background: var(--c-pos); }
+
+.headline-name {
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.headline-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2rem;
+  margin-left: auto;
+}
+
+/* Configuration dumps and raw payloads. */
+.code-block { color: var(--c-text-dim); }
+
+/* Empty states, whether in a table body or a bare div. */
+.empty-state {
+  padding: 2.5rem 1.25rem;
+  text-align: center;
+  color: var(--c-text-faint);
+  font-size: 0.8125rem;
+}
+
+/* Definition list used for the live-session metadata grid. */
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 1rem 1.5rem;
+  margin: 0;
+}
+.meta-grid dt {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+  margin-bottom: 0.15rem;
+}
+.meta-grid dd {
+  margin: 0;
+  font-size: 0.875rem;
+  word-break: break-word;
+}
+
+/* A field that needs the full width of a grid row (e.g. a long asset list). */
+.span-all { grid-column: 1 / -1; }
+
+/* Inline key/value pair used in dense table cells. */
+.sub-value {
+  display: block;
+  font-size: 0.6875rem;
+  color: var(--c-text-faint);
+}
+
+/* --------------------------------------------------------------------------
+   14. Accessibility
+   -------------------------------------------------------------------------- */
+:focus-visible {
+  outline: 2px solid var(--c-accent-soft);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
 }

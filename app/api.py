@@ -255,7 +255,8 @@ def register_api(app) -> None:
                             "message": f"max_hold_m1 must be between "
                                        f"{MIN_MAX_HOLD_M1} and {MAX_MAX_HOLD_M1}."}), 400
 
-        result = jobs.request_backtest(asset=asset, bars=bars,
+        result = jobs.request_backtest(asset=asset,
+                                       bars=None if start_utc else bars,
                                        start_utc=start_utc, end_utc=end_utc,
                                        max_hold_m1=max_hold)
         window = (f"{data.get('start')}..{data.get('end')}" if start_utc
@@ -419,7 +420,12 @@ def register_api(app) -> None:
 
         after = request.args.get("after_signal_id", type=int)
         payload["signals"] = {
+            # ``last_id`` is the polling cursor -- the highest id seen, which the
+            # browser echoes back to ask for anything newer. ``total`` is the
+            # genuine count, which is what the dashboard tile displays; the two
+            # are not interchangeable if rows are ever removed.
             "last_id": g.repo.max_signal_id(),
+            "total": g.repo.count_signals(),
             "new": ([_signal_json(r) for r in g.repo.signals_after_id(after)]
                     if after is not None else []),
         }

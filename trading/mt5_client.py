@@ -110,6 +110,12 @@ class MT5Client:
         )
 
     def symbol_info(self, symbol: str) -> dict[str, Any] | None:
+        """Everything the rest of the bot needs to know about one symbol.
+
+        The contract fields (``trade_contract_size``, ``volume_*``, ``tick_*``)
+        are what make position sizing correct per asset class — see
+        :mod:`trading.symbol_spec`. They are read here and nowhere else.
+        """
         if not self.is_connected():
             return None
         info = _mt5.symbol_info(symbol)
@@ -121,7 +127,48 @@ class MT5Client:
             "point": info.point,
             "trade_mode": info.trade_mode,
             "visible": bool(info.visible),
+            # Contract specification (per-asset-class sizing).
+            "trade_contract_size": getattr(info, "trade_contract_size", 0.0),
+            "volume_min": getattr(info, "volume_min", 0.0),
+            "volume_step": getattr(info, "volume_step", 0.0),
+            "volume_max": getattr(info, "volume_max", 0.0),
+            "tick_size": getattr(info, "trade_tick_size", 0.0),
+            "tick_value": getattr(info, "trade_tick_value", 0.0),
+            "filling_mode": getattr(info, "filling_mode", None),
+            "currency_profit": getattr(info, "currency_profit", ""),
         }
+
+    def symbol_names(self) -> list[str]:
+        """Every symbol name the terminal offers (used for broker-symbol lookup).
+
+        Returns ``[]`` rather than raising so an unavailable symbol list degrades
+        to "could not resolve" instead of taking down a scanning session.
+        """
+        if not self.is_connected():
+            return []
+        symbols = _mt5.symbols_get()
+        if symbols is None:
+            return []
+        return [s.name for s in symbols]
+
+    def ensure_symbol(self, symbol: str) -> bool:
+        """Make ``symbol`` visible in Market Watch; return whether it now is.
+
+        MT5 returns no history for a symbol that is not selected, so this is
+        required before the first fetch of any newly added asset. Selecting is
+        idempotent and only affects the terminal's symbol list — never orders.
+        """
+        if not self.is_connected():
+            return False
+        info = _mt5.symbol_info(symbol)
+        if info is None:
+            seen = _mt5.symbols_get(symbol)
+            if not seen:
+                return False
+            info = seen[0]
+        if getattr(info, "visible", False):
+            return True
+        return bool(_mt5.symbol_select(symbol, True))
 
     # ------------------------------------------------------------------ #
     # Market data (server-clock times; conversion happens in market_data)

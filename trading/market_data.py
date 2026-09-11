@@ -96,8 +96,18 @@ class MarketData:
         return bounds
 
     def symbol_exists(self, symbol: str) -> bool:
+        """True when the terminal offers ``symbol`` and it is now fetchable.
+
+        MT5 returns no history for a symbol that is not selected in Market Watch,
+        and brokers do not pre-select every instrument they offer — so this
+        selects the symbol first. Without that, any newly added asset (an index,
+        a cross, crypto) would appear "missing" and be skipped.
+        """
+        ensure = getattr(self.client, "ensure_symbol", None)
+        if callable(ensure):
+            return bool(ensure(symbol))
         info = self.client.symbol_info(symbol)
-        return bool(info and info.get("visible", False) or info)
+        return bool(info) and bool(info.get("visible", False))
 
     def build_warmup_barset(self, symbol: str, count: int) -> BarSet:
         """Fetch history into a warm :class:`BarSet` for live/backtest use."""

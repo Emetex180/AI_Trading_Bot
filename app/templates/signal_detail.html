@@ -1,31 +1,38 @@
 {% extends "base.html" %}
-{% from "_macros.html" import dir_badge, empty %}
+{% from "_macros.html" import dir_badge, status_badge, empty %}
 {% block title %}Signal #{{ s.id }} — ICT Scanner{% endblock %}
 {% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-  <h4 class="mb-0 d-flex align-items-center gap-2">
-    Signal #{{ s.id }}
-    {{ dir_badge(s.direction) }}
-    <span class="badge text-bg-secondary">{{ s.status | status }}</span>
-  </h4>
-  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('signals_page') }}">← Signals</a>
+<div class="page-head">
+  <div>
+    <h1 class="page-title">
+      Signal #{{ s.id }}
+      {{ dir_badge(s.direction) }}
+      {{ status_badge(s.status) }}
+    </h1>
+    <p class="page-sub">
+      {{ s.asset }}{% if s.entry_time_utc %} · {{ s.entry_time_utc | ny }} (NY){% endif %}
+    </p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('signals_page') }}">← All signals</a>
+  </div>
 </div>
 
-<div class="row g-3">
-  <div class="col-lg-7">
+<div class="row g-4">
+  <div class="col-xl-7">
     <div class="card">
       <div class="card-header">Setup</div>
-      <table class="table table-sm table-compact kv-table">
+      <table class="table kv-table">
         <tbody>
-          <tr><th>Asset</th><td>{{ s.asset }}</td></tr>
-          <tr><th>Entry price</th><td class="mono">{{ s.entry | num }}</td></tr>
-          <tr><th>Stop loss</th><td class="mono">{{ s.sl | num }}</td></tr>
-          <tr><th>Take profit</th><td class="mono">{{ s.tp | num }}</td></tr>
+          <tr><th>Asset</th><td class="fw-semibold">{{ s.asset }}</td></tr>
+          <tr><th>Entry price</th><td class="mono">{{ s.entry | price(s.asset) }}</td></tr>
+          <tr><th>Stop loss</th><td class="mono">{{ s.sl | price(s.asset) }}</td></tr>
+          <tr><th>Take profit</th><td class="mono">{{ s.tp | price(s.asset) }}</td></tr>
           <tr><th>Reward : risk</th><td class="mono">{{ '%.2f' | format(s.rr) }}</td></tr>
           <tr>
             <th>Risk approved</th>
             <td>
-              <span class="badge {{ 'text-bg-success' if s.risk_approved else 'text-bg-danger' }}">
+              <span class="badge {{ 'tone-success' if s.risk_approved else 'tone-danger' }}">
                 {{ 'Approved' if s.risk_approved else 'Not approved' }}</span>
               {% if s.reason %}<span class="text-muted small ms-1">{{ s.reason }}</span>{% endif %}
             </td>
@@ -33,7 +40,7 @@
           <tr>
             <th>Alert only</th>
             <td>
-              <span class="badge {{ 'text-bg-warning' if s.alert_only else 'text-bg-secondary' }}">
+              <span class="badge {{ 'tone-warning' if s.alert_only else 'tone-secondary' }}">
                 {{ 'Alert only — never an execution request' if s.alert_only else 'No' }}</span>
             </td>
           </tr>
@@ -41,52 +48,54 @@
       </table>
     </div>
 
-    <div class="card mt-3">
+    <div class="card mt-4">
       <div class="card-header">ICT context</div>
-      <table class="table table-sm table-compact kv-table">
+      <table class="table kv-table">
         <tbody>
           <tr><th>Entry time (NY)</th><td class="mono">{{ s.entry_time_utc | ny }}</td></tr>
           <tr><th>Sessions</th>
               <td>{{ s.session_keys | join(', ') or '-' }}
-                  {% if s.session_primary %}<span class="badge text-bg-light ms-1">{{ s.session_primary }}</span>{% endif %}</td></tr>
+                  {% if s.session_primary %}<span class="badge tone-accent ms-1">{{ s.session_primary }}</span>{% endif %}</td></tr>
           <tr><th>Silver bullet window</th>
               <td>{{ s.silver_bullet if s.silver_bullet else '—' }}</td></tr>
           <tr><th>Macro window</th><td>{{ s.macro if s.macro else '—' }}</td></tr>
           <tr><th>Liquidity purged</th>
-              <td>{{ s.liquidity_type or '—' }} @ <span class="mono">{{ s.liquidity_price | num }}</span>
+              <td>{{ s.liquidity_type or '—' }} @ <span class="mono">{{ s.liquidity_price | price(s.asset) }}</span>
                   <span class="text-muted small">({{ s.purge_time_ny | ny }})</span></td></tr>
           <tr><th>CISD confirmation</th>
               <td>{{ s.cisd_tf or '—' }}
                   <span class="text-muted small">({{ s.cisd_confirm_time_ny | ny }})</span></td></tr>
           <tr><th>FVG</th>
               <td>{{ s.fvg_direction or '—' }}
-                  <span class="mono">[{{ s.fvg_lower | num }} … {{ s.fvg_upper | num }}]</span>
+                  <span class="mono">[{{ s.fvg_lower | price(s.asset) }} … {{ s.fvg_upper | price(s.asset) }}]</span>
                   <span class="text-muted small">({{ s.fvg_formation_time_ny | ny }})</span></td></tr>
-          <tr><th>Structure extreme</th><td class="mono">{{ s.structure_extreme_price | num }}</td></tr>
+          <tr><th>Structure extreme</th><td class="mono">{{ s.structure_extreme_price | price(s.asset) }}</td></tr>
         </tbody>
       </table>
     </div>
   </div>
 
-  <div class="col-lg-5">
+  <div class="col-xl-5">
     <div class="card ai-box">
-      <div class="card-header">AI analysis
-        <span class="text-muted small fw-normal">(advisory only — never overrides risk)</span></div>
+      <div class="card-header">
+        <span>AI analysis</span>
+        <span class="card-header-note">advisory only — never overrides risk</span>
+      </div>
       <div class="card-body">
         {% if s.ai_status %}
-          <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-            <span class="badge text-bg-info">{{ s.ai_status }}</span>
+          <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+            <span class="badge tone-info">{{ s.ai_status }}</span>
             {% if s.ai_score is not none %}
-              <span class="mono small">score {{ '%.1f' | format(s.ai_score) }}/100</span>
+              <span class="mono small text-muted">score {{ '%.1f' | format(s.ai_score) }}/100</span>
             {% endif %}
             {% if s.ai_confidence is not none %}
-              <span class="text-muted small">confidence {{ '%.0f%%' | format(s.ai_confidence) }}</span>
+              <span class="small text-muted">confidence {{ '%.0f%%' | format(s.ai_confidence) }}</span>
             {% endif %}
           </div>
-          {% set decision_tone = {'agree': 'text-bg-success', 'caution': 'text-bg-warning'} %}
-          <p><strong>Decision:</strong>
-            <span class="badge {{ decision_tone.get(s.ai_decision, 'text-bg-secondary') }}">{{ s.ai_decision or 'n/a' }}</span></p>
-          {% if s.ai_reasoning %}<p class="small mb-2">{{ s.ai_reasoning }}</p>{% endif %}
+          {% set decision_tone = {'agree': 'success', 'caution': 'warning'} %}
+          <p class="mb-3"><span class="text-muted">Decision</span>
+            <span class="badge tone-{{ decision_tone.get(s.ai_decision, 'secondary') }} ms-1">{{ s.ai_decision or 'n/a' }}</span></p>
+          {% if s.ai_reasoning %}<p class="small">{{ s.ai_reasoning }}</p>{% endif %}
           {% if s.ai_strengths %}
             <div class="small text-success mb-1">Strengths: {{ s.ai_strengths | join(' · ') }}</div>
           {% endif %}
@@ -99,18 +108,18 @@
       </div>
     </div>
 
-    <div class="card mt-3">
+    <div class="card mt-4">
       <div class="card-header">Execution attempts</div>
       <div class="table-responsive">
-      <table class="table table-sm table-compact">
+      <table class="table">
         <thead><tr><th>Status</th><th>Lots</th><th>Reason</th><th>Time (NY)</th></tr></thead>
         <tbody>
         {% for e in executions %}
           <tr>
-            <td><span class="badge {{ 'text-bg-success' if e.status == 'SENT' else 'text-bg-secondary' }}">{{ e.status | status }}</span></td>
+            <td>{{ status_badge(e.status) }}</td>
             <td class="mono">{{ e.lots | num(2) }}</td>
             <td class="small text-muted">{{ e.reason }}</td>
-            <td class="small mono">{{ e.requested_at_utc | ny }}</td>
+            <td class="mono text-muted small">{{ e.requested_at_utc | ny }}</td>
           </tr>
         {% else %}
           {{ empty(4, 'No execution attempts.') }}

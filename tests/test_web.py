@@ -76,7 +76,9 @@ def test_signals_page_filters():
     assert "APPROVED" in all_body and "REJECTED" in all_body
 
     appr = client.get("/signals?status=APPROVED").get_data(as_text=True)
-    assert "101.7000" in appr and "99.0000" not in appr  # rejected row gone
+    # Prices render at the asset's registered precision (USTEC is 2 digits in the
+    # registry), not a fixed 4 — see app.web._price.
+    assert "101.70" in appr and "99.00" not in appr  # rejected row gone
 
 
 def test_signal_detail_shows_ai_and_executions():

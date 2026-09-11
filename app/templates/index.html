@@ -1,24 +1,28 @@
 {% extends "base.html" %}
-{% from "_macros.html" import stat, dir_badge, empty %}
+{% from "_macros.html" import stat, dir_badge, status_badge, empty %}
 {% block title %}Dashboard — ICT Scanner{% endblock %}
 {% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-  <h4 class="mb-0">Dashboard</h4>
+<div class="page-head">
   <div>
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-sub">Live scanner state, signal flow and risk policy at a glance.</p>
+  </div>
+  <div class="page-actions">
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('signals_page') }}">All signals</a>
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('backtests_page') }}">All backtests</a>
   </div>
 </div>
 
 {% set live = job_state.live %}
-<div class="card mb-3" id="live-card">
-  <div class="card-header d-flex justify-content-between align-items-center">
+{% set live_active = live.state in ('starting', 'running', 'stopping') %}
+<div class="card mb-4" id="live-card">
+  <div class="card-header">
     <span>Live session</span>
-    <span id="live-state-badge" class="badge text-bg-secondary">{{ live.state }}</span>
+    <span id="live-state-badge" class="badge tone-secondary">{{ live.state }}</span>
   </div>
   <div class="card-body">
     {% if not telegram_ready %}
-    <div class="alert alert-warning py-2 small mb-3">
+    <div class="alert alert-warning mb-4">
       <strong>Telegram is not configured.</strong> Signals will still be detected and saved,
       but <strong>no alert will reach your phone</strong>. Set <code>TELEGRAM_ENABLED=true</code>,
       <code>TELEGRAM_BOT_TOKEN</code> and <code>TELEGRAM_CHAT_ID</code> in <code>.env</code>
@@ -26,70 +30,62 @@
     </div>
     {% endif %}
 
-    <div class="d-flex flex-wrap gap-2 mb-3">
-      <button type="button" id="live-start" class="btn btn-sm btn-success">Start live session</button>
-      <button type="button" id="live-stop" class="btn btn-sm btn-outline-danger">Stop</button>
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-4">
+      <button type="button" id="live-start" class="btn btn-sm btn-success"
+              {{ 'disabled' if live_active }}>Start live session</button>
+      <button type="button" id="live-stop" class="btn btn-sm btn-outline-danger"
+              {{ 'disabled' if not live_active }}>Stop</button>
+      <span id="live-message" class="small ms-1"></span>
     </div>
 
-    <div id="live-message" class="small mb-3"></div>
-
-    <dl class="row small mb-0">
-      <dt class="col-6 text-muted fw-normal">Started (NY)</dt>
-      <dd class="col-6 mono text-end" id="live-started">{{ live.started_at_utc | ny or '—' }}</dd>
-      <dt class="col-6 text-muted fw-normal">Assets warmed</dt>
-      <dd class="col-6 mono text-end" id="live-assets">{{ live.assets | join(', ') or '—' }}</dd>
-      <dt class="col-6 text-muted fw-normal">Last closed M1 (NY)</dt>
-      <dd class="col-6 mono text-end" id="live-last-candle">{{ live.last_candle_utc | ny or '—' }}</dd>
-      <dt class="col-6 text-muted fw-normal">Signals this session</dt>
-      <dd class="col-6 mono text-end" id="live-signals">{{ live.signals_session }}</dd>
+    <dl class="meta-grid">
+      <div>
+        <dt>Started (NY)</dt>
+        <dd class="mono" id="live-started">{{ live.started_at_utc | ny or '—' }}</dd>
+      </div>
+      <div>
+        <dt>Last closed M1 (NY)</dt>
+        <dd class="mono" id="live-last-candle">{{ live.last_candle_utc | ny or '—' }}</dd>
+      </div>
+      <div>
+        <dt>Signals this session</dt>
+        <dd class="mono" id="live-signals">{{ live.signals_session }}</dd>
+      </div>
+      <div class="span-all">
+        <dt>Assets warmed</dt>
+        <dd id="live-assets">{{ live.assets | join(', ') or '—' }}</dd>
+      </div>
     </dl>
 
-    <div id="live-error" class="alert alert-danger py-2 small mt-3 mb-0 {% if not live.last_error %}d-none{% endif %}">
+    <div id="live-error" class="alert alert-danger mt-4 mb-0 {% if not live.last_error %}d-none{% endif %}">
       {{ live.last_error }}
     </div>
   </div>
 </div>
 
-<div id="new-signals" class="mb-3"></div>
+<div id="new-signals" class="mb-4"></div>
 
-<div class="row g-3 mb-3">
-  <div class="col-6 col-lg-3">
-    {{ stat('Signals (total)', stats.signals_total) }}
-  </div>
-  <div class="col-6 col-lg-3">
-    {{ stat('Approved', stats.signals_approved, 'success') }}
-  </div>
-  <div class="col-6 col-lg-3">
-    {{ stat('Execution attempts', stats.trades_total, '',
-            stats.trades_sent ~ ' sent') }}
-  </div>
-  <div class="col-6 col-lg-3">
-    {{ stat('Backtests', stats.backtests) }}
-  </div>
+<div class="stat-grid mb-4">
+  {{ stat('Signals (total)', stats.signals_total, id='stat-signals-total') }}
+  {{ stat('Approved', stats.signals_approved, 'success') }}
+  {{ stat('Rejected', stats.signals_rejected, 'muted') }}
+  {{ stat('Execution attempts', stats.trades_total, '',
+          stats.trades_sent ~ ' sent') }}
+  {{ stat('Skipped (safe gate)', stats.trades_skipped, 'muted') }}
+  {{ stat('Backtests', stats.backtests) }}
+  {{ stat('Assets (enabled / total)',
+          stats.assets_enabled ~ ' / ' ~ stats.assets_total, 'info') }}
 </div>
 
-<div class="row g-3 mb-4">
-  <div class="col-6 col-lg-3">
-    {{ stat('Rejected', stats.signals_rejected, 'muted') }}
-  </div>
-  <div class="col-6 col-lg-3">
-    {{ stat('Skipped (safe gate)', stats.trades_skipped, 'muted') }}
-  </div>
-  <div class="col-6 col-lg-3">
-    {{ stat('Assets (enabled / total)',
-            stats.assets_enabled ~ ' / ' ~ stats.assets_total, 'info') }}
-  </div>
-</div>
-
-<div class="row g-3">
-  <div class="col-lg-8">
+<div class="row g-4">
+  <div class="col-xl-8">
     <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
+      <div class="card-header">
         <span>Recent signals</span>
-        <a href="{{ url_for('signals_page') }}" class="small">view all</a>
+        <a class="small" href="{{ url_for('signals_page') }}">view all</a>
       </div>
       <div class="table-responsive">
-      <table class="table table-sm table-hover table-compact">
+      <table class="table table-hover">
         <thead>
           <tr><th>#</th><th>Asset</th><th>Dir</th><th>Entry</th><th>RR</th>
               <th>Entry (NY)</th><th>CISD</th><th>Session</th><th>Status</th></tr>
@@ -97,15 +93,15 @@
         <tbody>
         {% for s in recent_signals %}
           <tr class="row-link" onclick="location.href='{{ url_for('signal_detail', signal_id=s.id) }}'">
-            <td class="text-muted">{{ s.id }}</td>
-            <td>{{ s.asset }}</td>
+            <td class="text-muted mono">{{ s.id }}</td>
+            <td class="fw-semibold">{{ s.asset }}</td>
             <td>{{ dir_badge(s.direction) }}</td>
-            <td class="mono">{{ s.entry | num }}</td>
+            <td class="mono">{{ s.entry | price(s.asset) }}</td>
             <td class="mono">{{ '%.2f' | format(s.rr) }}</td>
-            <td class="mono">{{ s.entry_time_utc | ny }}</td>
-            <td>{{ s.cisd_tf or '-' }}</td>
-            <td>{{ s.session_primary or '-' }}</td>
-            <td>{{ s.status | status }}</td>
+            <td class="mono text-muted">{{ s.entry_time_utc | ny }}</td>
+            <td class="text-muted">{{ s.cisd_tf or '-' }}</td>
+            <td class="text-muted">{{ s.session_primary or '-' }}</td>
+            <td>{{ status_badge(s.status) }}</td>
           </tr>
         {% else %}
           {{ empty(9, 'No signals yet. Start a live session above.') }}
@@ -116,29 +112,42 @@
     </div>
   </div>
 
-  <div class="col-lg-4">
-    <div class="card mb-3">
+  <div class="col-xl-4">
+    <div class="card mb-4">
       <div class="card-header">Risk &amp; session policy</div>
       <ul class="list-group list-group-flush">
-        <li class="list-group-item d-flex justify-content-between">
-          <span>Min RR</span><span class="mono">{{ cfg.min_rr }}</span></li>
-        <li class="list-group-item d-flex justify-content-between">
-          <span>Target RR range</span><span class="mono">{{ cfg.target_rr_range[0] }}–{{ cfg.target_rr_range[1] }}</span></li>
-        <li class="list-group-item d-flex justify-content-between">
-          <span>Risk per trade</span><span class="mono">{{ cfg.risk_percent }}%</span></li>
-        <li class="list-group-item d-flex justify-content-between">
-          <span>Entry sessions</span><span class="small text-end">{{ cfg.valid_entry_sessions | join(', ') }}</span></li>
-        <li class="list-group-item d-flex justify-content-between">
-          <span>CISD cut-off (NY)</span><span class="mono">{{ cfg.cisd_threshold_hour_ny }}:00</span></li>
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <span class="text-muted">Min RR</span><span class="mono">{{ cfg.min_rr }}</span></li>
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <span class="text-muted">Target RR range</span>
+          <span class="mono">{{ cfg.target_rr_range[0] }}–{{ cfg.target_rr_range[1] }}</span></li>
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <span class="text-muted">Risk per trade</span>
+          <span class="mono">{{ cfg.risk_percent }}%</span></li>
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <span class="text-muted">CISD cut-off (NY)</span>
+          <span class="mono">{{ cfg.cisd_threshold_hour_ny }}:00</span></li>
+        <li class="list-group-item">
+          <div class="text-muted mb-1">Entry sessions</div>
+          <div class="d-flex flex-wrap gap-1">
+            {% for s in cfg.valid_entry_sessions %}
+            <span class="badge tone-accent">{{ s }}</span>
+            {% endfor %}
+          </div>
+        </li>
       </ul>
     </div>
 
-    <div class="card mb-3">
-      <div class="card-header">Enabled assets</div>
+    <div class="card mb-4">
+      <div class="card-header">
+        <span>Enabled assets</span>
+        <span class="badge tone-secondary">{{ stats.assets_enabled }}</span>
+      </div>
       <ul class="list-group list-group-flush">
         {% for a in assets %}
-        <li class="list-group-item d-flex justify-content-between">
-          <span>{{ a.name }}</span><span class="mono text-muted">{{ a.broker_symbol }}</span></li>
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <span>{{ a.name }}</span>
+          <span class="mono text-muted small">{{ a.broker_symbol }}</span></li>
         {% else %}
         <li class="list-group-item text-muted">None enabled.</li>
         {% endfor %}
@@ -149,9 +158,12 @@
       <div class="card-header">System events</div>
       <ul class="list-group list-group-flush">
         {% for e in recent_events %}
-        <li class="list-group-item py-1 small d-flex justify-content-between">
-          <span class="text-muted">{{ e.event_time_utc | ny }}</span>
-          <span class="ms-2">{{ e.source }} · {{ e.message }}</span>
+        <li class="list-group-item py-2">
+          <div class="d-flex justify-content-between gap-2">
+            <span class="fw-semibold">{{ e.source }}</span>
+            <span class="text-muted mono small">{{ e.event_time_utc | ny }}</span>
+          </div>
+          <div class="text-muted small">{{ e.message }}</div>
         </li>
         {% else %}
         <li class="list-group-item text-muted">No events.</li>

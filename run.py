@@ -95,14 +95,24 @@ def run_web(settings: Settings) -> int:
 # --------------------------------------------------------------------------- #
 # Asset registry listing / smoke check
 # --------------------------------------------------------------------------- #
-def run_assets(settings: Settings) -> int:
+def run_assets(settings: Settings, enable_all: bool = False,
+               disable_all: bool = False) -> int:
     from trading.asset_manager import AssetManager
 
     manager = AssetManager(settings=settings)
+    if enable_all or disable_all:
+        changed = manager.set_all_enabled(enable_all)
+        verb = "enabled" if enable_all else "disabled"
+        print(f"[assets] {verb} {len(changed)} asset(s).")
     for asset in manager.list_assets():
         state = "ENABLED" if asset.enabled else "disabled"
+        contract = (f"contract={asset.contract_size:g}"
+                    if asset.contract_size != 1.0 else "contract=1 (index-style)")
         print(f"{asset.name:10s} -> {asset.broker_symbol:12s} [{state}] "
-              f"digits={asset.digits}")
+              f"digits={asset.digits} {contract}")
+    print(f"\n{len(manager.enabled_assets())} of "
+          f"{len(manager.list_assets())} enabled. "
+          "Symbols are resolved against the broker at session start.")
     return 0
 
 
@@ -133,9 +143,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=["scan", "backtest", "web", "assets",
                                            "smoke"],
                         help="which subsystem to run")
+    parser.add_argument("--enable-all", action="store_true",
+                        help="assets: enable every asset in the registry")
+    parser.add_argument("--disable-all", action="store_true",
+                        help="assets: disable every asset in the registry")
+    parser.add_argument("--asset", default=None,
+                        help="backtest: run one asset instead of all enabled")
     args = parser.parse_args(argv)
 
     settings = get_settings()
+    if args.command == "assets":
+        return run_assets(settings, enable_all=args.enable_all,
+                          disable_all=args.disable_all)
+    if args.command == "backtest":
+        return run_backtest(settings, asset=args.asset)
     runner = {
         "scan": run_scan,
         "backtest": run_backtest,

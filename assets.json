@@ -1,17 +1,164 @@
 {
-  "_comment": "Asset registry. Each key is the STRATEGY name used across the bot; 'broker_symbol' is what MT5 receives. Add/remove assets here or via the asset manager API — no strategy code changes needed. 'enabled' controls whether the scanner trades/analyzes the asset.",
+  "_comment": "Asset registry — the ONLY place instruments are configured. Each key is the STRATEGY name used across the bot (dashboard, DB, backtests); 'broker_symbol' is the base symbol requested from MT5. When SYMBOL_AUTO_RESOLVE=true the bot asks the terminal for the broker's actual spelling (e.g. XAUUSD -> XAUUSDm) and selects it in Market Watch, so a registry entry is portable between brokers. 'enabled' controls whether the scanner analyzes/trades the asset. Contract fields are FALLBACKS used only when the broker's own specification is unavailable; live sessions read contract size and volume limits straight from MT5. Add/remove assets here or via the dashboard API — no strategy code changes needed. Enable the whole list with: python run.py assets --enable-all",
   "assets": [
     {
       "name": "USTEC",
       "broker_symbol": "USTEC",
       "enabled": true,
-      "digits": 2
+      "digits": 2,
+      "contract_size": 1
     },
     {
-      "name": "GOLD",
-      "broker_symbol": "XAUUSDm",
+      "name": "US500",
+      "broker_symbol": "US500",
       "enabled": false,
-      "digits": 2
+      "digits": 2,
+      "contract_size": 1
+    },
+    {
+      "name": "US30",
+      "broker_symbol": "US30",
+      "enabled": false,
+      "digits": 2,
+      "contract_size": 1
+    },
+    {
+      "name": "GER40",
+      "broker_symbol": "GER40",
+      "enabled": false,
+      "digits": 2,
+      "contract_size": 1
+    },
+    {
+      "name": "UK100",
+      "broker_symbol": "UK100",
+      "enabled": false,
+      "digits": 2,
+      "contract_size": 1
+    },
+    {
+      "name": "JP225",
+      "broker_symbol": "JP225",
+      "enabled": false,
+      "digits": 2,
+      "contract_size": 1
+    },
+    {
+      "name": "XAUUSD",
+      "broker_symbol": "XAUUSD",
+      "enabled": false,
+      "digits": 2,
+      "contract_size": 100,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "XAGUSD",
+      "broker_symbol": "XAGUSD",
+      "enabled": false,
+      "digits": 3,
+      "contract_size": 5000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "EURUSD",
+      "broker_symbol": "EURUSD",
+      "enabled": false,
+      "digits": 5,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "GBPUSD",
+      "broker_symbol": "GBPUSD",
+      "enabled": false,
+      "digits": 5,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "AUDUSD",
+      "broker_symbol": "AUDUSD",
+      "enabled": false,
+      "digits": 5,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "NZDUSD",
+      "broker_symbol": "NZDUSD",
+      "enabled": false,
+      "digits": 5,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "USDCAD",
+      "broker_symbol": "USDCAD",
+      "enabled": false,
+      "digits": 5,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "USDCHF",
+      "broker_symbol": "USDCHF",
+      "enabled": false,
+      "digits": 5,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "USDJPY",
+      "broker_symbol": "USDJPY",
+      "enabled": false,
+      "digits": 3,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "EURJPY",
+      "broker_symbol": "EURJPY",
+      "enabled": false,
+      "digits": 3,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "GBPJPY",
+      "broker_symbol": "GBPJPY",
+      "enabled": false,
+      "digits": 3,
+      "contract_size": 100000,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "BTCUSD",
+      "broker_symbol": "BTCUSD",
+      "enabled": false,
+      "digits": 2,
+      "contract_size": 1,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    {
+      "name": "ETHUSD",
+      "broker_symbol": "ETHUSD",
+      "enabled": false,
+      "digits": 2,
+      "contract_size": 1,
+      "volume_min": 0.01,
+      "volume_step": 0.01
     }
   ]
 }

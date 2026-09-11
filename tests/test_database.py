@@ -1,12 +1,16 @@
 """Database layer tests (in-memory SQLite)."""
+from dataclasses import dataclass, fields as dc_fields
 from datetime import datetime
 
+import pytest
 from database.models import Base
 from database.repository import Repository
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from trading.signal_engine import Signal
+
+from database import models as m
 
 
 def _signal(**kw):
@@ -139,3 +143,64 @@ def _result(sig, status="SKIPPED"):
         tp=sig.tp, lots=0.0, status=status, reason="auto_trading_disabled",
         requested_at_utc=sig.entry_time_utc,
     )
+
+
+# --------------------------------------------------------------------------- #
+# The dataclass <-> table contract
+#
+# ``Repository.save_signal`` builds its INSERT from the model's own columns, so
+# keeping the dataclass and the table in step is what makes a new field persist.
+# These are the only thing between a forgotten field and silent data loss.
+# --------------------------------------------------------------------------- #
+def test_every_signal_column_has_a_dataclass_field():
+    columns = {c.name for c in m.Signal.__table__.columns}
+    dataclass_fields = {f.name for f in dc_fields(Signal)}
+
+    # Every column is filled — ``fingerprint`` is computed, the other two are
+    # assigned by the database...
+    assert columns - dataclass_fields == {"id", "created_at", "fingerprint"}
+    # ...and no field is left with nowhere to go.
+    assert dataclass_fields <= columns
+
+
+def test_save_signal_persists_every_field():
+    """A field that stops being written fails here rather than in production."""
+    r = _repo()
+    sig = _signal(ai_status="ok", ai_score=0.8, ai_decision="agree",
+                  ai_reasoning="clean reclaim", ai_confidence=0.7,
+                  ai_strengths=["session"], ai_risks=["news"])
+    row = r.save_signal(sig)
+
+    for f in dc_fields(Signal):
+        assert getattr(row, f.name) == getattr(sig, f.name), f.name
+
+
+def test_update_signal_ai_writes_every_ai_field():
+    r = _repo()
+    row = r.save_signal(_signal())
+    sig = _signal(ai_status="ok", ai_score=0.8, ai_decision="agree",
+                  ai_reasoning="clean reclaim", ai_confidence=0.7,
+                  ai_strengths=["session"], ai_risks=["news"])
+
+    updated = r.update_signal_ai(row.id, sig)
+
+    assert updated.ai_status == "ok"
+    assert updated.ai_decision == "agree"
+    assert updated.ai_confidence == 0.7
+    assert updated.ai_strengths == ["session"]
+    assert updated.ai_risks == ["news"]
+
+
+def test_save_signal_names_the_field_it_cannot_persist():
+    """An object missing a column fails loudly instead of writing NULLs."""
+
+    @dataclass
+    class _Partial:
+        asset: str = "USTEC"
+        direction: str = "buy"
+
+        def fingerprint(self) -> str:
+            return "deadbeef"
+
+    with pytest.raises(TypeError, match="required by the signals table"):
+        _repo().save_signal(_Partial())

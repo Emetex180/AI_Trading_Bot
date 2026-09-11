@@ -1,40 +1,44 @@
 {% extends "base.html" %}
-{% from "_macros.html" import dir_badge, empty %}
+{% from "_macros.html" import dir_badge, status_badge, empty %}
 {% block title %}Signals — ICT Scanner{% endblock %}
 {% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-  <h4 class="mb-0">Signals</h4>
-  <div class="small text-muted">{{ rows | length }} shown</div>
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Signals</h1>
+    <p class="page-sub">{{ rows | length }} setup(s) shown{% if filter_asset or filter_status %}, filtered{% endif %}.</p>
+  </div>
 </div>
 
-<form method="get" class="row g-2 mb-3">
-  <div class="col-auto">
-    <select name="asset" class="form-select form-select-sm">
+<form method="get" class="filter-bar mb-4">
+  <div>
+    <label class="form-label d-block" for="f-asset">Asset</label>
+    <select name="asset" id="f-asset" class="form-select form-select-sm">
       <option value="">All assets</option>
       {% for a in assets %}
       <option value="{{ a.name }}" {{ 'selected' if filter_asset == a.name }}>{{ a.name }}</option>
       {% endfor %}
     </select>
   </div>
-  <div class="col-auto">
-    <select name="status" class="form-select form-select-sm">
+  <div>
+    <label class="form-label d-block" for="f-status">Status</label>
+    <select name="status" id="f-status" class="form-select form-select-sm">
       <option value="">All statuses</option>
       {% for st in ['APPROVED', 'REJECTED', 'PENDING', 'SENT'] %}
-      <option value="{{ st }}" {{ 'selected' if filter_status == st }}>{{ st }}</option>
+      <option value="{{ st }}" {{ 'selected' if filter_status == st }}>{{ st | status }}</option>
       {% endfor %}
     </select>
   </div>
-  <div class="col-auto"><button class="btn btn-sm btn-primary">Filter</button></div>
-  {% if filter_asset or filter_status %}
-  <div class="col-auto">
+  <div class="ms-auto d-flex gap-2">
+    <button class="btn btn-sm btn-primary">Apply</button>
+    {% if filter_asset or filter_status %}
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('signals_page') }}">Clear</a>
+    {% endif %}
   </div>
-  {% endif %}
 </form>
 
 <div class="card">
-  <div class="table-responsive">
-  <table class="table table-sm table-hover table-compact">
+  <div class="table-responsive table-scroll">
+  <table class="table table-hover">
     <thead>
       <tr><th>#</th><th>Asset</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th>
           <th>RR</th><th>Entry (NY)</th><th>Session</th><th>CISD</th><th>AI</th><th>Status</th></tr>
@@ -42,18 +46,18 @@
     <tbody>
     {% for s in rows %}
       <tr class="row-link" onclick="location.href='{{ url_for('signal_detail', signal_id=s.id) }}'">
-        <td class="text-muted">{{ s.id }}</td>
-        <td>{{ s.asset }}</td>
+        <td class="text-muted mono">{{ s.id }}</td>
+        <td class="fw-semibold">{{ s.asset }}</td>
         <td>{{ dir_badge(s.direction) }}</td>
-        <td class="mono">{{ s.entry | num }}</td>
-        <td class="mono">{{ s.sl | num }}</td>
-        <td class="mono">{{ s.tp | num }}</td>
+        <td class="mono">{{ s.entry | price(s.asset) }}</td>
+        <td class="mono text-muted">{{ s.sl | price(s.asset) }}</td>
+        <td class="mono text-muted">{{ s.tp | price(s.asset) }}</td>
         <td class="mono">{{ '%.2f' | format(s.rr) }}</td>
-        <td class="mono">{{ s.entry_time_utc | ny }}</td>
-        <td class="small">{{ s.session_primary or '-' }}</td>
-        <td class="small">{{ s.cisd_tf or '-' }}</td>
-        <td class="small">{{ s.ai_status or '-' }}</td>
-        <td>{{ s.status | status }}</td>
+        <td class="mono text-muted">{{ s.entry_time_utc | ny }}</td>
+        <td class="text-muted">{{ s.session_primary or '-' }}</td>
+        <td class="text-muted">{{ s.cisd_tf or '-' }}</td>
+        <td>{% if s.ai_status %}<span class="badge tone-info">{{ s.ai_status }}</span>{% else %}<span class="text-muted">-</span>{% endif %}</td>
+        <td>{{ status_badge(s.status) }}</td>
       </tr>
     {% else %}
       {{ empty(12, 'No signals match the filter.') }}

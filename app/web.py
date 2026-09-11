@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from math import isinf
 
-from flask import Flask, abort, g, jsonify, render_template, request
+from flask import Flask, abort, current_app, g, jsonify, render_template, request
 from sqlalchemy.orm import sessionmaker
 
 from backtesting.compare import batch_totals, rank_assets
@@ -107,6 +107,45 @@ def _num(value, digits: int = 4):
         return str(value)
 
 
+def _digits_map() -> dict[str, int]:
+    """Asset-name -> price decimals, from the registry the app is configured with.
+
+    The registry read is cached in :mod:`trading.asset_manager` and invalidated on
+    the file's mtime, so adding an asset through the dashboard shows up on the
+    next page render without any cache-busting call here.
+    """
+    try:
+        cfg = current_app.config.get("CFG")
+    except Exception:  # outside a request/app context (e.g. unit-testing the filter)
+        cfg = None
+
+    digits: dict[str, int] = {}
+    try:
+        from trading.asset_manager import AssetManager
+
+        for entry in AssetManager(settings=cfg).list_assets():
+            if entry.digits:
+                digits[entry.name.upper()] = int(entry.digits)
+    except Exception:
+        pass  # an unreadable registry must not break page rendering
+    return digits
+
+
+def _digits_for(asset: str | None, default: int = 4) -> int:
+    """Price decimals for an asset.
+
+    Four decimals is right for EURUSD and wrong for USDJPY (3), gold (2) and an
+    index (1–2). The registry is authoritative, and it is what the scanner and
+    backtester read, so a displayed price matches the traded one.
+    """
+    return _digits_map().get((asset or "").strip().upper(), default)
+
+
+def _price(value, asset: str | None = None):
+    """Render a price with the asset's own precision."""
+    return _num(value, _digits_for(asset))
+
+
 def _status_label(status: str) -> str:
     return {"APPROVED": "Approved", "REJECTED": "Rejected", "PENDING": "Pending",
             "SENT": "Sent", "SKIPPED": "Skipped", "FAILED": "Failed",
@@ -168,8 +207,19 @@ def create_app(settings: Settings | None = None,
 
     app.jinja_env.filters["ny"] = _ny_str
     app.jinja_env.filters["num"] = _num
+    app.jinja_env.filters["price"] = _price
     app.jinja_env.filters["status"] = _status_label
     app.jinja_env.filters["pf"] = _profit_factor
+
+    @app.context_processor
+    def _inject_settings():
+        """Expose the configuration to every template.
+
+        The auto-trading badge in ``base.html`` is a safety affordance: whether
+        the bot may place orders must be visible on *every* page, not only on the
+        routes that happen to pass ``cfg`` through explicitly.
+        """
+        return {"cfg": cfg}
 
     # ------------------------------------------------------------------ #
     # Repository per request
@@ -218,7 +268,6 @@ def create_app(settings: Settings | None = None,
             assets=[a for a in assets if a.enabled],
             telegram_ready=(cfg.telegram_enabled and cfg.telegram_bot_token
                             and cfg.telegram_chat_id),
-            cfg=cfg,
         )
 
     @app.get("/signals")

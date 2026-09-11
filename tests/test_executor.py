@@ -7,6 +7,8 @@ The hard safety contract is tested explicitly:
 """
 from datetime import datetime
 
+import pytest
+
 from trading.executor import (EXECUTION_FAILED, EXECUTION_SENT, EXECUTION_SKIPPED,
                               Executor)
 from trading.risk_manager import RiskManager
@@ -46,7 +48,10 @@ def _signal(**kw) -> Signal:
 def _settings(auto_trading: bool):
     from types import SimpleNamespace
 
-    return SimpleNamespace(auto_trading=auto_trading)
+    # The executor builds its own RiskManager from these when none is injected,
+    # and reads order_deviation when composing the order request.
+    return SimpleNamespace(auto_trading=auto_trading, min_rr=1.5,
+                           risk_percent=1.0, order_deviation=20)
 
 
 class _SpyExecutor(Executor):
@@ -156,3 +161,46 @@ def test_executor_api_has_no_ai_override_parameter():
 
     params = inspect.signature(Executor.execute).parameters
     assert not any(p.startswith("ai") for p in params)
+
+
+def test_executor_sizes_by_contract_spec_for_a_non_index_asset():
+    """The same dollars buy a different number of lots in every asset class.
+
+    A spec-less executor sizes FX as if 1 lot moved $1 per 1.0 of price, which
+    would be off by ~100,000x. With the broker's contract spec this is the real
+    lot count.
+    """
+    from trading.symbol_spec import SymbolSpec
+
+    sent = []
+
+    class SendingExecutor(Executor):
+        def _order_send(self, symbol, signal, lots):
+            sent.append((symbol, lots))
+            return type("R", (), {"retcode": 10009})()
+
+    forex = SymbolSpec(symbol="EURUSDm", contract_size=100000.0, digits=5,
+                       volume_min=0.01, volume_step=0.01, volume_max=100.0,
+                       tick_size=0.00001, tick_value=1.0)
+    ex = SendingExecutor(settings=_settings(auto_trading=True), spec=forex)
+
+    # 20-pip stop on EURUSD: $10 risk at $200 per lot => 0.05 lots.
+    res = ex.execute(_signal(entry=1.0020, sl=1.0000, tp=1.0060),
+                     symbol="EURUSDm", equity=1000.0)
+
+    assert res.status == EXECUTION_SENT
+    assert sent == [("EURUSDm", 0.05)]
+
+
+def test_executor_without_a_spec_keeps_legacy_index_sizing():
+    """No spec must never guess a contract size — it keeps the old behaviour."""
+    sent = []
+
+    class SendingExecutor(Executor):
+        def _order_send(self, symbol, signal, lots):
+            sent.append(lots)
+            return type("R", (), {"retcode": 10009})()
+
+    ex = SendingExecutor(settings=_settings(auto_trading=True))
+    ex.execute(_signal(), symbol="USTEC", equity=1000.0)
+    assert sent == [pytest.approx(10.0 / 2.2)]

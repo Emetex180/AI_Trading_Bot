@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import sessionmaker
 
-from config import get_settings
+from config import reload_settings
 from database.models import Base
 from database.repository import Repository, get_engine
 from runner import (BT_DONE, BT_ERROR, BT_QUEUED, LIVE_ERROR, LIVE_RUNNING,
@@ -169,7 +169,9 @@ def _env(tmp_path, monkeypatch):
     production SQLite pragmas (WAL, check_same_thread) are exercised too.
     """
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'runner.db'}")
-    settings = get_settings()
+    # Settings is a snapshot, so the patched DATABASE_URL only takes effect on a
+    # rebuild — a cached one would still point at the previous test's file.
+    settings = reload_settings()
     engine = get_engine(settings)
     Base.metadata.create_all(engine)
     maker = sessionmaker(bind=engine, expire_on_commit=False, future=True)
@@ -455,3 +457,66 @@ def test_shutdown_stops_a_live_session(tmp_path, monkeypatch):
 
     jobs.shutdown(timeout=5)
     assert jobs.is_live_running() is False
+
+
+# --------------------------------------------------------------------------- #
+# The MT5 session
+#
+# Live, backtest and the history probe all share ``JobManager._mt5_session``.
+# Releasing the terminal is the property that matters: MT5 is process-global, so
+# a worker that keeps it initialised blocks every other job.
+# --------------------------------------------------------------------------- #
+def _recording_factory(built: list):
+    def factory(_settings):
+        client = _FakeClient()
+        built.append(client)
+        return client
+    return factory
+
+
+def test_the_terminal_is_released_when_a_session_stops(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    built: list = []
+    jobs = _jobs(settings, maker, client_factory=_recording_factory(built))
+
+    jobs.start_live()
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    assert built and built[0].connected is True   # held while the session runs
+
+    jobs.stop_live()
+    assert built[0].connected is False            # ...and given back after
+
+
+def test_the_terminal_is_released_when_a_worker_raises(tmp_path, monkeypatch):
+    """The error path must release MT5 too, not just the clean one."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    built: list = []
+
+    class _ExplodingMarket(_FakeMarket):
+        def fetch_m1_closed(self, *args, **kwargs):
+            raise RuntimeError("history unavailable")
+
+    jobs = JobManager(
+        settings=settings,
+        client_factory=_recording_factory(built),
+        market_factory=lambda c, s: _ExplodingMarket(),
+        scanner_factory=lambda a, s, r, eq: _FakeScanner(a, r),
+        backtest_factory=lambda a, h: _FakeBacktestRunner(a, h),
+        manager_factory=lambda s: _FakeAssetManager((ASSET,)),
+        repo_factory=lambda: Repository(session=maker()),
+    )
+    jobs.start_live()
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_ERROR)
+    jobs.shutdown(timeout=5)
+
+    assert built and built[0].connected is False
+    assert "history unavailable" in jobs.live_state()["last_error"]
+
+
+def test_a_terminal_that_cannot_connect_is_reported_not_raised(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker, client_factory=lambda s: _BrokenClient())
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_ERROR)
+    assert "MT5 terminal not running" in jobs.live_state()["last_error"]

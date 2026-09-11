@@ -3,13 +3,15 @@
 {% block title %}Backtest #{{ bt.id }} — ICT Scanner{% endblock %}
 {% block content %}
 {% set sm = summary %}
-<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+<div class="page-head">
   <div>
-    <h4 class="mb-0">Backtest #{{ bt.id }}
-      <span class="text-muted fs-6">{{ bt.asset }}</span></h4>
-    <div class="small text-muted mono">{{ bt.symbol or '-' }} · {{ bt.start_utc | ny }} → {{ bt.end_utc | ny }}</div>
+    <h1 class="page-title">
+      Backtest #{{ bt.id }}
+      <span class="badge tone-accent">{{ bt.asset }}</span>
+    </h1>
+    <p class="page-sub mono">{{ bt.symbol or '-' }} · {{ bt.start_utc | ny }} → {{ bt.end_utc | ny }}</p>
   </div>
-  <div class="d-flex gap-2">
+  <div class="page-actions">
     {% if bt.batch_id %}
       <a class="btn btn-sm btn-outline-primary"
          href="{{ url_for('backtest_batch_page', batch_id=bt.batch_id) }}">← Compare this batch</a>
@@ -18,33 +20,26 @@
   </div>
 </div>
 
-<div class="row g-3 mb-3">
-  <div class="col-6 col-lg-2">{{ stat('Signals', sm.n_signals) }}</div>
-  <div class="col-6 col-lg-2">{{ stat('Closed trades', sm.n_trades) }}</div>
-  <div class="col-6 col-lg-2">{{ stat('Open', sm.n_open, 'muted') }}</div>
-  <div class="col-6 col-lg-2">{{ stat('Win rate', '%.1f%%' | format(sm.win_rate * 100)) }}</div>
-  <div class="col-6 col-lg-2">
-    {{ stat('Expectancy', '%.2f' | format(sm.expectancy) ~ ' R',
-            'success' if sm.expectancy > 0 else ('danger' if sm.expectancy < 0 else 'muted')) }}
-  </div>
-  <div class="col-6 col-lg-2">
-    {{ stat('Total R', '%.2f' | format(sm.total_r),
-            'success' if sm.total_r > 0 else ('danger' if sm.total_r < 0 else 'muted')) }}
-  </div>
+<div class="stat-grid mb-4">
+  {{ stat('Signals', sm.n_signals) }}
+  {{ stat('Closed trades', sm.n_trades) }}
+  {{ stat('Open', sm.n_open, 'muted') }}
+  {{ stat('Win rate', '%.1f%%' | format(sm.win_rate * 100)) }}
+  {{ stat('Expectancy', '%.2f' | format(sm.expectancy) ~ ' R',
+          'success' if sm.expectancy > 0 else ('danger' if sm.expectancy < 0 else 'muted')) }}
+  {{ stat('Total R', '%.2f' | format(sm.total_r),
+          'success' if sm.total_r > 0 else ('danger' if sm.total_r < 0 else 'muted')) }}
+  {{ stat('Profit factor', sm.profit_factor | pf) }}
+  {{ stat('Max drawdown', '%.2f' | format(sm.max_drawdown_r) ~ ' R') }}
+  {{ stat('Avg win', '%.2f' | format(sm.avg_win_r) ~ ' R', 'success') }}
+  {{ stat('Avg loss', '%.2f' | format(sm.avg_loss_r) ~ ' R', 'danger') }}
+  {{ stat('Payoff ratio', sm.payoff_ratio | pf) }}
+  {{ stat('Max consecutive losses', sm.max_consecutive_losses, 'warning') }}
 </div>
 
-<div class="row g-3 mb-3">
-  <div class="col-6 col-lg-2">{{ stat('Profit factor', sm.profit_factor | pf) }}</div>
-  <div class="col-6 col-lg-2">{{ stat('Max drawdown', '%.2f' | format(sm.max_drawdown_r) ~ ' R') }}</div>
-  <div class="col-6 col-lg-2">{{ stat('Avg win', '%.2f' | format(sm.avg_win_r) ~ ' R', 'success') }}</div>
-  <div class="col-6 col-lg-2">{{ stat('Avg loss', '%.2f' | format(sm.avg_loss_r) ~ ' R', 'danger') }}</div>
-  <div class="col-6 col-lg-2">{{ stat('Payoff ratio', sm.payoff_ratio | pf) }}</div>
-  <div class="col-6 col-lg-2">{{ stat('Max consecutive losses', sm.max_consecutive_losses, 'warning') }}</div>
-</div>
-
-<div class="row g-3">
-  <div class="col-lg-8">
-    <div class="card">
+<div class="row g-4">
+  <div class="col-xl-8">
+    <div class="card mb-4">
       <div class="card-header">Equity curve (R multiples)</div>
       <div class="card-body">
         <div class="chart-box chart-box-sm">
@@ -53,10 +48,13 @@
       </div>
     </div>
 
-    <div class="card mt-3">
-      <div class="card-header">Trades</div>
+    <div class="card">
+      <div class="card-header">
+        <span>Trades</span>
+        <span class="badge tone-secondary">{{ trades | length }}</span>
+      </div>
       <div class="table-responsive">
-      <table class="table table-sm table-hover table-compact">
+      <table class="table table-hover">
         <thead>
           <tr><th>#</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Entry (NY)</th><th>Exit (NY)</th>
               <th>RR</th><th>PnL (R)</th><th>Bars</th><th>Outcome</th><th>Reason</th></tr>
@@ -64,14 +62,15 @@
         <tbody>
         {% for t in trades %}
           <tr>
-            <td class="text-muted">{{ loop.index }}</td>
+            <td class="text-muted mono">{{ loop.index }}</td>
             <td>{{ dir_badge(t.direction) }}</td>
-            <td class="mono">{{ t.entry | num }}</td>
-            <td class="mono">{{ t.exit_price | num }}</td>
-            <td class="mono">{{ t.entry_time_utc | ny }}</td>
-            <td class="mono">{{ t.exit_time_utc | ny }}</td>
+            <td class="mono">{{ t.entry | price(t.asset) }}</td>
+            <td class="mono">{{ t.exit_price | price(t.asset) }}</td>
+            <td class="mono text-muted">{{ t.entry_time_utc | ny }}</td>
+            <td class="mono text-muted">{{ t.exit_time_utc | ny }}</td>
             <td class="mono">{{ '%.2f' | format(t.rr) }}</td>
-            <td class="mono {{ 'text-success' if t.pnl > 0 else ('text-danger' if t.pnl < 0 else '') }}">{{ '%.2f' | format(t.pnl) }}</td>
+            <td class="mono {{ 'text-pos' if t.pnl > 0 else ('text-neg' if t.pnl < 0 else '') }}">
+              {{ '%.2f' | format(t.pnl) }}</td>
             <td class="mono text-muted">{{ t.bars_held }}</td>
             <td>{{ outcome_badge(t.outcome) }}</td>
             <td class="small text-muted">{{ t.reason }}</td>
@@ -85,12 +84,12 @@
     </div>
   </div>
 
-  <div class="col-lg-4">
-    <div class="card mb-3">
+  <div class="col-xl-4">
+    <div class="card mb-4">
       <div class="card-header">Meta</div>
-      <table class="table table-sm table-compact kv-table">
+      <table class="table kv-table">
         <tbody>
-          <tr><th>Asset</th><td>{{ bt.asset }}</td></tr>
+          <tr><th>Asset</th><td class="fw-semibold">{{ bt.asset }}</td></tr>
           <tr><th>Symbol</th><td class="mono">{{ bt.symbol or '-' }}</td></tr>
           <tr><th>Direction split</th>
               <td class="mono">{{ sm.n_long }} long / {{ sm.n_short }} short</td></tr>
@@ -105,16 +104,16 @@
     </div>
 
     {% if sm.by_session %}
-    <div class="card mb-3">
+    <div class="card mb-4">
       <div class="card-header">By session</div>
-      <table class="table table-sm table-compact">
+      <table class="table">
         <thead><tr><th>Session</th><th class="text-end">Trades</th><th class="text-end">Exp. (R)</th></tr></thead>
         <tbody>
           {% for key, b in sm.by_session.items() %}
           <tr>
             <td>{{ key }}</td>
             <td class="mono text-end">{{ b.n_trades }}</td>
-            <td class="mono text-end {{ 'text-success' if b.expectancy > 0 else ('text-danger' if b.expectancy < 0 else '') }}">
+            <td class="mono text-end {{ 'text-pos' if b.expectancy > 0 else ('text-neg' if b.expectancy < 0 else '') }}">
               {{ '%.2f' | format(b.expectancy) }}</td>
           </tr>
           {% endfor %}
@@ -125,7 +124,7 @@
 
     <div class="card">
       <div class="card-header">Params</div>
-      <pre class="small p-3 mb-0 overflow-auto">{{ params | tojson(indent=2) }}</pre>
+      <pre class="code-block small p-4 mb-0 overflow-auto">{{ params | tojson(indent=2) }}</pre>
     </div>
   </div>
 </div>
@@ -143,6 +142,7 @@
       canvas.parentNode.innerHTML = '<div class="empty-state">No closed trades to plot.</div>';
       return;
     }
+    var theme = window.ictChartTheme;
     new Chart(canvas, {
       type: 'line',
       data: {
@@ -152,9 +152,10 @@
         datasets: [{
           label: 'Cumulative R',
           data: points.map(function (p) { return p[1]; }),
-          borderColor: '#0dcaf0',
-          backgroundColor: 'rgba(13,202,240,.1)',
-          fill: true, tension: 0, pointRadius: 2,
+          borderColor: theme.accent,
+          backgroundColor: theme.accentFill,
+          fill: true, tension: 0, pointRadius: 2, pointHoverRadius: 4,
+          borderWidth: 2,
         }],
       },
       options: {

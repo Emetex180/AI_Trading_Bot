@@ -16,7 +16,9 @@ Safety contract (hard constraint, must never be relaxed):
       change SL/TP/entry, so this is a tamper check),
     - the symbol resolves through the asset registry (no hardcoded symbols),
     - position size is computed by the risk manager from account equity — never
-      from the AI or the signal's own numbers.
+      from the AI or the signal's own numbers. The broker's own contract
+      specification (:mod:`trading.symbol_spec`) converts that dollar risk into
+      lots, so the same code is correct for FX, metals, indices and crypto.
 * AI is structurally absent from this path: the method accepts a signal and an
   optional risk manager only. There is no ``ai_*`` parameter and no code path
   that consults AI output.
@@ -35,6 +37,7 @@ from config import Settings, get_settings
 from . import time_utils as tu
 from .risk_manager import RiskManager
 from .signal_engine import Signal
+from .symbol_spec import FILLING_FOK, FILLING_IOC, FILLING_RETURN, SymbolSpec
 
 # Execution lifecycle states.
 EXECUTION_SKIPPED = "SKIPPED"          # gated off (auto-trading disabled, etc.)
@@ -66,9 +69,11 @@ class Executor:
     """Gate-and-execute approved signals. Never trades when auto-trading is off."""
 
     def __init__(self, settings: Settings | None = None,
-                 risk_manager: RiskManager | None = None):
+                 risk_manager: RiskManager | None = None,
+                 spec: SymbolSpec | None = None):
         self.settings = settings or get_settings()
-        self.risk = risk_manager or RiskManager(settings=self.settings)
+        self.spec = spec
+        self.risk = risk_manager or RiskManager(settings=self.settings, spec=spec)
 
     # ------------------------------------------------------------------ #
     # Public entry point
@@ -138,22 +143,43 @@ class Executor:
         """
         import MetaTrader5 as mt5  # type: ignore
 
+        spec = self.spec
+        digits = spec.digits if spec is not None else 0
+
+        def price(value: float) -> float:
+            # Brokers reject prices whose precision exceeds the symbol's digits.
+            return round(float(value), digits) if digits > 0 else float(value)
+
         order_type = mt5.ORDER_TYPE_BUY if signal.direction == "buy" else mt5.ORDER_TYPE_SELL
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
             "volume": float(lots),
             "type": order_type,
-            "price": float(signal.entry),
-            "sl": float(signal.sl),
-            "tp": float(signal.tp),
-            "deviation": 20,
+            "price": price(signal.entry),
+            "sl": price(signal.sl),
+            "tp": price(signal.tp),
+            "deviation": int(self.settings.order_deviation),
             "magic": 202601,
             "comment": f"ICT {signal.direction} {signal.asset}",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._filling_mode(mt5, spec),
         }
         return mt5.order_send(request)
+
+    @staticmethod
+    def _filling_mode(mt5, spec: SymbolSpec | None) -> int:
+        """The symbol's allowed filling mode, defaulting to IOC.
+
+        Brokers differ (many FX/gold symbols reject IOC), so the broker's own
+        ``filling_mode`` wins when it is known and recognised.
+        """
+        mode = getattr(spec, "filling_mode", None)
+        return {
+            FILLING_FOK: mt5.ORDER_FILLING_FOK,
+            FILLING_IOC: mt5.ORDER_FILLING_IOC,
+            FILLING_RETURN: mt5.ORDER_FILLING_RETURN,
+        }.get(mode, mt5.ORDER_FILLING_IOC)
 
     # ------------------------------------------------------------------ #
     # Result builders

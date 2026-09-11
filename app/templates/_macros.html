@@ -1,24 +1,41 @@
 {# Shared presentation macros.
 
    Imported explicitly by each page:
-     {% from "_macros.html" import dir_badge, outcome_badge, stat, empty %}
+     {% from "_macros.html" import dir_badge, status_badge, outcome_badge, stat, empty %}
 
    Jinja does not expose a parent template's macros inside a child's blocks,
-   so these deliberately do not live in base.html. #}
+   so these deliberately do not live in base.html.
+
+   Every badge renders a tone class (`.tone-*`) rather than Bootstrap's
+   `text-bg-*`, so the whole app shares one badge palette. #}
 
 {% macro dir_badge(direction) -%}
-  <span class="badge {{ 'text-bg-success' if (direction or '')|lower == 'buy' else 'text-bg-danger' }}">{{ (direction or '-')|upper }}</span>
+  {%- set up = (direction or '')|lower == 'buy' -%}
+  <span class="badge {{ 'tone-success' if up else 'tone-danger' }}">{{ (direction or '-')|upper }}</span>
+{%- endmacro %}
+
+{# Signal status (APPROVED / REJECTED / PENDING) and execution status
+   (SENT / SKIPPED / FAILED) both flow through here, so a status always reads
+   the same colour wherever it appears. #}
+{% macro status_badge(status) -%}
+  {%- set tones = {'APPROVED': 'success', 'SENT': 'success',
+                   'REJECTED': 'danger', 'FAILED': 'danger',
+                   'PENDING': 'warning',
+                   'SKIPPED': 'secondary', 'AI_UNAVAILABLE': 'secondary'} -%}
+  <span class="badge tone-{{ tones.get((status or '')|upper, 'secondary') }}">{{ status | status }}</span>
 {%- endmacro %}
 
 {% macro outcome_badge(outcome) -%}
-  {%- set tones = {'WIN': 'text-bg-success', 'LOSS': 'text-bg-danger', 'OPEN': 'text-bg-secondary'} -%}
-  <span class="badge {{ tones.get((outcome or '')|upper, 'text-bg-secondary') }}">{{ (outcome or '-')|upper }}</span>
+  {%- set tones = {'WIN': 'success', 'LOSS': 'danger', 'OPEN': 'secondary'} -%}
+  <span class="badge tone-{{ tones.get((outcome or '')|upper, 'secondary') }}">{{ (outcome or '-')|upper }}</span>
 {%- endmacro %}
 
-{% macro stat(label, value, tone='', sub='') -%}
+{# `id` is optional and lands on the value element, so the dashboard poller can
+   update a figure in place (see `stat-signals-total` in dashboard.js). #}
+{% macro stat(label, value, tone='', sub='', id='') -%}
   <div class="stat-card {{ tone }}">
-    <div class="stat-label">{{ label }}</div>
-    <div class="stat-value">{{ value }}</div>
+    <div class="stat-label"><span class="tone-dot"></span>{{ label }}</div>
+    <div class="stat-value"{% if id %} id="{{ id }}"{% endif %}>{{ value }}</div>
     {%- if sub %}<div class="stat-sub">{{ sub }}</div>{% endif %}
   </div>
 {%- endmacro %}

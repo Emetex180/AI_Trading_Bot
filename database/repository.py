@@ -113,6 +113,39 @@ def get_session(settings: Settings | None = None) -> Session:
     return maker()
 
 
+# Columns the domain ``Signal`` fills, derived from the model itself so a new
+# column needs no second edit here. ``_signal_values`` fails loudly if the
+# dataclass cannot supply one, which is the whole point: a field added to
+# ``Signal`` but never persisted used to be a silent data loss, not an error.
+_SIGNAL_DB_ONLY = frozenset({"id", "created_at", "fingerprint"})
+_SIGNAL_FIELDS: tuple[str, ...] = tuple(
+    c.name for c in m.Signal.__table__.columns if c.name not in _SIGNAL_DB_ONLY
+)
+
+# The AI overlay is written twice (initial save, then after analysis), so its
+# field list lives in one place too.
+_AI_FIELDS: tuple[str, ...] = (
+    "ai_status", "ai_score", "ai_decision", "ai_reasoning", "ai_confidence",
+    "ai_strengths", "ai_risks",
+)
+
+
+def _signal_values(sig) -> dict:
+    """Column values for a domain ``Signal``.
+
+    ``fingerprint`` is a method on the dataclass and a column on the row, so it
+    is computed rather than read. Every other field is copied straight across.
+    """
+    missing = [name for name in _SIGNAL_FIELDS if not hasattr(sig, name)]
+    if missing:
+        raise TypeError(
+            f"{type(sig).__name__} has no field(s) {missing} required by the "
+            "signals table — add them, or drop the column.")
+    values = {name: getattr(sig, name) for name in _SIGNAL_FIELDS}
+    values["fingerprint"] = sig.fingerprint()
+    return values
+
+
 def _batch_entry(batch_id: str, rows: list) -> dict:
     """Structural description of one backtest batch.
 
@@ -168,42 +201,7 @@ class Repository:
         ).scalar_one_or_none()
         if existing is not None:
             return existing
-        row = m.Signal(
-            fingerprint=sig.fingerprint(),
-            asset=sig.asset,
-            direction=sig.direction,
-            entry=sig.entry,
-            sl=sig.sl,
-            tp=sig.tp,
-            entry_time_utc=sig.entry_time_utc,
-            entry_time_ny=sig.entry_time_ny,
-            session_keys=sig.session_keys,
-            session_primary=sig.session_primary,
-            silver_bullet=sig.silver_bullet,
-            macro=sig.macro,
-            liquidity_type=sig.liquidity_type,
-            liquidity_price=sig.liquidity_price,
-            purge_time_ny=sig.purge_time_ny,
-            cisd_tf=sig.cisd_tf,
-            cisd_confirm_time_ny=sig.cisd_confirm_time_ny,
-            fvg_direction=sig.fvg_direction,
-            fvg_lower=sig.fvg_lower,
-            fvg_upper=sig.fvg_upper,
-            fvg_formation_time_ny=sig.fvg_formation_time_ny,
-            structure_extreme_price=sig.structure_extreme_price,
-            rr=sig.rr,
-            status=sig.status,
-            reason=sig.reason,
-            alert_only=sig.alert_only,
-            risk_approved=sig.risk_approved,
-            ai_status=sig.ai_status,
-            ai_score=sig.ai_score,
-            ai_decision=sig.ai_decision,
-            ai_reasoning=sig.ai_reasoning,
-            ai_confidence=sig.ai_confidence,
-            ai_strengths=sig.ai_strengths,
-            ai_risks=sig.ai_risks,
-        )
+        row = m.Signal(**_signal_values(sig))
         self.session.add(row)
         self.session.commit()
         return row
@@ -213,13 +211,12 @@ class Repository:
         row = self.session.get(m.Signal, signal_id)
         if row is None:
             return None
-        row.ai_status = sig.ai_status
-        row.ai_score = sig.ai_score
-        row.ai_decision = sig.ai_decision
-        row.ai_reasoning = sig.ai_reasoning
-        row.ai_confidence = sig.ai_confidence
-        row.ai_strengths = list(sig.ai_strengths or [])
-        row.ai_risks = list(sig.ai_risks or [])
+        for name in _AI_FIELDS:
+            value = getattr(sig, name)
+            # The JSON columns must hold a plain list, never None or a tuple.
+            if name in ("ai_strengths", "ai_risks"):
+                value = list(value or [])
+            setattr(row, name, value)
         self.session.commit()
         return row
 

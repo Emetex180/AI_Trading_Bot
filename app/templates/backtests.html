@@ -2,55 +2,91 @@
 {% from "_macros.html" import stat, empty %}
 {% block title %}Backtests — ICT Scanner{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="mb-0">Backtests</h4>
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Backtests</h1>
+    <p class="page-sub">Replay the strategy over history and compare the result across assets.</p>
+  </div>
 </div>
 
 {% set bt = job_state.backtest %}
-<div class="card mb-3" id="backtest-card">
-  <div class="card-header d-flex justify-content-between align-items-center">
+<div class="card mb-4" id="backtest-card">
+  <div class="card-header">
     <span>Run a backtest</span>
-    <span id="backtest-state-badge" class="badge text-bg-secondary">{{ bt.state }}</span>
+    <span id="backtest-state-badge" class="badge tone-secondary">{{ bt.state }}</span>
   </div>
   <div class="card-body">
-    <form id="backtest-form" class="row g-2 align-items-end">
-      <div class="col-sm-4">
-        <label class="form-label small mb-1" for="bt-asset">Asset</label>
-        <select class="form-select form-select-sm" id="bt-asset" name="asset">
-          <option value="">All enabled (compare every asset)</option>
-          {% for a in assets %}{% if a.enabled %}
-          <option value="{{ a.name }}">{{ a.name }} — {{ a.broker_symbol }}</option>
-          {% endif %}{% endfor %}
-        </select>
+    <form id="backtest-form">
+      <div class="row g-3 align-items-end">
+        <div class="col-12 col-md-6 col-xl-4">
+          <label class="form-label d-block" for="bt-asset">Asset</label>
+          <select class="form-select" id="bt-asset" name="asset">
+            <option value="">All enabled (compare every asset)</option>
+            {% for a in assets %}{% if a.enabled %}
+            <option value="{{ a.name }}">{{ a.name }} — {{ a.broker_symbol }}</option>
+            {% endif %}{% endfor %}
+          </select>
+        </div>
+        <div class="col-6 col-md-3 col-xl-2">
+          <label class="form-label d-block" for="bt-bars">M1 candles</label>
+          <input type="number" class="form-control" id="bt-bars" name="bars"
+                 value="{{ default_bars }}" min="100" max="500000">
+        </div>
+        <div class="col-6 col-md-3 col-xl-2">
+          <label class="form-label d-block" for="bt-hold">Max hold (M1)</label>
+          <input type="number" class="form-control" id="bt-hold" name="max_hold_m1"
+                 placeholder="default" min="1">
+        </div>
+        <div class="col-12 col-xl-4 d-flex gap-2">
+          <button type="submit" id="bt-run" class="btn btn-primary flex-grow-1">Run backtest</button>
+          <button type="reset" class="btn btn-outline-secondary">Reset</button>
+        </div>
       </div>
-      <div class="col-6 col-sm-3">
-        <label class="form-label small mb-1" for="bt-bars">M1 candles</label>
-        <input type="number" class="form-control form-control-sm" id="bt-bars" name="bars"
-               value="{{ default_bars }}" min="100" max="500000">
-      </div>
-      <div class="col-6 col-sm-3">
-        <label class="form-label small mb-1" for="bt-hold">Max hold (M1 bars)</label>
-        <input type="number" class="form-control form-control-sm" id="bt-hold" name="max_hold_m1"
-               placeholder="default" min="1">
-      </div>
-      <div class="col-sm-2">
-        <button type="submit" id="bt-run" class="btn btn-sm btn-primary w-100">Run</button>
+
+      {# Optional: a date range overrides the bar count when both dates are given,
+         which is why they are grouped and labelled as one choice. #}
+      <div class="row g-3 align-items-end mt-0">
+        <div class="col-12">
+          <hr class="my-2">
+          <span class="section-label">Or replay an exact window</span>
+          <span class="form-hint">NY dates — overrides the candle count.</span>
+        </div>
+        <div class="col-6 col-md-4 col-xl-3">
+          <label class="form-label d-block" for="bt-start">Start</label>
+          <input type="text" class="form-control" id="bt-start" name="start"
+                 placeholder="YYYY-MM-DD" autocomplete="off">
+        </div>
+        <div class="col-6 col-md-4 col-xl-3">
+          <label class="form-label d-block" for="bt-end">End</label>
+          <input type="text" class="form-control" id="bt-end" name="end"
+                 placeholder="YYYY-MM-DD" autocomplete="off">
+        </div>
+        <div class="col-12 col-md-4 col-xl-6">
+          <p class="form-hint">
+            Both fields are needed, and the range must be at least a day long.
+            Leave them empty to use the candle count instead.
+          </p>
+        </div>
       </div>
     </form>
-    <div id="backtest-message" class="small mt-2"></div>
-    <div class="progress progress-thin mt-2 d-none" id="backtest-progress">
+
+    <div id="backtest-message" class="small mt-3"></div>
+    <div class="progress progress-thin mt-3 d-none" id="backtest-progress">
       <div class="progress-bar" id="backtest-progress-bar" style="width: 0%"></div>
     </div>
-    <div id="backtest-error" class="alert alert-danger py-2 small mt-3 mb-0 {% if not bt.last_error %}d-none{% endif %}">
+    <div id="backtest-error" class="alert alert-danger mt-3 mb-0 {% if not bt.last_error %}d-none{% endif %}">
       {{ bt.last_error }}
     </div>
   </div>
 </div>
 
 <div class="card">
-  <div class="card-header">Runs</div>
+  <div class="card-header">
+    <span>Runs</span>
+    <span class="badge tone-secondary">{{ batches | length }}</span>
+  </div>
   <div class="table-responsive">
-  <table class="table table-sm table-hover table-compact">
+  <table class="table table-hover">
     <thead>
       <tr>
         <th>Run</th><th>Assets</th><th>Window (NY)</th><th>Signals</th><th>Trades</th>
@@ -64,20 +100,21 @@
           onclick="location.href='{{ url_for('backtest_batch_page', batch_id=b.batch_id) }}'">
         <td>
           <span class="mono">{{ b.created_at | ny }}</span>
-          {% if b.is_single %}<span class="badge text-bg-secondary ms-1">single</span>{% endif %}
+          {% if b.is_single %}<span class="badge tone-secondary ms-1">single</span>{% endif %}
         </td>
         <td class="mono">{{ b.n_assets }}</td>
-        <td class="small mono">{{ b.start_utc | ny }} → {{ b.end_utc | ny }}</td>
+        <td class="mono text-muted small">{{ b.start_utc | ny }} → {{ b.end_utc | ny }}</td>
         <td class="mono">{{ t.n_signals }}</td>
         <td class="mono">{{ t.n_trades }}</td>
         <td class="mono">{{ '%.1f%%' | format(t.win_rate * 100) }}</td>
-        <td class="mono {{ 'text-success' if t.expectancy > 0 else ('text-danger' if t.expectancy < 0 else '') }}">
+        <td class="mono {{ 'text-pos' if t.expectancy > 0 else ('text-neg' if t.expectancy < 0 else '') }}">
           {{ '%.2f' | format(t.expectancy) }}</td>
-        <td class="mono">{{ '%.2f' | format(t.total_r) }}</td>
+        <td class="mono {{ 'text-pos' if t.total_r > 0 else ('text-neg' if t.total_r < 0 else '') }}">
+          {{ '%.2f' | format(t.total_r) }}</td>
         <td>
           {% if b.best and b.best.tested %}
-            <span class="badge text-bg-success">{{ b.best.asset }}</span>
-            <span class="small text-muted mono">{{ '%.2f' | format(b.best.expectancy) }} R</span>
+            <span class="badge tone-success">{{ b.best.asset }}</span>
+            <span class="small text-muted mono ms-1">{{ '%.2f' | format(b.best.expectancy) }} R</span>
           {% else %}
             <span class="text-muted small">no closed trades</span>
           {% endif %}

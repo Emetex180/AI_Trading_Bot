@@ -27,6 +27,10 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
+# Historical M1 candles replayed at attach so the engine's episode state is
+# current before live signals are considered.
+DEFAULT_WARMUP_M1_BARS = 5000
+
 # Load `.env` from the project root (no-op if missing).
 load_dotenv(BASE_DIR / ".env")
 
@@ -88,6 +92,7 @@ class Settings:
 
     # --- Assets --------------------------------------------------------------
     assets_file: Path
+    symbol_auto_resolve: bool
 
     # --- Trading safety ------------------------------------------------------
     auto_trading: bool
@@ -97,10 +102,12 @@ class Settings:
     sl_buffer_atr: float
     valid_entry_sessions: list[str]
     cisd_threshold_hour_ny: int
+    order_deviation: int
 
     # --- Scanner / backtest --------------------------------------------------
     scanner_poll_interval_ms: int
     backtest_m1_bars: int
+    warmup_m1_bars: int
 
     # --- Telegram -------------------------------------------------------------
     telegram_enabled: bool
@@ -119,23 +126,16 @@ class Settings:
     flask_debug: bool
 
     # --- Derived -------------------------------------------------------------
+    # Snapshotted like everything else, so `.env` is read exactly once per
+    # Settings. Reading these lazily from ``os.environ`` would mean half the
+    # configuration froze at startup while half changed under a running process.
+    db_url: str
+    llm_timeout_seconds: float
+    telegram_timeout_seconds: float
+    # Raw ``ASSET_<NAME>_<FIELD>`` entries, resolved by ``asset_overrides_for``.
+    asset_env: dict[str, str] = field(default_factory=dict)
+
     extra: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def db_url(self) -> str:
-        """SQLite now; set ``DATABASE_URL`` later for PostgreSQL without code change."""
-        return os.getenv(
-            "DATABASE_URL",
-            f"sqlite:///{DATA_DIR / 'trading.db'}",
-        )
-
-    @property
-    def llm_timeout_seconds(self) -> float:
-        return _env_float("LLM_TIMEOUT_SECONDS", 20.0)
-
-    @property
-    def telegram_timeout_seconds(self) -> float:
-        return _env_float("TELEGRAM_TIMEOUT_SECONDS", 10.0)
 
     def asset_overrides_for(self, asset_name: str) -> dict[str, Any]:
         """Per-asset strategy overrides read from ``ASSET_<NAME>_...`` env keys.
@@ -143,11 +143,9 @@ class Settings:
         Example: ``ASSET_USTEC_SL_BUFFER_ATR=0.5``.
         """
         prefix = f"ASSET_{asset_name.upper()}_"
-        out: dict[str, Any] = {}
-        for key, value in os.environ.items():
-            if key.startswith(prefix):
-                out[key[len(prefix):].lower()] = value
-        return out
+        return {key[len(prefix):].lower(): value
+                for key, value in self.asset_env.items()
+                if key.startswith(prefix)}
 
 
 def _build_settings() -> Settings:
@@ -169,6 +167,7 @@ def _build_settings() -> Settings:
         mt5_server=_env_str("MT5_SERVER") or None,
         mt5_server_utc_offset=_env_float("MT5_SERVER_UTC_OFFSET", 2.0),
         assets_file=assets_path,
+        symbol_auto_resolve=_env_bool("SYMBOL_AUTO_RESOLVE", default=True),
         auto_trading=_env_bool("AUTO_TRADING", default=False),
         min_rr=_env_float("MIN_RR", 1.5),
         target_rr_range=(rr_low, rr_high),
@@ -179,8 +178,10 @@ def _build_settings() -> Settings:
             ["london_open", "ny_am", "london_close", "ny_pm", "power_hour"],
         ),
         cisd_threshold_hour_ny=_env_int("CISD_THRESHOLD_HOUR_NY", 9),
+        order_deviation=_env_int("ORDER_DEVIATION", 20),
         scanner_poll_interval_ms=_env_int("SCANNER_POLL_INTERVAL_MS", 5000),
         backtest_m1_bars=_env_int("BACKTEST_M1_BARS", 20000),
+        warmup_m1_bars=_env_int("WARMUP_M1_BARS", DEFAULT_WARMUP_M1_BARS),
         telegram_enabled=_env_bool("TELEGRAM_ENABLED"),
         telegram_bot_token=_env_str("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_env_str("TELEGRAM_CHAT_ID"),
@@ -191,6 +192,10 @@ def _build_settings() -> Settings:
         flask_host=_env_str("FLASK_HOST", "127.0.0.1"),
         flask_port=_env_int("FLASK_PORT", 5000),
         flask_debug=_env_bool("FLASK_DEBUG"),
+        db_url=_env_str("DATABASE_URL", f"sqlite:///{DATA_DIR / 'trading.db'}"),
+        llm_timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 20.0),
+        telegram_timeout_seconds=_env_float("TELEGRAM_TIMEOUT_SECONDS", 10.0),
+        asset_env={k: v for k, v in os.environ.items() if k.startswith("ASSET_")},
     )
 
 

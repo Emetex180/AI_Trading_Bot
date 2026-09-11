@@ -58,7 +58,7 @@ class AssetScanner:
         self.repo = repo or Repository(settings=cfg)
         self.analyzer = analyzer or AiAnalyzer(settings=cfg)
         self.notifier = notifier or TelegramNotifier(settings=cfg)
-        self.executor = executor or Executor(settings=cfg)
+        self.executor = executor or Executor(settings=cfg, spec=getattr(asset, "spec", None))
         self.dedupe = dedupe or RecentSignals()
         self.processed = 0
 

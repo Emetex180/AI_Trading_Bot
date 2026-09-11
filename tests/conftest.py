@@ -5,8 +5,23 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from config import reload_settings
 from trading.bars import Candle, make_candle
 from trading import time_utils as tu
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings():
+    """Rebuild the cached Settings around every test.
+
+    ``get_settings`` caches a single snapshot for the whole process — the
+    database URL included. Tests routinely point ``DATABASE_URL`` at a temp
+    file, so without this the next test would inherit a snapshot aimed at a
+    database that no longer exists.
+    """
+    reload_settings()
+    yield
+    reload_settings()
 
 
 def ny(minute_of_day: int, day: int = 1, hour_offset: int = 0) -> datetime:

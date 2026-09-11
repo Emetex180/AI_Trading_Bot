@@ -1,7 +1,7 @@
 /* Dashboard live controls.
  *
  * One polling loop drives every control surface:
- *   - the navbar live pill (all pages)
+ *   - the topbar live pill (all pages)
  *   - the "Live session" card on the dashboard (start/stop, counters)
  *   - the backtest form, progress bar and job badge on the backtests page
  *
@@ -14,6 +14,39 @@
   var POLL_MS = 5000;
   var lastSignalId = null;
   var backtestWasActive = false;
+
+  /* ------------------------------------------------------------------ */
+  /* Chart theming                                                       */
+  /*                                                                     */
+  /* Published on `window` so the per-page inline chart scripts inherit a */
+  /* palette instead of each hard-coding a colour. Set before any chart   */
+  /* is constructed: this file is loaded in <head> order, ahead of the    */
+  /* inline scripts at the end of each page.                              */
+  /* ------------------------------------------------------------------ */
+  var CHART = {
+    accent: "#818cf8",
+    accentFill: "rgba(129, 140, 248, .12)",
+    palette: ["#818cf8", "#34d399", "#fbbf24", "#fb7185", "#c084fc",
+              "#38bdf8", "#fb923c", "#a3e635"]
+  };
+  window.ictChartTheme = CHART;
+
+  if (window.Chart) {
+    var C = window.Chart;
+    C.defaults.color = "#97a5bd";
+    C.defaults.borderColor = "rgba(36, 49, 74, .85)";
+    C.defaults.font.family = getComputedStyle(document.body).fontFamily;
+    C.defaults.font.size = 11;
+    C.defaults.plugins.tooltip.backgroundColor = "#182131";
+    C.defaults.plugins.tooltip.borderColor = "#24314a";
+    C.defaults.plugins.tooltip.borderWidth = 1;
+    C.defaults.plugins.tooltip.titleColor = "#e8edf7";
+    C.defaults.plugins.tooltip.bodyColor = "#97a5bd";
+    C.defaults.plugins.tooltip.padding = 10;
+    C.defaults.plugins.tooltip.cornerRadius = 8;
+    C.defaults.plugins.tooltip.displayColors = false;
+    C.defaults.plugins.legend.labels.color = "#97a5bd";
+  }
 
   /* Labels only -- the coloured status dot is markup, set in base.html and
    * left alone here so it is never rewritten out of the pill. */
@@ -40,10 +73,25 @@
     if (!el) return;
     el.innerHTML = message ? '<span class="text-' + tone + '">' + message + "</span>" : "";
   }
-  function setTone(id, tone) {
+
+  /* Tones are classes, not Bootstrap utilities, so `setTone` rebuilds the whole
+   * class list -- hence the explicit base. */
+  function setTone(id, tone, base) {
     var el = byId(id);
     if (!el) return;
-    el.className = "badge text-bg-" + tone;
+    el.className = (base || "badge") + " tone-" + tone;
+  }
+
+  /* Price precision per asset, taken from the registry the server sends with
+   * every poll. Without this a live signal would read "21480.25000001" in the
+   * alert while the same price in the table reads "21480.25". */
+  var DIGITS = {};
+
+  function price(value, asset) {
+    if (value === null || value === undefined) return "-";
+    var digits = DIGITS[asset];
+    if (digits === undefined) digits = 4;
+    return Number(value).toFixed(digits);
   }
 
   /* ---------------------------------------------------------------- */
@@ -74,11 +122,19 @@
   /* ---------------------------------------------------------------- */
   /* Rendering                                                        */
   /* ---------------------------------------------------------------- */
+  function renderAssets(list) {
+    if (!list) return;
+    DIGITS = {};
+    list.forEach(function (a) {
+      if (a && a.name) DIGITS[a.name] = a.digits || 0;
+    });
+  }
+
   function renderPill(live) {
     var el = byId("live-pill");
     if (!el) return;
     var tone = LIVE_TONE[live.state] || LIVE_TONE.idle;
-    el.className = "badge text-bg-" + tone[0] + " ms-2";
+    el.className = "pill tone-" + tone[0];
     el.setAttribute("data-state", live.state);
     text("live-pill-text", tone[1] +
       (live.signals_session ? " - " + live.signals_session + " signal(s)" : ""));
@@ -171,24 +227,28 @@
     backtestWasActive = active;
   }
 
-  function renderNewSignals(items, lastId) {
+  function renderNewSignals(items, lastId, total) {
     var host = byId("new-signals");
-    var total = byId("stat-signals-total");
-    if (total) total.textContent = String(lastId);
+
+    // The tile shows the signal *count*; `lastId` is only the polling cursor.
+    var tile = byId("stat-signals-total");
+    if (tile && total !== undefined && total !== null) {
+      tile.textContent = String(total);
+    }
     if (!host || !items.length) return;
 
     var rows = items.map(function (s) {
       return '<li><a href="' + s.url + '">' + s.asset + " " +
-        s.direction.toUpperCase() + " @ " + s.entry + " (RR " +
+        s.direction.toUpperCase() + " @ " + price(s.entry, s.asset) + " (RR " +
         (s.rr ? s.rr.toFixed(2) : "-") + ")</a> — " + s.entry_time_ny +
         " · " + s.session + "</li>";
     }).join("");
 
     host.innerHTML =
-      '<div class="alert alert-info alert-dismissible fade show py-2 mb-0">' +
+      '<div class="alert alert-info alert-dismissible fade show mb-0">' +
       "<strong>" + items.length + " new signal" + (items.length > 1 ? "s" : "") +
       "</strong> — check Telegram for the alert." +
-      '<ul class="mb-0 mt-1 small">' + rows + "</ul>" +
+      '<ul class="mb-0 mt-2 small">' + rows + "</ul>" +
       '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>';
   }
 
@@ -207,16 +267,20 @@
   function tick() {
     getStatus(lastSignalId)
       .then(function (data) {
+        renderAssets(data.assets);
         renderPill(data.live);
         renderLive(data.live);
         renderBacktest(data.backtest);
         renderTelegram(data.telegram);
         if (data.signals) {
-          renderNewSignals(data.signals.new || [], data.signals.last_id);
+          renderNewSignals(data.signals.new || [], data.signals.last_id,
+                           data.signals.total);
           lastSignalId = data.signals.last_id;
         }
       })
       .catch(function () {
+        var pill = byId("live-pill");
+        if (pill) pill.className = "pill tone-danger";
         text("live-pill-text", "Live: unreachable");
       });
   }
@@ -257,6 +321,14 @@
         bars: byId("bt-bars").value,
         max_hold_m1: byId("bt-hold").value
       };
+      // The date range is optional markup; when both fields are filled the
+      // server prefers them over the bar count.
+      var start = byId("bt-start");
+      var end = byId("bt-end");
+      if (start && end) {
+        payload.start = start.value.trim();
+        payload.end = end.value.trim();
+      }
       show("backtest-message", "Submitting…", "info");
       post("/api/backtest/run", payload).then(function (r) {
         show("backtest-message", r.data.message || "",
