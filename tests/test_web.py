@@ -144,14 +144,14 @@ def test_backtest_detail_states_the_window_and_analyses_it_by_period():
     text = _client(repo).get(f"/backtests/{bt.id}").get_data(as_text=True)
 
     # The window, in full: both ends, the duration and the bar count. The seeded
-    # row spans 2026-01-01T00:00Z to 2026-01-02T00:00Z, i.e. 2025-12-31 20:00 to
-    # 2026-01-01 20:00 on the NY clock (UTC-4).
+    # row spans 2026-01-01T00:00Z to 2026-01-02T00:00Z, i.e. 2025-12-31 19:00 to
+    # 2026-01-01 19:00 on the NY clock (January is EST, UTC-5).
     assert "Replay window" in text
-    assert "2025-12-31 20:00" in text
-    assert "2026-01-01 20:00" in text
+    assert "2025-12-31 19:00" in text
+    assert "2026-01-01 19:00" in text
     assert "1 day, 0 h" in text
     assert "1,440" in text                     # n_bars, thousands-separated
-    assert "2026-01-01 09:10" in text          # first entry, on the NY clock
+    assert "2026-01-01 08:10" in text          # first entry, NY clock (EST)
 
     # The analysis, with all four granularities present and the seeded bucket
     # rendered -- into the table *and* into the chart's data.
@@ -163,7 +163,7 @@ def test_backtest_detail_states_the_window_and_analyses_it_by_period():
 
     # The trades table is filterable, which needs a machine-readable entry time
     # on each row and the controls that read it.
-    assert 'data-entry="2026-01-01 09:10"' in text
+    assert 'data-entry="2026-01-01 08:10"' in text
     assert 'data-pnl="2.0000"' in text
     assert 'id="trade-from"' in text and 'id="trade-to"' in text
 
@@ -371,9 +371,9 @@ def test_status_timestamps_use_the_ny_key_the_ui_reads():
 
     payload = _api_client(_repo(), jobs).get("/api/status").get_json()
 
-    assert payload["live"]["started_at_ny"] == "2026-01-05 10:30"   # UTC-4
-    assert payload["live"]["last_candle_ny"] == "2026-01-05 10:31"
-    assert payload["backtest"]["finished_at_ny"] == "2026-01-05 11:00"
+    assert payload["live"]["started_at_ny"] == "2026-01-05 09:30"   # EST, UTC-5
+    assert payload["live"]["last_candle_ny"] == "2026-01-05 09:31"
+    assert payload["backtest"]["finished_at_ny"] == "2026-01-05 10:00"
 
 
 def test_status_reports_new_signals_after_id():
@@ -529,7 +529,7 @@ def test_the_account_tile_paints_the_snapshot_it_was_given(registry_cfg):
     assert "9,842.15" in body
     assert "USD" in body
     assert "12345" in body
-    assert "as of 2026-01-06 14:32" in body      # project NY clock, as elsewhere
+    assert "as of 2026-01-06 13:32" in body      # project NY clock, as elsewhere
 
 
 def test_backtests_page_renders_run_form():
@@ -938,8 +938,9 @@ def test_status_carries_the_account_and_its_ny_read_time(registry_cfg):
 
     assert payload["account"]["balance"] == 10_000.0
     assert payload["account"]["currency"] == "USD"
-    # 18:32 UTC is 14:32 on the project's NY clock, which the tile displays.
-    assert payload["account"]["fetched_at_ny"] == "2026-01-06 14:32"
+    # 18:32 UTC is 13:32 on the project's NY clock in January (EST), which the
+    # tile displays.
+    assert payload["account"]["fetched_at_ny"] == "2026-01-06 13:32"
 
 
 def test_an_unread_account_reports_none_rather_than_a_zero_balance(registry_cfg):
@@ -949,3 +950,36 @@ def test_an_unread_account_reports_none_rather_than_a_zero_balance(registry_cfg)
 
     assert payload["account"]["balance"] is None
     assert payload["account"]["state"] == "idle"
+
+
+def test_signal_detail_surfaces_the_ict_lineage():
+    """Every field the model computes must be readable on the detail page."""
+    repo = _repo()
+    row = _save_signal(repo, purge_grade="VERY_HIGH", target_kind="PDH",
+                       target_price=106.0, target_grade="VERY_HIGH",
+                       risk_points=2.2, reward_points=4.3, efficiency_score=82.0,
+                       setup_id="USTEC-buy-202601060800", state="TRADE_CONFIRMED",
+                       digits=2,
+                       structure_extreme_price=99.5,
+                       structure_time_ny=datetime(2026, 1, 6, 8, 30))
+    body = _client(repo).get(f"/signals/{row.id}").get_data(as_text=True)
+
+    for expected in ("VERY_HIGH",        # purge strength and target strength
+                     "PDH",              # the take-profit target
+                     "106.00",           # its price, at the asset's precision
+                     "2.20",             # risk in points
+                     "4.30",             # reward in points
+                     "82%",              # the efficiency score
+                     "USTEC-buy-202601060800",   # the deterministic setup id
+                     "TRADE_CONFIRMED"):         # the state it settled in
+        assert expected in body, expected
+
+
+def test_signal_detail_renders_a_signal_with_no_ict_metadata():
+    """A row written before the model existed must still render."""
+    repo = _repo()
+    row = _save_signal(repo, purge_grade="", target_kind="", target_price=0.0,
+                       target_grade="", efficiency_score=0.0, setup_id="",
+                       state="", structure_time_ny=None)
+    resp = _client(repo).get(f"/signals/{row.id}")
+    assert resp.status_code == 200

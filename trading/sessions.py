@@ -1,20 +1,37 @@
 """ICT sessions, Silver Bullet windows and macro windows.
 
-All windows are expressed in the project's **NY (UTC-4)** clock and are resolved
-against a *minute of the NY day* so the module has no timezone knowledge of its
-own — conversion is centralized in :mod:`trading.time_utils`.
+All windows are expressed on the project's **America/New_York** clock and are
+resolved against a *minute of the NY day* so this module has no timezone
+knowledge of its own — conversion is centralized in :mod:`trading.time_utils`.
 
-Windows
--------
-Core ICT sessions (all are *analyzed*; which allow entries is a config list):
+The trading calendar
+--------------------
+A minute of the day says nothing about *which* day it is. ``02:00`` is the
+London open on a Wednesday and also on a Saturday, and a minute-of-day table
+alone cannot tell them apart, so every window above would report as tradeable
+over a weekend. :func:`is_trading_day` supplies the missing calendar dimension,
+and :func:`session_activity` is the single question the live loop asks: *should
+the bot be awake right now, and why?* See :func:`tradeable_minute` for how the
+window overlap rules interact with a session allow-list, and :func:`wake_minute`
+for the one asymmetry between them: a window can be worth *watching* without
+being tradeable. The Asian range is a no-trade block the bot nonetheless stays
+awake for, because the level it builds is what the London open sweeps.
 
-    asian_range   20:00 - 00:00
-    extension     00:00 - 02:00
-    london_open   02:00 - 05:00
-    ny_am         07:00 - 10:00
-    london_close  10:00 - 12:00
-    ny_pm         13:30 - 16:00
-    power_hour    15:00 - 16:00
+Core sessions (the master session model)
+----------------------------------------
+    asian_range     20:00 - 00:00   trade: NO           (observes the Asian range)
+    london_open     02:00 - 05:00   trade: YES
+    ny_premarket    07:00 - 09:30   trade: CONDITIONAL
+    ny_am           09:30 - 11:30   trade: YES
+    ny_lunch        11:30 - 13:30   trade: NO           (no new trades)
+    london_close    10:00 - 12:00   trade: CONDITIONAL
+    ny_pm           13:30 - 16:00   trade: YES
+
+The windows overlap on purpose (London Close runs inside NY AM and NY Lunch),
+so :func:`session_trade_mode` resolves the overlap with a documented
+precedence — see that function. The order of :data:`CORE_SESSIONS` is also the
+documented tie-break used by :func:`primary_session` for equal-width overlaps;
+it is chosen so the session *label* matches the spec at every hour.
 
 Silver Bullet windows:
 
@@ -30,13 +47,28 @@ Macro windows (each ~20 minutes):
     pm_session        11:50 - 12:10
     pm_continuation   13:50 - 14:10
     pm_close          15:50 - 16:10
+
+Silver Bullet and macro windows are *informational only* — they are reported on
+the signal (and in backtest breakdowns) but they never gate an entry. The
+trading model implements no macro logic.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from . import time_utils as tu
 
 # Seconds in a day as the max minute marker (exclusive end of 00:00-windows).
 DAY_MINUTES = 24 * 60
+
+# --------------------------------------------------------------------------- #
+# Trade modes
+# --------------------------------------------------------------------------- #
+TRADE_YES = "yes"                  # entries allowed
+TRADE_NO = "no"                    # no new trades (range-building / lunch)
+TRADE_CONDITIONAL = "conditional"  # allowed only when the setup clears the extra bar
+TRADE_CLOSED = "closed"            # no session is active at all
 
 
 def hm_to_minutes(hhmm: str) -> int:
@@ -56,6 +88,7 @@ class Window:
     label: str
     start: int  # minute of NY day, inclusive
     end: int    # minute of NY day, exclusive
+    trade: str = TRADE_YES  # trade mode for this window
 
     def contains(self, minute: int) -> bool:
         return self.start <= minute < self.end
@@ -69,21 +102,25 @@ class Window:
         return "24:00" if self.end == DAY_MINUTES else f"{self.end // 60:02d}:{self.end % 60:02d}"
 
 
-def _window(key: str, label: str, start_hm: str, end_hm: str) -> Window:
-    return Window(key=key, label=label, start=hm_to_minutes(start_hm), end=hm_to_minutes(end_hm))
+def _window(key: str, label: str, start_hm: str, end_hm: str,
+            trade: str = TRADE_YES) -> Window:
+    return Window(key=key, label=label, start=hm_to_minutes(start_hm),
+                  end=hm_to_minutes(end_hm), trade=trade)
 
 
 # --------------------------------------------------------------------------- #
 # Definitions (single source of truth)
 # --------------------------------------------------------------------------- #
 CORE_SESSIONS: tuple[Window, ...] = (
-    _window("asian_range", "Asian Range", "20:00", "24:00"),
-    _window("extension", "Extension", "00:00", "02:00"),
-    _window("london_open", "London Open", "02:00", "05:00"),
-    _window("ny_am", "New York AM", "07:00", "10:00"),
-    _window("london_close", "London Close", "10:00", "12:00"),
-    _window("ny_pm", "New York PM", "13:30", "16:00"),
-    _window("power_hour", "Power Hour", "15:00", "16:00"),
+    _window("asian_range", "Asian", "20:00", "24:00", TRADE_NO),
+    _window("london_open", "London", "02:00", "05:00", TRADE_YES),
+    _window("ny_premarket", "NY Premarket", "07:00", "09:30", TRADE_CONDITIONAL),
+    _window("ny_am", "NY AM", "09:30", "11:30", TRADE_YES),
+    # Listed before london_close so the equal-width 11:30-12:00 overlap reports
+    # NY Lunch as the primary session (see the module docstring).
+    _window("ny_lunch", "NY Lunch", "11:30", "13:30", TRADE_NO),
+    _window("london_close", "London Close", "10:00", "12:00", TRADE_CONDITIONAL),
+    _window("ny_pm", "NY PM", "13:30", "16:00", TRADE_YES),
 )
 
 SILVER_BULLET_WINDOWS: tuple[Window, ...] = (
@@ -103,6 +140,10 @@ MACRO_WINDOWS: tuple[Window, ...] = (
 
 SESSION_INDEX: dict[str, Window] = {w.key: w for w in CORE_SESSIONS}
 
+#: Session keys that permit an entry by default (``yes`` and ``conditional``).
+DEFAULT_ENTRY_SESSIONS: list[str] = [w.key for w in CORE_SESSIONS
+                                     if w.trade != TRADE_NO]
+
 
 # --------------------------------------------------------------------------- #
 # Resolution helpers
@@ -114,6 +155,276 @@ def active_core_sessions(minute: int) -> list[Window]:
 
 def active_session_keys(minute: int) -> list[str]:
     return [w.key for w in active_core_sessions(minute)]
+
+
+def session_trade_mode(minute: int) -> str:
+    """The trade mode governing a NY minute.
+
+    Overlapping windows are resolved with an explicit precedence rather than by
+    list order, because the spec's windows genuinely overlap (London Close runs
+    inside both NY AM and NY Lunch):
+
+    1. **no** wins outright — the Asian range and NY lunch are hard blocks, so a
+       ``no`` window sitting under a ``conditional`` one still blocks.
+    2. otherwise **yes** wins — a ``yes`` window under a ``conditional`` one
+       still permits trading (this is what keeps 10:00-11:30 NY AM = YES despite
+       London Close overlapping it).
+    3. otherwise **conditional** — every active window is conditional.
+    4. **closed** — no core session is active at this minute.
+    """
+    active = active_core_sessions(minute)
+    if not active:
+        return TRADE_CLOSED
+    modes = {w.trade for w in active}
+    if TRADE_NO in modes:
+        return TRADE_NO
+    if TRADE_YES in modes:
+        return TRADE_YES
+    return TRADE_CONDITIONAL
+
+
+def entry_permission(minute: int, *, conditional_ok: bool = False,
+                     allowed_sessions: list[str] | None = None) -> tuple[bool, str]:
+    """May a new entry be opened at this NY minute?
+
+    Returns ``(allowed, reason)``; ``reason`` is empty exactly when allowed.
+    ``conditional_ok`` is the caller's verdict on the extra bar a CONDITIONAL
+    session imposes (the trading model requires a HIGH-grade liquidity target
+    there — see :mod:`trading.strategy`). ``allowed_sessions`` is an optional
+    additional allow-list; when supplied, the minute must also fall inside one
+    of those sessions.
+    """
+    mode = session_trade_mode(minute)
+    if mode == TRADE_CLOSED:
+        return False, "outside_session"
+    if mode == TRADE_NO:
+        return False, "session_not_tradable"
+    if allowed_sessions is not None and not set(allowed_sessions).intersection(
+            active_session_keys(minute)):
+        return False, "session_not_in_allowlist"
+    if mode == TRADE_CONDITIONAL and not conditional_ok:
+        return False, "session_conditional_low_liquidity"
+    return True, ""
+
+
+# --------------------------------------------------------------------------- #
+# Trading calendar — weekday, and whether the bot should be awake
+# --------------------------------------------------------------------------- #
+#: Days the bot runs, by :meth:`datetime.datetime.weekday` index (Mon=0 .. Sun=6).
+DEFAULT_TRADING_DAYS: tuple[int, ...] = (0, 1, 2, 3, 4)
+
+#: Names accepted in ``TRADING_DAYS``, mapped to the weekday index above.
+DAY_INDEX: dict[str, int] = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
+#: Reason reported when the calendar day itself is not a trading day.
+WEEKEND_REASON = "market_closed_weekend"
+
+#: Reason reported when the day is fine but no tradeable window is open.
+OUTSIDE_SESSION_REASON = "outside_session"
+
+#: Windows the bot stays awake for even though nothing can be entered in them,
+#: because the range they build is an *input* to a later session: the Asian
+#: high/low is a HIGH-grade liquidity level the London and NY sessions sweep, so
+#: it has to be observed even though the window itself is a hard no-trade block.
+#: Being awake here is not permission — see :func:`wake_minute`.
+OBSERVED_WINDOWS: frozenset[str] = frozenset({"asian_range"})
+
+#: NY weekday names, indexed by :meth:`datetime.datetime.weekday`.
+DAY_NAMES: tuple[str, ...] = ("Monday", "Tuesday", "Wednesday", "Thursday",
+                              "Friday", "Saturday", "Sunday")
+
+
+def parse_trading_days(names) -> frozenset[int]:
+    """Resolve a ``TRADING_DAYS`` value to weekday indices.
+
+    Accepts a comma-separated string or an iterable of names. Unknown names are
+    ignored rather than raising: a typo in ``.env`` must not stop the bot from
+    starting, and an empty or wholly unrecognised list falls back to Mon-Fri,
+    which is the conservative answer for an operator who asked for no weekend
+    trading.
+
+    Resolve once and hold the result — :func:`is_trading_day` is called per
+    candle, and re-parsing a string there would be pure waste.
+    """
+    if names is None:
+        return frozenset(DEFAULT_TRADING_DAYS)
+    if isinstance(names, str):
+        names = names.split(",")
+    days = {DAY_INDEX[n.strip().lower()] for n in names
+            if isinstance(n, str) and n.strip().lower() in DAY_INDEX}
+    return frozenset(days) if days else frozenset(DEFAULT_TRADING_DAYS)
+
+
+def is_trading_day(ny_dt: datetime,
+                   days: frozenset[int] | tuple[int, ...] | None = None) -> bool:
+    """Is this NY calendar day one the bot may trade on?
+
+    The one dimension a minute-of-day window model cannot express. ``days`` is a
+    set of :meth:`datetime.datetime.weekday` indices (see
+    :func:`parse_trading_days`); ``None`` means the Mon-Fri default.
+    """
+    if days is None:
+        return ny_dt.weekday() in DEFAULT_TRADING_DAYS
+    return ny_dt.weekday() in days
+
+
+def tradeable_minute(minute: int, *,
+                     allowed_sessions: list[str] | None = None) -> str | None:
+    """The session key permitting trading at this NY minute, else ``None``.
+
+    Answers "is it worth being awake at this minute?", which is a *window-level*
+    question — deliberately separate from :func:`entry_permission`, which judges
+    a specific setup and additionally weighs liquidity grade and the
+    CONDITIONAL bar.
+
+    Overlap precedence matches :func:`session_trade_mode` so the two can never
+    disagree: a ``no`` window sitting under a ``conditional`` one still blocks
+    (11:45 is NY Lunch, even though London Close is open), otherwise any
+    ``yes``/``conditional`` window permits.
+
+    ``allowed_sessions`` is the operator's allow-list. A window that permits
+    trading but is not on it yields ``None``: they excluded that session, so
+    there is nothing to wake up for. Unlike :func:`entry_permission` this is
+    intersected rather than unioned with the active windows, because the caller
+    is asking whether *any* reason to be awake exists.
+    """
+    active = active_core_sessions(minute)
+    if any(w.trade == TRADE_NO for w in active):
+        return None
+    allow = set(allowed_sessions) if allowed_sessions else None
+    for w in active:
+        if w.trade in (TRADE_YES, TRADE_CONDITIONAL) and (allow is None
+                                                         or w.key in allow):
+            return w.key
+    return None
+
+
+def wake_minute(minute: int, *,
+                allowed_sessions: list[str] | None = None) -> str | None:
+    """The session key justifying the bot being *awake* at this NY minute.
+
+    Deliberately distinct from :func:`tradeable_minute`, which answers the
+    narrower question "may an entry be taken here?". A window in
+    :data:`OBSERVED_WINDOWS` is awake-but-not-tradeable: the bot watches the
+    Asian range form because a later session trades against it, and takes
+    nothing itself. Conflating the two would either sleep through the range
+    (losing the level) or wake for it and consider it an entry window.
+
+    Precedence is the same rule the other two use, so all three agree about any
+    given minute: an unobserved ``no`` window blocks outright (11:45 is NY Lunch
+    even though London Close is conditional), then any ``yes``/``conditional``
+    window on the allow-list, then an observed window.
+
+    The allow-list is intentionally *not* applied to observed windows — an
+    operator who trades only NY AM still needs the Asian range built for it.
+    """
+    active = active_core_sessions(minute)
+    if any(w.trade == TRADE_NO and w.key not in OBSERVED_WINDOWS
+           for w in active):
+        return None
+    allow = set(allowed_sessions) if allowed_sessions else None
+    for w in active:
+        if w.trade in (TRADE_YES, TRADE_CONDITIONAL) and (allow is None
+                                                         or w.key in allow):
+            return w.key
+    for w in active:
+        if w.key in OBSERVED_WINDOWS:
+            return w.key
+    return None
+
+
+def session_activity(ny_dt: datetime, *,
+                     allowed_sessions: list[str] | None = None,
+                     days: frozenset[int] | tuple[int, ...] | None = None
+                     ) -> tuple[bool, str]:
+    """Should the bot be awake at this NY instant, and why?
+
+    Returns ``(active, reason)``. When active, ``reason`` is the session key that
+    justified it (so the log can say *why* the bot woke up) — which may be an
+    observed, non-tradeable window such as ``asian_range``; when not, it is
+    :data:`WEEKEND_REASON` or :data:`OUTSIDE_SESSION_REASON`.
+
+    This is the whole gate: the calendar is checked first, because no minute of a
+    Saturday is tradeable no matter what the window table says.
+    """
+    if not is_trading_day(ny_dt, days):
+        return False, WEEKEND_REASON
+    key = wake_minute(tu.minute_of_day(ny_dt),
+                      allowed_sessions=allowed_sessions)
+    if key is None:
+        return False, OUTSIDE_SESSION_REASON
+    return True, key
+
+
+def next_activity_start_utc(ny_dt: datetime, *,
+                            allowed_sessions: list[str] | None = None,
+                            days: frozenset[int] | tuple[int, ...] | None = None,
+                            horizon_days: int = 7) -> datetime | None:
+    """First UTC instant at/after ``ny_dt`` at which the bot should be awake.
+
+    Returns a naive **UTC** datetime — the caller wants a real elapsed-seconds
+    duration, and UTC has no DST discontinuities to reason about.
+
+    The search walks the UTC timeline a minute at a time and converts each step
+    back to NY before testing. That is deliberate: adding minutes to a *naive NY*
+    datetime is wall-clock arithmetic, which silently skips or repeats an hour
+    across a DST transition and would wake the bot an hour late twice a year.
+    Stepping UTC and asking "what is the NY time now?" cannot make that mistake,
+    which is why there is no hand-rolled "next 02:00" arithmetic here.
+
+    Worst case is ``horizon_days * 1440`` iterations of two ``zoneinfo``
+    conversions (tens of milliseconds), and it is called on a state *transition*,
+    never once per poll. ``None`` means no active window within the horizon.
+    """
+    start = tu.ny_to_utc(ny_dt)
+    for step in range(1, horizon_days * DAY_MINUTES + 1):
+        utc_dt = start + timedelta(minutes=step)
+        active, _ = session_activity(tu.utc_to_ny(utc_dt),
+                                     allowed_sessions=allowed_sessions,
+                                     days=days)
+        if active:
+            return utc_dt
+    return None
+
+
+#: The operator-facing line for each awake state. Observed windows say what they
+#: are actually doing there ("Building liquidity") rather than claiming to scan,
+#: because no entry can be taken in one.
+ACTIVITY_LINES: dict[str, str] = {
+    "asian_range": "Asian session active — Building liquidity",
+    "london_open": "London session active — Strategy scanner ON",
+    "ny_premarket": "NY Pre-market active — Strategy scanner ON (conditional)",
+    "ny_am": "NY AM active — Strategy scanner ON",
+    "london_close": "London Close active — Strategy scanner ON (conditional)",
+    "ny_pm": "NY PM active — Strategy scanner ON",
+    "gate_disabled": "Activity gate disabled — Strategy scanner ON",
+}
+
+
+def activity_log_line(ny_dt: datetime, active: bool, reason: str) -> str:
+    """The ``[SESSION] ...`` line for the current state.
+
+    ``reason`` is :func:`session_activity`'s second element, and ``ny_dt`` is the
+    NY instant it was evaluated at. Built here rather than at the call site
+    because the wording depends on the window table — a name only this module
+    knows — and the live loop should not have to invent it.
+    """
+    if active:
+        body = ACTIVITY_LINES.get(reason, f"{reason} — Strategy scanner ON")
+    elif reason == WEEKEND_REASON:
+        body = f"{DAY_NAMES[ny_dt.weekday()]} — Weekend mode"
+    else:
+        # A trading day with nothing tradeable open. Name the window that is
+        # blocking when the table knows one, so NY Lunch reads as a deliberate
+        # block rather than an unexplained gap in the session.
+        window = primary_session(tu.minute_of_day(ny_dt))
+        if window is not None and window.trade == TRADE_NO:
+            body = f"{window.label} — New signals blocked"
+        else:
+            body = "Outside trading window — Scanner idle"
+    return f"[SESSION] {body}"
 
 
 def active_silver_bullet(minute: int) -> Window | None:
@@ -147,5 +458,6 @@ def primary_session(minute: int) -> Window | None:
     matches = active_core_sessions(minute)
     if not matches:
         return None
-    # Favour the narrowest window (ties broken by definition order).
+    # Favour the narrowest window (ties broken by definition order, which the
+    # module docstring documents as chosen for the spec's overlap hours).
     return min(matches, key=lambda w: (w.end - w.start, list(CORE_SESSIONS).index(w)))

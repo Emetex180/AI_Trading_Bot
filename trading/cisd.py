@@ -4,6 +4,13 @@ This module is deliberately **standalone and testable** with synthetic candles.
 
 Timeframe selection
 -------------------
+The trading model fixes CISD to **M5** (``cisd_timeframe = "M5"``): the 5-minute
+candle is both the confirmation candle and the liquidity-taking candle the stop
+loss is anchored to, so it must not move with the clock.
+
+Setting ``cisd_timeframe = "auto"`` restores the older time-of-day rule, which
+is kept because it is a genuine alternative rather than dead code:
+
 * purge at/after the NY hour in ``cisd_threshold_hour_ny`` (default 09:00) → **M5**
 * purge before that hour                                          → **M15**
 
@@ -33,6 +40,12 @@ from datetime import datetime
 # Threshold used if the caller does not provide one.
 DEFAULT_THRESHOLD_HOUR_NY = 9
 
+#: The trading model's fixed CISD timeframe. ``"auto"`` selects M5/M15 by hour.
+DEFAULT_CISD_TIMEFRAME = "M5"
+
+#: Timeframes this module can confirm on.
+SUPPORTED_TIMEFRAMES = ("M5", "M15")
+
 
 @dataclass(frozen=True)
 class CISDParams:
@@ -49,6 +62,21 @@ def choose_timeframe(purge_time_ny: datetime, threshold_hour_ny: int = DEFAULT_T
     if purge_time_ny.hour >= threshold_hour_ny:
         return "M5"
     return "M15"
+
+
+def resolve_timeframe(purge_time_ny: datetime,
+                      configured: str | None = DEFAULT_CISD_TIMEFRAME,
+                      threshold_hour_ny: int = DEFAULT_THRESHOLD_HOUR_NY) -> str:
+    """The CISD timeframe to monitor for a purge at ``purge_time_ny``.
+
+    ``configured`` is the strategy's ``cisd_timeframe`` setting. The model's
+    default ``"M5"`` is returned as-is; ``"auto"`` (or an unusable value) falls
+    back to the time-of-day rule in :func:`choose_timeframe`.
+    """
+    tf = (configured or "").strip().upper()
+    if tf in SUPPORTED_TIMEFRAMES:
+        return tf
+    return choose_timeframe(purge_time_ny, threshold_hour_ny)
 
 
 def confirm(candles: list, level_price: float, direction: str,

@@ -7,16 +7,19 @@ queueing logic in ``runner.py`` without a terminal, network or clock dependency.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import sessionmaker
 
+import runner as runner_mod
 from config import reload_settings
 from database.models import Base
 from database.repository import Repository, get_engine
 from runner import (ACCOUNT_DONE, ACCOUNT_ERROR, ACCOUNT_IDLE, BROKER_DONE,
                     BROKER_ERROR, BT_DONE, BT_ERROR, BT_QUEUED, LIVE_ERROR,
                     LIVE_RUNNING, LIVE_STOPPED, JobManager)
+from trading import time_utils as tu
 from trading.asset_manager import Asset
 from trading.bars import make_candle
 
@@ -77,6 +80,7 @@ class _FakeMarket:
 
     def __init__(self, candles=None, n_bars=0):
         self.polls = 0
+        self.lookbacks: list[int] = []
         self._candles = (list(candles) if candles is not None
                          else [_m1(i) for i in range(3)])
         self.n_bars = n_bars
@@ -103,11 +107,19 @@ class _FakeMarket:
 
     def poll_closed_candles(self, symbol, lookback=3):
         self.polls += 1
+        # Recorded so a test can prove the loop widened its request after a
+        # sleep rather than asking for the flat baseline and losing the gap.
+        self.lookbacks.append(lookback)
         return []
 
 
 class _FakeScanner:
     """Stands in for :class:`scanner.AssetScanner`."""
+
+    #: Every instance built, so a test can reach the one a session is driving.
+    instances: list = []
+    #: What ``setup_states()`` reports. Overridden per test via monkeypatch.
+    states: dict = {}
 
     def __init__(self, asset, repo):
         self.asset = asset
@@ -115,6 +127,7 @@ class _FakeScanner:
         self.repo = repo
         self.warmed = None
         self.steps = 0
+        _FakeScanner.instances.append(self)
 
     def warm(self, candles):
         self.warmed = len(candles)
@@ -123,8 +136,28 @@ class _FakeScanner:
         self.steps += 1
         return 0
 
+    def setup_states(self):
+        return dict(self.states)
+
     def last_candle_time_utc(self):
         return datetime(2026, 1, 1, 12, 0)
+
+
+class _ScannerWithNoStateReport:
+    """A scanner that predates ``setup_states`` — it must not break a poll."""
+
+    def __init__(self, asset, repo=None):
+        self.asset = asset
+        self.symbol = asset.broker_symbol
+
+    def warm(self, candles):
+        pass
+
+    def feed_new(self, candles):
+        return 0
+
+    def last_candle_time_utc(self):
+        return None
 
 
 class _FakeAssetManager:
@@ -177,10 +210,19 @@ def _env(tmp_path, monkeypatch):
     their own threads and each gets its own Session, which is how the live
     dashboard behaves. The engine comes from the real ``get_engine`` so the
     production SQLite pragmas (WAL, check_same_thread) are exercised too.
+
+    The session-hours gate is switched **off** here. These tests drive the loop
+    and assert what a poll produces, which only happens while the loop is awake —
+    and with the gate on, whether it is awake depends on the wall clock the suite
+    happens to run at. That would make every polling test pass on a weekday
+    afternoon and fail overnight, which is the definition of a flaky test. The
+    gate itself is covered deliberately and with a controlled clock by the
+    ``_session_gate``/``_backfill_plan`` tests below.
     """
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'runner.db'}")
-    # Settings is a snapshot, so the patched DATABASE_URL only takes effect on a
-    # rebuild — a cached one would still point at the previous test's file.
+    monkeypatch.setenv("SESSION_GATE_ENABLED", "false")
+    # Settings is a snapshot, so the patched env only takes effect on a rebuild —
+    # a cached one would still point at the previous test's file and gate.
     settings = reload_settings()
     engine = get_engine(settings)
     Base.metadata.create_all(engine)
@@ -188,12 +230,15 @@ def _env(tmp_path, monkeypatch):
     return settings, maker
 
 
-def _jobs(settings, maker, *, assets=(ASSET,), client_factory=None, **kw):
+def _jobs(settings, maker, *, assets=(ASSET,), client_factory=None,
+          market_factory=None, **kw):
     _FakeBacktestRunner.runs = []
+    _FakeScanner.instances = []
+    _FakeScanner.states = {}
     return JobManager(
         settings=settings,
         client_factory=client_factory or (lambda s: _FakeClient()),
-        market_factory=lambda c, s: _FakeMarket(),
+        market_factory=market_factory or (lambda c, s: _FakeMarket()),
         scanner_factory=lambda a, s, r, eq: _FakeScanner(a, r),
         backtest_factory=lambda a, h: _FakeBacktestRunner(a, h),
         manager_factory=lambda s: _FakeAssetManager(assets),
@@ -801,3 +846,355 @@ def test_an_account_the_terminal_will_not_name_is_an_error(tmp_path, monkeypatch
     assert jobs.account_state()["balance"] is None
     assert "logged in" in jobs.account_state()["last_error"]
     jobs.shutdown(timeout=5)
+
+
+# --------------------------------------------------------------------------- #
+# Strategy visibility: the console sink and the published setup state
+# --------------------------------------------------------------------------- #
+def test_the_console_sink_reaches_the_scanner(tmp_path, monkeypatch):
+    """The engine's decision lines must reach the live session's console."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    seen = []
+    jobs = _jobs(settings, maker, on_event=seen.append)
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: _FakeScanner.instances)
+    scanner = _FakeScanner.instances[0]
+
+    jobs._emit("[live] direct")
+    scanner.on_event("[TEST] 1H sell-side liquidity purged")
+    assert "[live] direct" in seen
+    assert "[TEST] 1H sell-side liquidity purged" in seen
+    jobs.stop_live(timeout=5)
+
+
+def test_live_publishes_each_assets_setup_state(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+    monkeypatch.setattr(_FakeScanner, "states",
+                        {"buy": "WAITING_FOR_FVG_RETRACE", "sell": "NO_SETUP"})
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["setups"].get("TEST") == {
+        "buy": "WAITING_FOR_FVG_RETRACE", "sell": "NO_SETUP"}), \
+        jobs.live_state()["setups"]
+    jobs.stop_live(timeout=5)
+
+
+def test_setup_state_is_cleared_when_the_session_stops(tmp_path, monkeypatch):
+    """A stopped session has no engine, so it must not show a live-looking state."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+    monkeypatch.setattr(_FakeScanner, "states", {"buy": "FVG_FOUND", "sell": "NO_SETUP"})
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["setups"].get("TEST"))
+    jobs.stop_live(timeout=5)
+    assert jobs.live_state()["setups"] == {}
+
+
+def test_setup_state_is_empty_before_a_session_runs(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+    assert jobs.live_state()["setups"] == {}
+
+
+def test_a_scanner_that_cannot_report_state_does_not_break_the_session(
+        tmp_path, monkeypatch):
+    """An older/injected scanner must not take down a live session."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = JobManager(
+        settings=settings,
+        client_factory=lambda s: _FakeClient(),
+        market_factory=lambda c, s: _FakeMarket(),
+        scanner_factory=lambda a, s, r, eq: _ScannerWithNoStateReport(a, r),
+        backtest_factory=lambda a, h: _FakeBacktestRunner(a, h),
+        manager_factory=lambda s: _FakeAssetManager([ASSET]),
+        repo_factory=lambda: Repository(session=maker()),
+    )
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    assert _wait_for(lambda: jobs.live_state()["setups"] == {"TEST": {}}), \
+        jobs.live_state()["setups"]
+    jobs.stop_live(timeout=5)
+    assert jobs.live_state()["state"] == LIVE_STOPPED
+
+
+# --------------------------------------------------------------------------- #
+# Session-hours gate
+#
+# The loop stays up around the clock but only works inside a tradeable session
+# on a trading day, so both the calendar and the clock have to be controlled
+# here: ``_env`` switches the gate off precisely so the polling tests above do
+# not depend on when the suite runs. These turn it back on.
+# --------------------------------------------------------------------------- #
+SAT_0300 = datetime(2026, 9, 12, 3, 0)     # Saturday — London's window, shut
+MON_1000 = datetime(2026, 9, 14, 10, 0)    # Monday NY AM — open
+MON_0600 = datetime(2026, 9, 14, 6, 0)     # Monday, between windows
+
+
+class _Clock:
+    """A hand-cranked NY clock, so the gate can be moved across a boundary.
+
+    Patches ``time_utils.now_ny``/``now_utc`` — the one seam everything reads
+    the time through — while leaving the real DST-aware conversions in place,
+    which is what ``next_activity_start_utc`` walks with.
+    """
+
+    def __init__(self, ny_dt):
+        self.ny = ny_dt
+
+    def now_ny(self):
+        return self.ny
+
+    def now_utc(self):
+        return tu.ny_to_utc(self.ny)
+
+    def set(self, ny_dt):
+        self.ny = ny_dt
+
+
+#: Every session the spec marks tradeable, pinned explicitly. The gate reads
+#: ``VALID_ENTRY_SESSIONS`` — an operator who excluded NY Premarket would
+#: otherwise change what these tests observe through no fault of the code.
+ALL_ENTRY_SESSIONS = ["london_open", "ny_premarket", "ny_am", "london_close",
+                      "ny_pm"]
+
+
+def _gated(settings, maker, market=None, sessions=None, **kw):
+    """A JobManager with the gate ON, a pinned allow-list and a frozen clock."""
+    market = market if market is not None else _FakeMarket()
+    jobs = _jobs(replace(settings, session_gate_enabled=True,
+                         valid_entry_sessions=list(sessions or ALL_ENTRY_SESSIONS)),
+                 maker, market_factory=lambda c, s: market, **kw)
+    return jobs, market
+
+
+def test_session_gate_is_asleep_on_a_weekend(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    clock = _Clock(SAT_0300)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    jobs, _ = _gated(settings, maker)
+
+    active, activity, next_open = jobs._session_gate()
+
+    assert (active, activity) == (False, "market_closed_weekend")
+    # And it knows when it will be worth waking up: Monday 02:00 NY.
+    assert tu.utc_to_ny(next_open) == datetime(2026, 9, 14, 2, 0)
+
+
+def test_session_gate_is_awake_inside_a_trading_session(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    clock = _Clock(MON_1000)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    jobs, _ = _gated(settings, maker)
+
+    # No next-open to report while it is awake — there is nothing to wait for.
+    assert jobs._session_gate() == (True, "ny_am", None)
+
+
+def test_session_gate_reports_the_gap_between_windows(tmp_path, monkeypatch):
+    """Asleep on a weekday, but for the other reason."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    clock = _Clock(MON_0600)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    jobs, _ = _gated(settings, maker)
+
+    active, activity, next_open = jobs._session_gate()
+
+    assert (active, activity) == (False, "outside_session")
+    assert tu.utc_to_ny(next_open) == datetime(2026, 9, 14, 7, 0)
+
+
+def test_the_gate_respects_the_entry_allowlist(tmp_path, monkeypatch):
+    """A session the operator excluded is not worth waking up for.
+
+    NY Premarket is conditional but tradeable, so 07:00 would normally be the
+    next open from 06:00. Excluded from ``VALID_ENTRY_SESSIONS`` it can never
+    enter anything, so the gate should sleep through it to NY AM.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    clock = _Clock(MON_0600)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    jobs, _ = _gated(settings, maker,
+                     sessions=["london_open", "ny_am", "london_close", "ny_pm"])
+
+    active, activity, next_open = jobs._session_gate()
+
+    assert (active, activity) == (False, "outside_session")
+    assert tu.utc_to_ny(next_open) == datetime(2026, 9, 14, 9, 30)
+
+
+def test_the_gate_can_be_switched_off(tmp_path, monkeypatch):
+    """``SESSION_GATE_ENABLED=false`` restores always-on scanning exactly."""
+    settings, maker = _env(tmp_path, monkeypatch)     # gate already off
+    clock = _Clock(SAT_0300)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    jobs = _jobs(settings, maker)
+
+    assert jobs._session_gate() == (True, "gate_disabled", None)
+
+
+def test_backfill_plan_widens_the_request_to_span_a_sleep(tmp_path, monkeypatch):
+    """The fix for the hole: a pause must not silently drop candles.
+
+    ``_FakeScanner`` reports its last candle at a fixed instant, so the elapsed
+    gap is exactly the frozen clock minus that instant.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+    sc = _FakeScanner(ASSET, None)                 # last candle 2026-01-01 12:00
+
+    monkeypatch.setattr(tu, "now_utc", lambda: datetime(2026, 1, 1, 12, 30))
+    assert jobs._backfill_plan(sc) == (30 + 5, 0)  # the gap, plus the base slack
+
+
+def test_backfill_plan_caps_and_reports_an_unfillable_gap(tmp_path, monkeypatch):
+    """A gap too large to fetch in one request is truncated *and* reported.
+
+    Silently asking for less than the gap would leave a hole in the M1 stream,
+    and every level the model trades is rebuilt from that stream — so the
+    shortfall comes back to the caller to log rather than being swallowed.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+    sc = _FakeScanner(ASSET, None)
+    cap = settings.warmup_m1_bars
+
+    monkeypatch.setattr(tu, "now_utc", lambda: datetime(2026, 1, 10, 12, 0))
+    lookback, missing = jobs._backfill_plan(sc)
+
+    assert lookback == cap
+    assert missing == (9 * 24 * 60) + 5 - cap
+
+
+def test_backfill_plan_with_no_history_asks_for_the_baseline(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+    sc = _ScannerWithNoStateReport(ASSET, None)    # reports no last candle
+
+    assert jobs._backfill_plan(sc) == (runner_mod.POLL_LOOKBACK_BASE, 0)
+
+
+def test_the_live_loop_does_not_poll_while_it_is_asleep(tmp_path, monkeypatch):
+    """A session that is running but asleep must touch MT5 not at all."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    clock = _Clock(SAT_0300)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    jobs, market = _gated(settings, maker)
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    assert _wait_for(lambda: jobs.live_state()["activity"] == "market_closed_weekend")
+
+    live = jobs.live_state()
+    assert live["active"] is False
+    assert live["next_open_utc"] == tu.ny_to_utc(datetime(2026, 9, 14, 2, 0))
+    # Warm-up still happened — the session is ready, it is just not working.
+    assert live["assets"] == ["TEST"]
+    assert market.polls == 0
+    assert market.lookbacks == []
+
+    jobs.stop_live(timeout=5)
+    assert jobs.live_state()["active"] is False
+    assert jobs.live_state()["next_open_utc"] is None
+
+
+def test_the_live_loop_wakes_and_backfills_the_m1_gap(tmp_path, monkeypatch):
+    """Waking must ask for the whole gap, not the flat 5-bar baseline."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    # The real cap is five minutes, which would make this test wait five
+    # minutes for the loop to notice the clock moved.
+    monkeypatch.setattr(runner_mod, "SESSION_SLEEP_CAP_SECONDS", 0.05)
+    clock = _Clock(SAT_0300)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    jobs, market = _gated(settings, maker)
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["active"] is False)
+    assert market.polls == 0
+
+    clock.set(MON_1000)                      # Monday: the session opens
+
+    assert _wait_for(lambda: jobs.live_state()["active"] is True)
+    assert _wait_for(lambda: market.polls > 0)
+    assert jobs.live_state()["activity"] == "ny_am"
+    # The frozen scanner's last candle is months behind the frozen clock, so the
+    # request is capped at the warm-up depth — far beyond the 5-bar baseline.
+    assert max(market.lookbacks) == settings.warmup_m1_bars > 5
+
+    jobs.stop_live(timeout=5)
+
+
+def test_a_truncated_backfill_is_logged_rather_than_silent(tmp_path, monkeypatch):
+    settings, maker = _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner_mod, "SESSION_SLEEP_CAP_SECONDS", 0.05)
+    clock = _Clock(SAT_0300)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    jobs, market = _gated(settings, maker)
+
+    jobs.start_live()
+    assert _wait_for(lambda: jobs.live_state()["active"] is False)
+    clock.set(MON_1000)
+    assert _wait_for(lambda: market.polls > 0)
+    jobs.stop_live(timeout=5)
+
+    with Repository(session=maker()) as repo:
+        warnings = [e.message for e in repo.recent_events(limit=200)
+                    if e.level == "WARN" and "backfill" in e.message]
+    assert warnings, "the truncated backfill was not reported"
+    assert "missing from the stream" in warnings[0]
+
+
+def test_the_live_loop_emits_a_session_line_on_each_transition(tmp_path, monkeypatch):
+    """The operator's ``[SESSION] ...`` wording, awake and asleep alike."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner_mod, "SESSION_SLEEP_CAP_SECONDS", 0.02)
+    clock = _Clock(SAT_0300)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    seen: list[str] = []
+    jobs, _ = _gated(settings, maker, on_event=seen.append)
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: "[SESSION] Saturday — Weekend mode" in seen)
+
+    clock.set(MON_1000)                      # Monday, inside NY AM
+    assert _wait_for(
+        lambda: "[SESSION] NY AM active — Strategy scanner ON" in seen)
+    jobs.stop_live(timeout=5)
+
+
+def test_a_repeated_session_state_is_logged_once(tmp_path, monkeypatch):
+    """Suppression is by rendered line, not by an awake/asleep flag.
+
+    The loop re-evaluates the gate on a short cap here, so it renders the same
+    line many times over. Only the first is a transition worth recording;
+    repeating it every few seconds would bury the lines that matter.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner_mod, "SESSION_SLEEP_CAP_SECONDS", 0.02)
+    clock = _Clock(SAT_0300)
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    seen: list[str] = []
+    jobs, _ = _gated(settings, maker, on_event=seen.append)
+
+    jobs.start_live()
+    assert _wait_for(lambda: "[SESSION] Saturday — Weekend mode" in seen)
+    # Several more gate evaluations happen before this returns.
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    jobs.stop_live(timeout=5)
+
+    weekend_lines = [s for s in seen if s == "[SESSION] Saturday — Weekend mode"]
+    assert len(weekend_lines) == 1, seen
+

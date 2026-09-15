@@ -17,6 +17,13 @@ episode state to "now" without re-alerting stale setups. Signals that form
 *after* warm-up are handled normally. Restart safety: fingerprints are unique
 in the DB, so a signal can never be alerted or executed twice.
 
+Visibility: the engine's decision log (``[US100] ...`` lines — purge found,
+CISD confirmed, FVG formed, and *why* a candidate was rejected) is routed to
+the same two sinks as everything else here — the console stream and the
+persisted event log — and :meth:`setup_states` exposes the per-symbol setup
+state machine for the dashboard. Both are read-only views of the engine; neither
+can influence a decision.
+
 All downstream collaborators are injectable so the scanner is fully testable
 without MT5, Telegram or an LLM. ``equity_provider`` supplies live account
 equity to the executor when auto-trading is on.
@@ -48,14 +55,20 @@ class AssetScanner:
                  executor: Executor | None = None,
                  dedupe: RecentSignals | None = None,
                  symbol: str | None = None,
+                 on_event: Callable[[str], None] | None = None,
                  equity_provider: Callable[[], float] | None = None):
         cfg = settings or get_settings()
         self.asset = asset
         self.settings = cfg
         self.symbol = symbol or asset.broker_symbol
         self.equity_provider = equity_provider
-        self.engine = engine or ICTStrategy(asset, settings=cfg)
+        self.on_event = on_event
         self.repo = repo or Repository(settings=cfg)
+        # Constructed after the repo so the engine's decision log can reach the
+        # event log from the very first candle. An injected engine keeps its own
+        # sink — the caller owns how it was built.
+        self.engine = engine or ICTStrategy(asset, settings=cfg,
+                                            log=self._strategy_log)
         self.analyzer = analyzer or AiAnalyzer(settings=cfg)
         self.notifier = notifier or TelegramNotifier(settings=cfg)
         self.executor = executor or Executor(settings=cfg, spec=getattr(asset, "spec", None))
@@ -125,6 +138,45 @@ class AssetScanner:
         self.dedupe.mark(signal)
         self.processed += 1
         return True
+
+    # ------------------------------------------------------------------ #
+    # Strategy visibility (read-only)
+    # ------------------------------------------------------------------ #
+    def setup_states(self) -> dict[str, str]:
+        """The per-direction setup state machine for this asset.
+
+        Returns e.g. ``{"buy": "WAITING_FOR_FVG_RETRACE", "sell": "NO_SETUP"}``.
+        Read-only: it reports what the engine decided, and gives the dashboard
+        the same view the log lines describe.
+        """
+        try:
+            return self.engine.states()
+        except Exception:  # a fake or half-built engine must not break a poll
+            return {}
+
+    def _strategy_log(self, message: str) -> None:
+        """One engine decision line, to the console and the event log.
+
+        The engine already prefixes the symbol (``[US100] ...``); the console
+        gets the scanner's own ``[scan]`` tag so a decision line is attributable
+        to the session that produced it.
+        """
+        self._emit(f"[scan] {message}")
+        self._log_event("INFO", "strategy", message)
+
+    def _emit(self, message: str) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(message)
+        except Exception:  # a broken console must not stop a session
+            pass
+
+    def _log_event(self, level: str, source: str, message: str) -> None:
+        try:
+            self.repo.log_event(level, source, message)
+        except Exception:  # logging must never take down a session
+            pass
 
     # ------------------------------------------------------------------ #
     def last_candle_time_utc(self):

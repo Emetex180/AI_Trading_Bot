@@ -23,7 +23,7 @@ from .models import Base
 
 # Re-export models for callers that prefer ``database.models``.
 __all__ = ["Base", "models", "get_engine", "get_session", "init_db",
-           "Repository"]
+           "ensure_schema", "Repository"]
 
 # How long SQLite waits for a competing writer before raising "database is
 # locked". A live scanner thread writes signals while Flask request threads
@@ -66,6 +66,21 @@ def get_engine(settings: Settings | None = None):
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # (table, column, DDL type)
     ("backtests", "batch_id", "VARCHAR(36)"),
+    # ICT model: purge grade, the SL anchor's own time, the take-profit target
+    # (a different level from the purged one), the geometry/score, and the
+    # deterministic setup identity. Additive only — existing rows read as the
+    # declared defaults.
+    ("signals", "purge_grade", "VARCHAR(16)"),
+    ("signals", "structure_time_ny", "DATETIME"),
+    ("signals", "target_kind", "VARCHAR(32)"),
+    ("signals", "target_price", "FLOAT"),
+    ("signals", "target_grade", "VARCHAR(16)"),
+    ("signals", "risk_points", "FLOAT"),
+    ("signals", "reward_points", "FLOAT"),
+    ("signals", "efficiency_score", "FLOAT"),
+    ("signals", "setup_id", "VARCHAR(64)"),
+    ("signals", "state", "VARCHAR(32)"),
+    ("signals", "digits", "INTEGER"),
 )
 
 # Indexes to (re)assert on every startup. Safe because ``IF NOT EXISTS`` is
@@ -102,7 +117,19 @@ def _ensure_schema(engine) -> None:
 
 def init_db(settings: Settings | None = None) -> None:
     """Create all tables and apply additive migrations (idempotent)."""
-    engine = get_engine(settings)
+    ensure_schema(get_engine(settings))
+
+
+def ensure_schema(engine) -> None:
+    """Make a database match the models: create missing tables, add columns.
+
+    The single entry point for schema setup, used by both :func:`init_db` (the
+    CLI and the job runner) and the dashboard app. ``create_all`` alone is not
+    enough for the dashboard: it only ever CREATEs a missing *table*, never
+    ALTERs an existing one, so an app that started first against a database
+    created by an older build would be missing every column added since — and
+    the first signal insert would fail with "no such column".
+    """
     Base.metadata.create_all(engine)
     _ensure_schema(engine)
 

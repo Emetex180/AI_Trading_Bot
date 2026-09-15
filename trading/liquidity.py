@@ -3,7 +3,9 @@
 Operates on *closed* candles only and derives:
 
 * previous-day high/low (by NY calendar day),
-* session extremes,
+* most recently completed session extremes (Asian, London, and the generic
+  "last completed session"),
+* previous-hour high/low,
 * swing highs/lows (pivot points),
 * equal highs/lows (swing clusters within a configurable tolerance),
 * liquidity purges / sweeps (a close that *reclaims* a swept level).
@@ -17,13 +19,71 @@ A **sell-side** level (PDL, session low, swing low, equal lows) sits below price
 a sweep *below* it followed by a reclaiming close is a bullish (BUY) premise.
 A **buy-side** level sits above price; a sweep *above* it with a reclaiming close
 is a bearish (SELL) premise.
+
+Liquidity priority
+------------------
+Every level carries a :attr:`Level.grade` from :data:`LIQUIDITY_GRADES`, the
+strategy's single priority table:
+
+    VERY_HIGH    previous-day high/low
+    HIGH         equal highs/lows, session highs/lows, Asian high/low
+    MEDIUM_HIGH  London high/low
+    MEDIUM       previous-hour high/low, recent swing high/low
+
+The grade ranks a sweep's significance (which level a purge is *anchored* on)
+and acts as the quality filter/tie-break when a take-profit target is chosen.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time as _time, timedelta
 
-from .sessions import Window
+from .sessions import CORE_SESSIONS, SESSION_INDEX, Window
+
+# --------------------------------------------------------------------------- #
+# Liquidity priority
+# --------------------------------------------------------------------------- #
+VERY_HIGH = "VERY_HIGH"
+HIGH = "HIGH"
+MEDIUM_HIGH = "MEDIUM_HIGH"
+MEDIUM = "MEDIUM"
+
+#: Priority of each level kind. Lower rank number = stronger liquidity.
+GRADE_RANK: dict[str, int] = {
+    VERY_HIGH: 4,
+    HIGH: 3,
+    MEDIUM_HIGH: 2,
+    MEDIUM: 1,
+}
+
+LIQUIDITY_GRADES: dict[str, str] = {
+    "PDH": VERY_HIGH, "PDL": VERY_HIGH,
+    "EQ_HIGH": HIGH, "EQ_LOW": HIGH,
+    "SESSION_HIGH": HIGH, "SESSION_LOW": HIGH,
+    "ASIAN_HIGH": HIGH, "ASIAN_LOW": HIGH,
+    "LONDON_HIGH": MEDIUM_HIGH, "LONDON_LOW": MEDIUM_HIGH,
+    "PREV_HOUR_HIGH": MEDIUM, "PREV_HOUR_LOW": MEDIUM,
+    "SWING_HIGH": MEDIUM, "SWING_LOW": MEDIUM,
+}
+
+_UNKNOWN_GRADE = MEDIUM
+
+_BUY_SIDE_KINDS = frozenset({
+    "PDH", "EQ_HIGH", "SESSION_HIGH", "ASIAN_HIGH", "LONDON_HIGH",
+    "PREV_HOUR_HIGH", "SWING_HIGH",
+})
+
+
+def grade_rank(grade: str | None) -> int:
+    """Numeric rank for a grade name; 0 when unknown/None."""
+    return GRADE_RANK.get((grade or "").upper(), 0)
+
+
+def grade_at_least(grade: str | None, minimum: str | None) -> bool:
+    """True when ``grade`` is at least ``minimum`` (an unknown grade never is)."""
+    if not minimum:
+        return True
+    return grade_rank(grade) >= grade_rank(minimum)
 
 
 # --------------------------------------------------------------------------- #
@@ -54,18 +114,42 @@ class EqualLevel:
 class Level:
     """A resting liquidity reference (target or sweep level)."""
 
-    kind: str                      # PDH|PDL|SESSION_HIGH|SESSION_LOW|SWING_HIGH|SWING_LOW|EQ_HIGH|EQ_LOW
+    kind: str    # PDH|PDL|SESSION_HIGH|SESSION_LOW|ASIAN_HIGH|ASIAN_LOW|
+                 # LONDON_HIGH|LONDON_LOW|PREV_HOUR_HIGH|PREV_HOUR_LOW|
+                 # SWING_HIGH|SWING_LOW|EQ_HIGH|EQ_LOW
     price: float
     time_ny: datetime
 
     @property
     def buy_side(self) -> bool:
         """True when resting liquidity sits *above* price (buy-side)."""
-        return self.kind in {"PDH", "SESSION_HIGH", "SWING_HIGH", "EQ_HIGH"}
+        return self.kind in _BUY_SIDE_KINDS
 
     @property
     def sell_side(self) -> bool:
         return not self.buy_side
+
+    @property
+    def grade(self) -> str:
+        """Priority of this level (see :data:`LIQUIDITY_GRADES`)."""
+        return LIQUIDITY_GRADES.get(self.kind, _UNKNOWN_GRADE)
+
+    @property
+    def label(self) -> str:
+        """Human-readable name for alerts ("Asian High", "Previous Day Low")."""
+        return LEVEL_LABELS.get(self.kind, self.kind.replace("_", " ").title())
+
+
+#: Display names for alert text.
+LEVEL_LABELS: dict[str, str] = {
+    "PDH": "Previous Day High", "PDL": "Previous Day Low",
+    "EQ_HIGH": "Equal Highs", "EQ_LOW": "Equal Lows",
+    "SESSION_HIGH": "Session High", "SESSION_LOW": "Session Low",
+    "ASIAN_HIGH": "Asian High", "ASIAN_LOW": "Asian Low",
+    "LONDON_HIGH": "London High", "LONDON_LOW": "London Low",
+    "PREV_HOUR_HIGH": "Previous Hour High", "PREV_HOUR_LOW": "Previous Hour Low",
+    "SWING_HIGH": "Recent Swing High", "SWING_LOW": "Recent Swing Low",
+}
 
 
 @dataclass(frozen=True)
@@ -77,6 +161,9 @@ class SweepEvent:
     time_ny: datetime
 
 
+# --------------------------------------------------------------------------- #
+# Swing / equal-level detection
+# --------------------------------------------------------------------------- #
 def _strict_high(candles, i: int, lookback: int) -> bool:
     lo = max(0, i - lookback)
     hi = min(len(candles), i + lookback + 1)
@@ -157,8 +244,6 @@ def day_extremes(candles: list, ny_date: str) -> tuple[float, float] | None:
 
 def previous_day_high_low(candles: list, ny_date: str, max_lookback_days: int = 5) -> tuple[float, float] | None:
     """(high, low) of the most recent prior NY trading day that has data."""
-    from datetime import timedelta
-
     day = datetime.strptime(ny_date, "%Y-%m-%d")
     for _ in range(max_lookback_days):
         day -= timedelta(days=1)
@@ -191,18 +276,68 @@ def session_extremes(candles: list, window: Window, ny_date: str,
     return max(highs), min(lows)
 
 
+def _session_close_ny(day: date, window: Window) -> datetime:
+    """The NY instant a session window closes on a given NY date."""
+    return datetime.combine(day, _time(0, 0)) + timedelta(minutes=window.end)
+
+
+def last_completed_session(candles: list, window: Window, ref_ny: datetime,
+                           lookback_days: int = 3
+                           ) -> tuple[str, tuple[float, float]] | None:
+    """Extremes of the most recent *completed* instance of ``window``.
+
+    A session only counts once its closing instant is at or before ``ref_ny``,
+    so the Asian range taken at 09:00 NY is *yesterday's* (20:00-24:00), and a
+    London range read at 09:00 NY is that same morning's (02:00-05:00). Returns
+    ``(ny_date, (high, low))`` or ``None``.
+    """
+    for offset in range(0, lookback_days + 1):
+        day = (ref_ny - timedelta(days=offset)).date()
+        if _session_close_ny(day, window) > ref_ny:
+            continue
+        ext = session_extremes(candles, window, day.strftime("%Y-%m-%d"))
+        if ext is not None:
+            return day.strftime("%Y-%m-%d"), ext
+    return None
+
+
+def last_completed_any_session(candles: list, ref_ny: datetime,
+                               lookback_days: int = 3
+                               ) -> tuple[Window, tuple[float, float]] | None:
+    """Extremes of whichever core session closed most recently before ``ref_ny``."""
+    candidates: list[tuple[datetime, date, Window]] = []
+    for offset in range(0, lookback_days + 1):
+        day = (ref_ny - timedelta(days=offset)).date()
+        for window in CORE_SESSIONS:
+            close_dt = _session_close_ny(day, window)
+            if close_dt <= ref_ny:
+                candidates.append((close_dt, day, window))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    for _close_dt, day, window in candidates:
+        ext = session_extremes(candles, window, day.strftime("%Y-%m-%d"))
+        if ext is not None:
+            return window, ext
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Level snapshot
 # --------------------------------------------------------------------------- #
 def build_level_snapshot(candles: list, as_of_date: str | None = None,
                          lookback_swings: int = 3,
                          swing_tolerance: float | None = None,
-                         atr: float | None = None) -> list[Level]:
+                         atr: float | None = None,
+                         as_of_ny: datetime | None = None,
+                         session_levels: bool = True,
+                         prev_hour: bool = True,
+                         session_lookback_days: int = 3) -> list[Level]:
     """Assemble resting liquidity levels from the supplied (history) candles.
 
     PDH/PDL are computed relative to ``as_of_date`` (the NY date of the candle
     being tested for a sweep) using data strictly *before* that date. Pass
-    ``as_of_date=None`` to use the last candle's own date.
+    ``as_of_date=None`` to use the last candle's own date. ``as_of_ny`` is the
+    NY instant "now" for the session-level lookbacks and defaults to the last
+    candle's own time.
 
     IMPORTANT: callers must pass a history slice that ends *before* the candle
     being tested — otherwise the sweep candle's own wick would appear as a
@@ -211,6 +346,7 @@ def build_level_snapshot(candles: list, as_of_date: str | None = None,
     if not candles:
         return []
     ref_date = as_of_date or candles[-1].t_ny.strftime("%Y-%m-%d")
+    ref_ny = as_of_ny or candles[-1].t_ny
     tolerance = swing_tolerance
     if tolerance is None and atr is not None:
         tolerance = atr * 0.2
@@ -225,6 +361,37 @@ def build_level_snapshot(candles: list, as_of_date: str | None = None,
         pdh, pdl = pd
         levels.append(Level("PDH", pdh, candles[0].t_ny))
         levels.append(Level("PDL", pdl, candles[0].t_ny))
+
+    # Session extremes: the generic "last completed session", plus the named
+    # Asian and London ranges the spec calls out explicitly.
+    if session_levels:
+        generic = last_completed_any_session(candles, ref_ny,
+                                             lookback_days=session_lookback_days)
+        if generic is not None:
+            window, (hi, lo) = generic
+            if window.trade != "no" or window.key == "asian_range":
+                levels.append(Level("SESSION_HIGH", hi, candles[-1].t_ny))
+                levels.append(Level("SESSION_LOW", lo, candles[-1].t_ny))
+
+        named = (("asian_range", "ASIAN_HIGH", "ASIAN_LOW"),
+                 ("london_open", "LONDON_HIGH", "LONDON_LOW"))
+        for key, high_kind, low_kind in named:
+            window = SESSION_INDEX.get(key)
+            if window is None:  # pragma: no cover - guarded by the table above
+                continue
+            found = last_completed_session(candles, window, ref_ny,
+                                           lookback_days=session_lookback_days)
+            if found is None:
+                continue
+            _day, (hi, lo) = found
+            levels.append(Level(high_kind, hi, candles[-1].t_ny))
+            levels.append(Level(low_kind, lo, candles[-1].t_ny))
+
+    # Previous-hour high/low: the bar immediately before the reference candle.
+    if prev_hour:
+        prev = candles[-1]
+        levels.append(Level("PREV_HOUR_HIGH", prev.high, prev.t_ny))
+        levels.append(Level("PREV_HOUR_LOW", prev.low, prev.t_ny))
 
     # Swings + equal highs/lows.
     swings = find_swings(candles, lookback=lookback_swings)
@@ -266,14 +433,11 @@ def detect_sweeps(candle, levels: list[Level], tolerance: float = 0.0) -> list[S
 # was actually swept; minor swings only become the reference when nothing more
 # significant is swept. Lower number = more significant.
 #
-# Documented assumption (configurable, nothing silently invented): the engine
-# prefers PDH/PDL, then session extremes, then equal highs/lows, and only falls
-# back to a single swing when none of those were swept. Distance breaks ties.
+# Derived from the spec's liquidity priority table (`LIQUIDITY_GRADES`): the
+# grade of the swept level *is* its significance, and distance only breaks ties
+# between equally graded levels.
 PURGE_SIGNIFICANCE: dict[str, int] = {
-    "PDH": 0, "PDL": 0,
-    "SESSION_HIGH": 1, "SESSION_LOW": 1,
-    "EQ_HIGH": 2, "EQ_LOW": 2,
-    "SWING_HIGH": 3, "SWING_LOW": 3,
+    kind: 4 - GRADE_RANK[grade] for kind, grade in LIQUIDITY_GRADES.items()
 }
 
 
@@ -285,8 +449,8 @@ def strongest_purge(events: list[SweepEvent], direction: str) -> SweepEvent | No
     """The purge of a given direction that matters most to the trade.
 
     Selects the swept level of highest significance (PDH/PDL first, per
-    :data:`PURGE_SIGNIFICANCE`); among equally significant levels, the one with
-    the deepest overshoot wins.
+    :data:`PURGE_SIGNIFICANCE`, which mirrors the liquidity priority table);
+    among equally significant levels, the one with the deepest overshoot wins.
     """
     matches = [e for e in events if e.direction == direction]
     if not matches:
@@ -294,18 +458,49 @@ def strongest_purge(events: list[SweepEvent], direction: str) -> SweepEvent | No
     return min(matches, key=lambda e: (_purge_rank(e.level), -e.distance))
 
 
-def nearest_target(entry_price: float, direction: str, levels: list[Level]) -> Level | None:
+# --------------------------------------------------------------------------- #
+# Target selection
+# --------------------------------------------------------------------------- #
+def nearest_target(entry_price: float, direction: str, levels: list[Level],
+                   min_grade: str | None = None) -> Level | None:
     """Nearest resting liquidity level beyond entry in the trade direction.
 
     For a BUY (``direction="buy"``) the target is the nearest buy-side level
     above the entry; for a SELL it is the nearest sell-side level below.
+    ``min_grade`` optionally filters out levels weaker than that grade; ties on
+    distance are broken in favour of the stronger grade.
     """
+    if min_grade:
+        levels = [l for l in levels if grade_at_least(l.grade, min_grade)]
     if direction == "buy":
         candidates = [l for l in levels if l.buy_side and l.price > entry_price]
         if not candidates:
             return None
-        return min(candidates, key=lambda l: l.price - entry_price)
+        return min(candidates, key=lambda l: (l.price - entry_price, -grade_rank(l.grade)))
     candidates = [l for l in levels if l.sell_side and l.price < entry_price]
     if not candidates:
         return None
-    return max(candidates, key=lambda l: entry_price - l.price)
+    return max(candidates, key=lambda l: (l.price - entry_price, -grade_rank(l.grade)))
+
+
+def select_tp_target(entry_price: float, direction: str, levels: list[Level],
+                     *, offset: float = 0.0, min_grade: str | None = None
+                     ) -> tuple[Level, float] | None:
+    """The take-profit target and the price to place it at.
+
+    The target is the nearest *valid* liquidity pull in the trade direction
+    (see :func:`nearest_target`). ``offset`` pulls the order slightly *before*
+    the level — a resting level is where the liquidity sits, so the fill is
+    sought on the approach, not on the touch. Returns ``(level, tp_price)``, or
+    ``None`` when nothing valid exists or the offset would push the target to or
+    behind the entry.
+    """
+    target = nearest_target(entry_price, direction, levels, min_grade=min_grade)
+    if target is None:
+        return None
+    tp = target.price - offset if direction == "buy" else target.price + offset
+    if direction == "buy" and tp <= entry_price:
+        return None
+    if direction == "sell" and tp >= entry_price:
+        return None
+    return target, tp

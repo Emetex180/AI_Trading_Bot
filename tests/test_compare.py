@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 from backtesting.compare import batch_totals, rank_assets, tidy
 from backtesting.engine import OUTSIDE_SESSION, BacktestRunner, BacktestTrade
+from trading import time_utils as tu
 from trading.asset_manager import Asset
 
 
@@ -17,9 +18,13 @@ def _runner():
 
 def _trade(*, direction="buy", outcome="WIN", pnl_r=1.0, at_ny=None,
            bars_held=10, rr=2.0) -> BacktestTrade:
-    """A BacktestTrade entered at ``at_ny`` on the project's NY (UTC-4) clock."""
+    """A BacktestTrade entered at ``at_ny`` on the America/New_York clock.
+
+    The NY->UTC step goes through ``time_utils`` rather than a constant, so the
+    fixture is correct on both sides of a DST change.
+    """
     at_ny = at_ny or datetime(2026, 1, 6, 9, 0)
-    entry_utc = at_ny + timedelta(hours=4)  # NY clock is UTC-4
+    entry_utc = tu.ny_to_utc(at_ny)
     return BacktestTrade(
         asset="TEST", direction=direction, entry=100.0, sl=98.0, tp=105.0,
         exit_price=105.0,
@@ -86,9 +91,9 @@ def test_max_consecutive_losses_counts_the_longest_run():
 
 def test_session_and_silver_bullet_breakdowns_use_the_ny_clock():
     trades = [
-        _trade(outcome="WIN", pnl_r=2.0, at_ny=datetime(2026, 1, 6, 9, 0)),    # ny_am
-        _trade(outcome="LOSS", pnl_r=-1.0, at_ny=datetime(2026, 1, 6, 9, 30)), # ny_am
-        _trade(outcome="WIN", pnl_r=1.5, at_ny=datetime(2026, 1, 6, 14, 0)),   # ny_pm
+        _trade(outcome="WIN", pnl_r=2.0, at_ny=datetime(2026, 1, 6, 9, 45)),   # ny_am
+        _trade(outcome="LOSS", pnl_r=-1.0, at_ny=datetime(2026, 1, 6, 9, 50)),  # ny_am
+        _trade(outcome="WIN", pnl_r=1.5, at_ny=datetime(2026, 1, 6, 14, 0)),    # ny_pm
     ]
     d = _summary_dict(trades)
 
@@ -162,7 +167,7 @@ def test_period_breakdown_reads_chronologically():
     # The session breakdown keeps the opposite rule: where the edge lives is a
     # ranking, and best total R first is how it is read.
     assert list(_summary_dict([
-        _trade(outcome="WIN", pnl_r=1.0, at_ny=datetime(2026, 1, 5, 9, 0)),
+        _trade(outcome="WIN", pnl_r=1.0, at_ny=datetime(2026, 1, 5, 9, 45)),
         _trade(outcome="WIN", pnl_r=5.0, at_ny=datetime(2026, 1, 5, 14, 0)),
     ])["by_session"]) == ["ny_pm", "ny_am"]
 

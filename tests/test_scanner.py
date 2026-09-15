@@ -135,3 +135,111 @@ def test_scanner_without_history_no_signals():
     scanner.warm(warm)
     assert scanner.step(feed) == 0
     assert repo.count_signals() == 0
+
+
+# --------------------------------------------------------------------------- #
+# Strategy visibility: the decision log and the setup state machine
+# --------------------------------------------------------------------------- #
+def test_strategy_decisions_reach_the_console_and_the_event_log():
+    """§19: the engine's ``[SYMBOL] ...`` lines are visible to both sinks."""
+    repo = _repo()
+    settings = _settings()
+    console = []
+    scanner = scanner_mod.AssetScanner(
+        ASSET, settings=settings, repo=repo,
+        analyzer=AiAnalyzer(settings=settings, transport=lambda p: None),
+        notifier=TelegramNotifier(settings=settings, transport=lambda t: None),
+        executor=Executor(settings=settings), on_event=console.append)
+
+    warm, feed = build_scenario()
+    scanner.warm(warm)
+    scanner.step(feed)
+
+    assert console, "nothing reached the console sink"
+    assert all(m.startswith("[scan] [TEST]") for m in console), console
+    assert any("purged" in m for m in console)
+    assert any("CISD" in m for m in console)
+    assert any("FVG" in m for m in console)
+
+    # ``recent_events`` is newest-first; the console sink is chronological.
+    logged = [e.message for e in reversed(repo.recent_events(limit=500))
+              if e.source == "strategy"]
+    assert logged == [m[len("[scan] "):] for m in console], \
+        "the console and the event log disagree about what happened"
+    assert all(m.startswith("[TEST]") for m in logged)
+
+
+def test_a_rejected_setup_says_why_in_the_log():
+    """A refusal must be explainable, not silent."""
+    repo = _repo()
+    settings = _settings()
+    console = []
+    asset = replace(ASSET, overrides={"min_history_h1": "5", "min_rr": "99",
+                                      "valid_entry_sessions":
+                                          "london_open,ny_premarket,ny_am,"
+                                          "london_close,ny_pm"})
+    scanner = scanner_mod.AssetScanner(
+        asset, settings=settings, repo=repo,
+        analyzer=AiAnalyzer(settings=settings, transport=lambda p: None),
+        notifier=TelegramNotifier(settings=settings, transport=lambda t: None),
+        executor=Executor(settings=settings), on_event=console.append)
+
+    warm, feed = build_scenario()
+    scanner.warm(warm)
+    assert scanner.step(feed) == 0        # the RR gate refuses the entry
+
+    rejections = [m for m in console if "rejected" in m.lower()]
+    assert rejections, f"the refusal was not logged: {console}"
+    assert "RR below minimum" in rejections[-1]
+
+
+def test_setup_states_report_the_machine_that_produced_the_signal():
+    repo = _repo()
+    settings = _settings()
+    scanner = scanner_mod.AssetScanner(
+        ASSET, settings=settings, repo=repo,
+        analyzer=AiAnalyzer(settings=settings, transport=lambda p: None),
+        notifier=TelegramNotifier(settings=settings, transport=lambda t: None),
+        executor=Executor(settings=settings))
+
+    warm, feed = build_scenario()
+    scanner.warm(warm)
+
+    # Held one minute short of the entry: the buy side is waiting on its retrace.
+    scanner.step(feed[:-1])
+    states = scanner.setup_states()
+    assert states["buy"] == "WAITING_FOR_FVG_RETRACE"
+
+    scanner.step(feed[-1:])
+    assert scanner.setup_states()["buy"] == "TRADE_CONFIRMED"
+
+
+def test_setup_states_is_read_only():
+    """Reporting state must never advance it."""
+    repo = _repo()
+    settings = _settings()
+    scanner = scanner_mod.AssetScanner(
+        ASSET, settings=settings, repo=repo,
+        analyzer=AiAnalyzer(settings=settings, transport=lambda p: None),
+        notifier=TelegramNotifier(settings=settings, transport=lambda t: None),
+        executor=Executor(settings=settings))
+
+    warm, feed = build_scenario()
+    scanner.warm(warm)
+    scanner.step(feed[:-1])
+
+    before = scanner.setup_states()
+    for _ in range(5):
+        scanner.setup_states()
+    assert scanner.setup_states() == before
+
+
+def test_a_scanner_with_a_broken_engine_still_reports_state():
+    """A poll must never raise just because the engine cannot answer."""
+    scanner = scanner_mod.AssetScanner(
+        ASSET, settings=_settings(), repo=_repo(),
+        analyzer=AiAnalyzer(settings=_settings(), transport=lambda p: None),
+        notifier=TelegramNotifier(settings=_settings(), transport=lambda t: None),
+        executor=Executor(settings=_settings()))
+    scanner.engine = object()             # no .states() at all
+    assert scanner.setup_states() == {}

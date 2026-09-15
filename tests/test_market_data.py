@@ -111,8 +111,9 @@ def fake_mt5(monkeypatch):
 def test_fetch_m1_range_converts_utc_range_to_the_broker_clock():
     """The range handed to MT5 must be shifted onto the broker clock.
 
-    NY 2024-01-01 00:00 is UTC 04:00, which is broker 06:00 with a +2 server.
-    Passing the raw UTC values would ask for the wrong six hours of history.
+    NY 2024-01-01 00:00 is UTC 05:00 (January is EST, UTC-5 — *not* the fixed
+    UTC-4 this project used to assume), which is broker 07:00 with a +2 server.
+    Passing the raw UTC values would ask for the wrong hours of history.
     """
     client = _FakeClient()
     market = MarketData(client, OFFSET)
@@ -122,7 +123,7 @@ def test_fetch_m1_range_converts_utc_range_to_the_broker_clock():
     market.fetch_m1_range("XAUUSDm", start_utc, end_utc)
 
     assert client.range_args == [
-        ("XAUUSDm", "M1", datetime(2024, 1, 1, 6, 0), datetime(2024, 1, 2, 5, 59))
+        ("XAUUSDm", "M1", datetime(2024, 1, 1, 7, 0), datetime(2024, 1, 2, 6, 59))
     ]
 
 

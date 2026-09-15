@@ -12,6 +12,11 @@ SQLAlchemy>=2.0.0
 # Configuration
 python-dotenv>=1.0.0
 
+# Time zones. zoneinfo is stdlib, but it reads the system tz database — which
+# Windows does not ship. Without this, "America/New_York" cannot be resolved and
+# trading/time_utils.py falls back to a FIXED offset, silently losing DST.
+tzdata>=2024.1
+
 # HTTP (Telegram + LLM API)
 requests>=2.31.0
 

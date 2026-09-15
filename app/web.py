@@ -31,8 +31,7 @@ from sqlalchemy.orm import sessionmaker
 from backtesting.compare import batch_totals, rank_assets
 from backtesting.compare import tidy as tidy_summary
 from config import Settings, get_settings
-from database.models import Base
-from database.repository import Repository, get_engine
+from database.repository import Repository, ensure_schema, get_engine
 from trading import time_utils as tu
 
 from .api import asset_choices, register_api
@@ -269,7 +268,10 @@ def create_app(settings: Settings | None = None,
     if repository is None:
         engine = get_engine(cfg)
         if setup_db:
-            Base.metadata.create_all(engine)
+            # Full schema setup, not just ``create_all`` — an existing database
+            # needs its added columns back-filled too, and the dashboard may be
+            # the first thing a user starts. See ``ensure_schema``.
+            ensure_schema(engine)
         factory: sessionmaker | None = sessionmaker(bind=engine,
                                                     expire_on_commit=False,
                                                     future=True)
@@ -303,12 +305,15 @@ def create_app(settings: Settings | None = None,
         the bot may place orders must be visible on *every* page, not only on the
         routes that happen to pass ``cfg`` through explicitly.
 
-        ``ny_offset_hours`` travels for the same reason: the charts label their
-        axes in the browser, and the browser must use the *same* fixed NY offset
-        the server's ``ny`` filter does (``trading.time_utils.NY_OFFSET_HOURS``),
-        or a chart label would disagree with the table cell next to it.
+        ``ny_zone`` / ``ny_offset_hours`` travel for the same reason: the charts
+        label their axes in the browser, and the browser must resolve the *same*
+        NY clock the server's ``ny`` filter does
+        (``trading.time_utils`` → America/New_York). The zone is what the
+        browser actually needs; ``ny_offset_hours`` is the current DST-aware
+        offset, kept as the fallback for engines without a timezone database.
         """
-        return {"cfg": cfg, "ny_offset_hours": tu.NY_OFFSET_HOURS}
+        return {"cfg": cfg, "ny_zone": tu.NY_TZ_NAME,
+                "ny_offset_hours": tu.ny_offset_hours()}
 
     # ------------------------------------------------------------------ #
     # Repository per request

@@ -157,8 +157,35 @@
         <dd class="mono" id="live-signals">{{ live.signals_session }}</dd>
       </div>
       <div class="span-all">
+        <dt>Session window</dt>
+        <dd id="live-session" class="mono">
+          {%- if live.active -%}
+            awake — {{ live.activity }}
+          {%- elif live.activity -%}
+            asleep — {{ live.activity }}{% if live.next_open_utc %} (next open {{ live.next_open_utc | ny }}){% endif %}
+          {%- else -%}
+            —
+          {%- endif -%}
+        </dd>
+      </div>
+      <div class="span-all">
         <dt>Assets warmed</dt>
         <dd id="live-assets">{{ live.assets | join(', ') or '—' }}</dd>
+      </div>
+      <div class="span-all">
+        <dt>Setup states <span class="text-muted">(purge → CISD → FVG)</span></dt>
+        <dd id="live-setups" class="mono">
+          {%- set setups = live.setups or {} -%}
+          {%- set rows = [] -%}
+          {%- for name, st in setups.items() -%}
+            {%- for d in ['buy', 'sell'] -%}
+              {%- if st[d] and st[d] != 'NO_SETUP' -%}
+                {%- set _ = rows.append(name ~ ': ' ~ d ~ ' ' ~ st[d]) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ rows | join(' · ') if rows else '—' }}
+        </dd>
       </div>
     </dl>
 

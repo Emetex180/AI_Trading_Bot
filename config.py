@@ -6,10 +6,11 @@ so it is safe to import from unit tests.
 
 Time convention
 ---------------
-The project uses a FIXED algorithmic New York clock of UTC-4 (never auto-switches
-to UTC-5). MT5 candle times arrive in the *broker server* clock; the offset
+The project uses the **America/New_York** calendar clock, resolved DST-aware via
+:mod:`zoneinfo` (EDT/EST switch automatically — never a hard-coded UTC-4). MT5
+candle times arrive in the *broker server* clock; the offset
 ``MT5_SERVER_UTC_OFFSET`` is the number of hours the server is ahead of UTC.
-All conversion between broker time and the NY (UTC-4) clock lives in
+All conversion between broker time and the NY clock lives in
 :mod:`trading.time_utils` — nothing else may convert timezones.
 """
 from __future__ import annotations
@@ -152,6 +153,58 @@ class Settings:
     # Raw ``ASSET_<NAME>_<FIELD>`` entries, resolved by ``asset_overrides_for``.
     asset_env: dict[str, str] = field(default_factory=dict)
 
+    # --- ICT model -----------------------------------------------------------
+    # All optional (defaulted) so the dataclass still allows the non-default
+    # fields above; every one is also overridable per asset via
+    # ``ASSET_<NAME>_<UPPER_SNAKE>`` (see ``asset_overrides_for``).
+    #
+    # CISD is fixed to M5 by the model: the 5M candle is both the confirmation
+    # candle and the liquidity-taking candle the stop is anchored to.
+    cisd_timeframe: str = "M5"
+    # Stop loss: the greater of an ATR buffer and a whole number of ticks beyond
+    # the 5M liquidity-taking candle. Tick-based so the offset respects each
+    # symbol's own point size instead of a fixed number of points.
+    sl_min_offset_ticks: float = 2.0
+    # Take profit: pulled this far *before* the liquidity level it targets.
+    tp_liquidity_offset_atr: float = 0.1
+    tp_liquidity_offset_ticks: float = 2.0
+    # Grade a level must reach to be a valid TP target at all...
+    min_tp_liquidity_grade: str = "MEDIUM"
+    # ...and the stricter bar a CONDITIONAL session imposes.
+    conditional_min_liquidity_grade: str = "HIGH"
+    # Setup timeouts, in candles of the timeframe each step runs on.
+    max_cisd_candles: int = 8
+    fvg_wait_m1: int = 90
+    retrace_wait_m1: int = 90
+    # Minimum FVG depth as a fraction of 5M ATR; 0 disables the depth filter.
+    fvg_min_atr_frac: float = 0.0
+    # Liquidity lookbacks.
+    swing_lookback: int = 3
+    session_lookback_days: int = 3
+    # Per-session cap on emitted signals; 0 = unlimited.
+    max_signals_per_session: int = 0
+    # Whether a pending setup is dropped when a NO-trade session begins.
+    invalidate_on_no_trade_session: bool = True
+    # Session enforcement: when False, the session windows are informational and
+    # never block an entry.
+    enforce_sessions: bool = True
+    # Activity gate: when True the live loop is awake only inside a tradeable
+    # session on a trading day, and sleeps otherwise. Deliberately independent of
+    # ``enforce_sessions`` above — that one filters *entries*, this one decides
+    # *when the process works at all*. Set False to restore always-on scanning.
+    session_gate_enabled: bool = True
+    # Weekday names the bot may run on. Anything outside this set is slept
+    # through, so the default is the Mon-Fri week the operator asked for.
+    trading_days: list[str] = field(
+        default_factory=lambda: ["mon", "tue", "wed", "thu", "fri"])
+    # Trade-efficiency score: RR saturation point, the ATR multiple of room a
+    # full-distance target is worth, and the three component weights.
+    efficiency_rr_target: float = 3.0
+    efficiency_atr_target_multiple: float = 4.0
+    efficiency_weight_rr: float = 0.5
+    efficiency_weight_liquidity: float = 0.3
+    efficiency_weight_distance: float = 0.2
+
     extra: dict[str, Any] = field(default_factory=dict)
 
     # --- Runtime overrides ----------------------------------------------------
@@ -212,7 +265,7 @@ def _build_settings() -> Settings:
         sl_buffer_atr=_env_float("SL_BUFFER_ATR", 0.25),
         valid_entry_sessions=_env_list(
             "VALID_ENTRY_SESSIONS",
-            ["london_open", "ny_am", "london_close", "ny_pm", "power_hour"],
+            ["london_open", "ny_premarket", "ny_am", "london_close", "ny_pm"],
         ),
         cisd_threshold_hour_ny=_env_int("CISD_THRESHOLD_HOUR_NY", 9),
         order_deviation=_env_int("ORDER_DEVIATION", 20),
@@ -233,6 +286,31 @@ def _build_settings() -> Settings:
         llm_timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 20.0),
         telegram_timeout_seconds=_env_float("TELEGRAM_TIMEOUT_SECONDS", 10.0),
         asset_env={k: v for k, v in os.environ.items() if k.startswith("ASSET_")},
+        # --- ICT model ----------------------------------------------------- #
+        cisd_timeframe=_env_str("CISD_TIMEFRAME", "M5"),
+        sl_min_offset_ticks=_env_float("SL_MIN_OFFSET_TICKS", 2.0),
+        tp_liquidity_offset_atr=_env_float("TP_LIQUIDITY_OFFSET_ATR", 0.1),
+        tp_liquidity_offset_ticks=_env_float("TP_LIQUIDITY_OFFSET_TICKS", 2.0),
+        min_tp_liquidity_grade=_env_str("MIN_TP_LIQUIDITY_GRADE", "MEDIUM").upper(),
+        conditional_min_liquidity_grade=_env_str(
+            "CONDITIONAL_MIN_LIQUIDITY_GRADE", "HIGH").upper(),
+        max_cisd_candles=_env_int("MAX_CISD_CANDLES", 8),
+        fvg_wait_m1=_env_int("FVG_WAIT_M1", 90),
+        retrace_wait_m1=_env_int("RETRACE_WAIT_M1", 90),
+        fvg_min_atr_frac=_env_float("FVG_MIN_ATR_FRAC", 0.0),
+        swing_lookback=_env_int("SWING_LOOKBACK", 3),
+        session_lookback_days=_env_int("SESSION_LOOKBACK_DAYS", 3),
+        max_signals_per_session=_env_int("MAX_SIGNALS_PER_SESSION", 0),
+        invalidate_on_no_trade_session=_env_bool("INVALIDATE_ON_NO_TRADE_SESSION", default=True),
+        enforce_sessions=_env_bool("ENFORCE_SESSIONS", default=True),
+        session_gate_enabled=_env_bool("SESSION_GATE_ENABLED", default=True),
+        trading_days=_env_list("TRADING_DAYS",
+                               ["mon", "tue", "wed", "thu", "fri"]),
+        efficiency_rr_target=_env_float("EFFICIENCY_RR_TARGET", 3.0),
+        efficiency_atr_target_multiple=_env_float("EFFICIENCY_ATR_TARGET_MULTIPLE", 4.0),
+        efficiency_weight_rr=_env_float("EFFICIENCY_WEIGHT_RR", 0.5),
+        efficiency_weight_liquidity=_env_float("EFFICIENCY_WEIGHT_LIQUIDITY", 0.3),
+        efficiency_weight_distance=_env_float("EFFICIENCY_WEIGHT_DISTANCE", 0.2),
     )
 
 

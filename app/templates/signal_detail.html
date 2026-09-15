@@ -61,6 +61,7 @@
           <tr><th>Macro window</th><td>{{ s.macro if s.macro else '—' }}</td></tr>
           <tr><th>Liquidity purged</th>
               <td>{{ s.liquidity_type or '—' }} @ <span class="mono">{{ s.liquidity_price | price(s.asset) }}</span>
+                  {% if s.purge_grade %}<span class="badge tone-accent ms-1">{{ s.purge_grade }}</span>{% endif %}
                   <span class="text-muted small">({{ s.purge_time_ny | ny }})</span></td></tr>
           <tr><th>CISD confirmation</th>
               <td>{{ s.cisd_tf or '—' }}
@@ -69,7 +70,20 @@
               <td>{{ s.fvg_direction or '—' }}
                   <span class="mono">[{{ s.fvg_lower | price(s.asset) }} … {{ s.fvg_upper | price(s.asset) }}]</span>
                   <span class="text-muted small">({{ s.fvg_formation_time_ny | ny }})</span></td></tr>
-          <tr><th>Structure extreme</th><td class="mono">{{ s.structure_extreme_price | price(s.asset) }}</td></tr>
+          <tr><th>Liquidity target</th>
+              <td>{{ s.target_kind or '—' }}
+                  {% if s.target_price %}@ <span class="mono">{{ s.target_price | price(s.asset) }}</span>{% endif %}
+                  {% if s.target_grade %}<span class="badge tone-accent ms-1">{{ s.target_grade }}</span>{% endif %}</td></tr>
+          <tr><th>Stop anchor</th>
+              <td class="mono">{{ s.structure_extreme_price | price(s.asset) }}
+                  <span class="text-muted small">({{ s.structure_time_ny | ny }})</span></td></tr>
+          <tr><th>Risk / reward</th>
+              <td class="mono">{{ '%.2f' | format(s.risk_points) }} / {{ '%.2f' | format(s.reward_points) }} pts</td></tr>
+          <tr><th>Efficiency</th>
+              <td>{% if s.efficiency_score %}{{ '%.0f' | format(s.efficiency_score) }}%{% else %}—{% endif %}</td></tr>
+          <tr><th>Setup id</th>
+              <td class="mono small">{{ s.setup_id or '—' }}
+                  {% if s.state %}<span class="badge tone-secondary ms-1">{{ s.state }}</span>{% endif %}</td></tr>
         </tbody>
       </table>
     </div>

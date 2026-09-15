@@ -204,3 +204,111 @@ def test_save_signal_names_the_field_it_cannot_persist():
 
     with pytest.raises(TypeError, match="required by the signals table"):
         _repo().save_signal(_Partial())
+
+
+# --------------------------------------------------------------------------- #
+# Additive migrations against a database created by an older build
+# --------------------------------------------------------------------------- #
+def _legacy_engine(tmp_path):
+    """A database holding the ``signals`` table *without* the ICT columns."""
+    from sqlalchemy import text
+
+    engine = create_engine(f"sqlite:///{tmp_path/'legacy.db'}", future=True)
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for column in ("purge_grade", "target_kind", "target_price",
+                       "target_grade", "risk_points", "reward_points",
+                       "efficiency_score", "setup_id", "state", "digits",
+                       "structure_time_ny"):
+            conn.execute(text(f"ALTER TABLE signals DROP COLUMN {column}"))
+    return engine
+
+
+def _columns(engine, table="signals"):
+    from sqlalchemy import inspect
+
+    return {c["name"] for c in inspect(engine).get_columns(table)}
+
+
+def test_ensure_schema_backfills_columns_an_older_build_never_had(tmp_path):
+    """The whole point of the additive migration: an existing DB is upgraded.
+
+    ``create_all`` only CREATEs a missing table, so without this the first insert
+    on an existing database fails with "no such column".
+    """
+    from database.repository import ensure_schema
+
+    engine = _legacy_engine(tmp_path)
+    missing = {"purge_grade", "target_kind", "target_price", "efficiency_score",
+               "setup_id", "state", "digits"}
+    assert not (missing & _columns(engine)), "the fixture failed to strip them"
+
+    ensure_schema(engine)
+
+    assert missing <= _columns(engine)
+
+
+def test_ensure_schema_is_idempotent(tmp_path):
+    from database.repository import ensure_schema
+
+    engine = _legacy_engine(tmp_path)
+    ensure_schema(engine)
+    before = _columns(engine)
+    ensure_schema(engine)          # must not raise, must not change anything
+    ensure_schema(engine)
+    assert _columns(engine) == before
+
+
+def test_ensure_schema_keeps_existing_rows(tmp_path):
+    """Upgrading must never drop or rewrite data."""
+    from sqlalchemy import text
+
+    from database.repository import ensure_schema
+
+    engine = _legacy_engine(tmp_path)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO signals (fingerprint, asset, direction, entry, sl, tp,"
+            " entry_time_utc, entry_time_ny, session_keys, session_primary,"
+            " silver_bullet, macro, liquidity_type, liquidity_price, purge_time_ny,"
+            " cisd_tf, cisd_confirm_time_ny, fvg_direction, fvg_lower, fvg_upper,"
+            " fvg_formation_time_ny, structure_extreme_price, rr, status, reason,"
+            " alert_only, risk_approved, created_at)"
+            " VALUES ('fp1','US100','buy',101.7,99.5,106.0,"
+            " '2026-01-06 13:10:00','2026-01-06 09:10:00','[\"ny_am\"]','ny_am',"
+            " NULL,NULL,'PDL',100.0,'2026-01-06 08:00:00','M5','2026-01-06 08:30:00',"
+            " 'bullish',101.4,101.55,'2026-01-06 09:05:00',99.6,2.0,'APPROVED','',"
+            " 1,1,'2026-01-06 13:10:00')"))
+
+    ensure_schema(engine)
+
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT fingerprint, asset FROM signals")).all()
+    assert rows == [("fp1", "US100")]
+
+
+def test_the_dashboard_entry_point_migrates_an_existing_database(tmp_path):
+    """``create_app`` is a first-class entry point and must migrate too.
+
+    It used to call ``create_all`` alone, so starting the dashboard against a
+    database from an older build left every new column missing — and the first
+    signal insert died with "no such column".
+    """
+    from app.web import create_app
+
+    engine = _legacy_engine(tmp_path)
+    legacy_url = f"sqlite:///{tmp_path/'legacy.db'}"
+
+    class _Cfg:
+        """Just enough settings for ``create_app`` to open the legacy file."""
+
+        db_url = legacy_url
+
+    create_app(settings=_Cfg())          # setup_db defaults to True
+    engine.dispose()
+
+    from sqlalchemy import create_engine as _create
+
+    upgraded = _create(legacy_url, future=True)
+    assert {"purge_grade", "target_kind", "setup_id", "state"} <= _columns(upgraded)
+    upgraded.dispose()

@@ -603,7 +603,8 @@ def register_api(app) -> None:
     @app.get("/api/status")
     def api_status():
         payload = jobs.status()
-        live = _add_ny_times(payload["live"], ("started_at_utc", "stopped_at_utc"))
+        live = _add_ny_times(payload["live"], ("started_at_utc", "stopped_at_utc",
+                                               "next_open_utc"))
         last_candle = live.get("last_candle_utc")
         live["last_candle_ny"] = (tu.utc_to_ny(last_candle).strftime("%Y-%m-%d %H:%M")
                                   if last_candle else "")

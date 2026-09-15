@@ -50,16 +50,30 @@
   /*     could not be reconciled with the table beside them. The suffix is*/
   /*     added here rather than migrating stored rows, so history written */
   /*     before this fix reads correctly too.                             */
-  /*  2. "NY" in this project is a fixed UTC-4 offset, not                */
-  /*     America/New_York with DST (trading.time_utils.NY_OFFSET_HOURS).  */
-  /*     base.html publishes that offset so `label` renders byte-identical*/
-  /*     to the server's `ny` Jinja filter.                              */
+  /*  2. "NY" in this project is America/New_York *with* DST, resolved through */
+  /*     the same zone the server's `ny` filter uses (trading.time_utils).    */
+  /*     A chart can span a DST change, so each point is labelled on its own   */
+  /*     offset by resolving the zone per instant — never a fixed UTC-4. The   */
+  /*     published `nyOffsetHours` is only the fallback for an engine whose    */
+  /*     ICU data lacks the zone.                                             */
   /*                                                                     */
   /* Published on `window` so both the detail and the batch page can use  */
   /* it instead of each rolling its own.                                  */
   /* ------------------------------------------------------------------ */
+  var NY_ZONE = (window.ictClock && window.ictClock.nyZone) || "America/New_York";
   var NY_MS = (window.ictClock && window.ictClock.nyOffsetHours !== undefined
                ? window.ictClock.nyOffsetHours : -4) * 3600 * 1000;
+
+  var NY_FORMAT = null;
+  try {
+    NY_FORMAT = new Intl.DateTimeFormat("en-CA", {
+      timeZone: NY_ZONE, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit"
+    });
+  } catch (e) {
+    NY_FORMAT = null;
+  }
 
   /* Naive or zoned ISO string -> epoch ms, always read as UTC. */
   function utcMs(value) {
@@ -70,10 +84,20 @@
   }
 
   /* Epoch ms -> "YYYY-MM-DD HH:MM" on the NY clock, matching the server's
-   * `ny` filter. Shifting the instant and formatting in UTC avoids toISOString's
-   * own timezone conversion, which would undo the shift. */
+   * `ny` filter. */
   function nyLabel(ms) {
     if (!isFinite(ms)) return "";
+    if (NY_FORMAT) {
+      var parts = {};
+      NY_FORMAT.formatToParts(new Date(ms)).forEach(function (p) {
+        parts[p.type] = p.value;
+      });
+      var hour = parts.hour === "24" ? "00" : parts.hour;
+      return parts.year + "-" + parts.month + "-" + parts.day + " " +
+             hour + ":" + parts.minute;
+    }
+    // Shifting the instant and formatting in UTC avoids toISOString's own
+    // timezone conversion, which would undo the shift.
     return new Date(ms + NY_MS).toISOString().slice(0, 16).replace("T", " ");
   }
 
@@ -220,6 +244,34 @@
       (live.signals_session ? " - " + live.signals_session + " signal(s)" : ""));
   }
 
+  // Per-asset setup state machine, e.g. "US100: buy WAITING_FOR_FVG_RETRACE".
+  // Only directions that are actually doing something are listed, so an asset
+  // sitting at NO_SETUP reads as "—" rather than as an active setup.
+  function setupSummary(setups) {
+    if (!setups) return "—";
+    var parts = [];
+    Object.keys(setups).forEach(function (name) {
+      var st = setups[name] || {};
+      var running = ["buy", "sell"].filter(function (d) {
+        return st[d] && st[d] !== "NO_SETUP";
+      }).map(function (d) {
+        return d + " " + st[d];
+      });
+      if (running.length) parts.push(name + ": " + running.join(" / "));
+    });
+    return parts.length ? parts.join(" · ") : "—";
+  }
+
+  // Why the session is or is not scanning. A session that is "running" but
+  // asleep is the normal state outside trading hours, so the tile has to say
+  // which of the two it is rather than leaving the reader to guess.
+  function sessionSummary(live) {
+    if (live.active) return "awake — " + (live.activity || "in session");
+    if (!live.activity) return "—";
+    return "asleep — " + live.activity +
+      (live.next_open_ny ? " (next open " + live.next_open_ny + ")" : "");
+  }
+
   function renderLive(live) {
     var badge = byId("live-state-badge");
     if (!badge) return;
@@ -229,6 +281,8 @@
 
     text("live-started", live.started_at_ny || "—");
     text("live-assets", (live.assets && live.assets.length) ? live.assets.join(", ") : "—");
+    text("live-setups", setupSummary(live.setups));
+    text("live-session", sessionSummary(live));
     text("live-last-candle", live.last_candle_ny || "—");
     text("live-signals", String(live.signals_session));
 

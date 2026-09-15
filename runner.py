@@ -39,6 +39,7 @@ from uuid import uuid4
 
 from config import Settings, get_settings
 from database.repository import Repository, init_db
+from trading import sessions as sess
 from trading import time_utils as tu
 from trading.instrument import prepare_asset
 
@@ -78,6 +79,19 @@ ACCOUNT_ERROR = "error"
 
 # Seconds to wait for a live thread to unwind on stop before reporting a timeout.
 STOP_TIMEOUT_SECONDS = 30.0
+
+#: M1 candles to request on an ordinary poll. Enough to cover a dropped tick
+#: without over-fetching; ``AssetScanner.feed_new`` discards anything already
+#: seen, so a larger request costs bandwidth but never correctness.
+POLL_LOOKBACK_BASE = 5
+
+#: Longest the live loop will sleep in one go while outside a session. The loop
+#: otherwise sleeps until the next window opens, but ``Event.wait`` measures
+#: elapsed time monotonically — an NTP step or a suspended VM is invisible to it,
+#: and the loop would then wake late by however much the clock moved. Capping the
+#: sleep means any such surprise self-corrects within five minutes, at the cost
+#: of one no-op wake per five minutes.
+SESSION_SLEEP_CAP_SECONDS = 300.0
 
 
 def _default_max_hold_m1() -> int:
@@ -132,6 +146,26 @@ class LiveState:
     assets: list[str] = field(default_factory=list)
     last_candle_utc: datetime | None = None
     signals_session: int = 0
+    #: asset name -> {"buy": state, "sell": state}. The per-symbol setup state
+    #: machine, published each poll so the dashboard can show where every asset
+    #: actually is (waiting on an FVG retrace, purged, invalidated) instead of
+    #: only reporting signals after the fact. Cleared when a session stops: the
+    #: engine that produced it is gone, and a stale "waiting for retrace" would
+    #: read as live.
+    setups: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Whether the session is *awake*. The live thread stays up around the clock
+    #: but only polls inside a tradeable session on a trading day; this is False
+    #: while it sleeps. A running-but-asleep session is still "running" for
+    #: :meth:`JobManager.is_live_running`, because it is alive and will resume on
+    #: its own — the dashboard distinguishes the two rather than guessing.
+    active: bool = False
+    #: Why it is awake or not. The session key that justified waking (``ny_am``),
+    #: or ``market_closed_weekend`` / ``outside_session`` / ``gate_disabled``.
+    #: Empty before the first evaluation.
+    activity: str = ""
+    #: UTC instant of the next window the loop will wake for. ``None`` while
+    #: awake, and ``None`` if no window falls inside the search horizon.
+    next_open_utc: datetime | None = None
     last_error: str = ""
 
 
@@ -419,6 +453,82 @@ class JobManager:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------ #
+    # Session-hours gate
+    # ------------------------------------------------------------------ #
+    def _trading_days(self) -> frozenset[int]:
+        """The weekday set this session may run on, parsed once per call site."""
+        return sess.parse_trading_days(getattr(self.settings, "trading_days", None))
+
+    def _session_gate(self, now_ny: datetime | None = None
+                      ) -> tuple[bool, str, datetime | None]:
+        """``(active, activity, next_open_utc)`` for *right now*.
+
+        Reads only the clock and the settings — no MT5, no engine — so it can be
+        evaluated on every poll and unit-tested on its own. When the gate is
+        disabled the session is always awake, which is the pre-gate behaviour.
+
+        ``next_open_utc`` is computed only when asleep: it drives the "next open"
+        display and the sleep length, and it is the expensive half (a bounded
+        minute-by-minute walk). Computing it while awake would be pure waste, and
+        the dashboard has nothing to show for it then anyway.
+
+        ``now_ny`` lets the caller pass the instant it already read. That matters
+        because the caller also renders the log line from the same instant, and
+        two separate readings could straddle a window boundary — producing a
+        "London" line next to an "asleep" state.
+        """
+        if not getattr(self.settings, "session_gate_enabled", True):
+            return True, "gate_disabled", None
+        allowed = list(getattr(self.settings, "valid_entry_sessions", None) or []) or None
+        days = self._trading_days()
+        if now_ny is None:
+            now_ny = tu.now_ny()
+        active, activity = sess.session_activity(now_ny, allowed_sessions=allowed,
+                                                 days=days)
+        if active:
+            return True, activity, None
+        return False, activity, sess.next_activity_start_utc(
+            now_ny, allowed_sessions=allowed, days=days)
+
+    def _backfill_plan(self, sc) -> tuple[int, int]:
+        """``(lookback, missing_minutes)`` for this scanner's next poll.
+
+        The loop used to ask for a flat 5 bars every poll, which is only correct
+        while it never pauses. It now sleeps between sessions, so the first poll
+        after a wake has to span the whole gap: every level the model trades
+        (PDH/PDL, session and Asian ranges, equal highs and lows) is rebuilt from
+        this stream, and a hole degrades all of them at once without failing
+        anything.
+
+        Over-requesting is free — :meth:`scanner.AssetScanner.feed_new` keeps only
+        candles strictly newer than the engine's last, so the boundary candle is
+        idempotent and nothing is double-counted. Under-requesting is not
+        recoverable, so when the gap exceeds ``warmup_m1_bars`` the truncation is
+        returned rather than applied silently, and the caller warns.
+
+        Replaying the gap through ``warm()`` instead is *not* an option:
+        ``BarsStream.add`` raises on an out-of-order candle, so an overlapping
+        re-warm would raise rather than backfill.
+        """
+        last = sc.last_candle_time_utc()
+        if last is None:
+            return POLL_LOOKBACK_BASE, 0
+        gap = max(0, int((tu.now_utc() - last).total_seconds() // 60))
+        wanted = gap + POLL_LOOKBACK_BASE
+        cap = int(getattr(self.settings, "warmup_m1_bars", 0) or 0)
+        if cap > 0 and wanted > cap:
+            return cap, wanted - cap
+        return wanted, 0
+
+    @staticmethod
+    def _format_open(next_open_utc: datetime | None) -> str:
+        """A UTC instant as ``Mon 02:00 NY``, for the log and the dashboard."""
+        if next_open_utc is None:
+            return "—"
+        ny = tu.utc_to_ny(next_open_utc)
+        return f"{ny.strftime('%a %H:%M')} NY"
+
     def _live_worker(self) -> None:
         repo: Repository | None = None
         error = ""
@@ -486,6 +596,7 @@ class JobManager:
                     warm = market.fetch_m1_closed(resolved.broker_symbol, warm_count,
                                                   drop_forming=True)
                     sc = self._scanner_factory(resolved, self.settings, repo, equity)
+                    self._attach_console(sc)
                     sc.warm(warm)
                     scanners[resolved.name] = sc
                     self._log(repo, "INFO", "scanner",
@@ -501,14 +612,73 @@ class JobManager:
                            f"{self.settings.effective_auto_trading}.")
 
                 poll = self.settings.scanner_poll_interval_ms / 1000.0
+                # ``None`` until the first evaluation, so the very first poll
+                # always logs its state rather than being suppressed as "no
+                # change" against a default.
+                #
+                # Keyed on the rendered line, not on a bare awake/asleep flag:
+                # the wording changes at every session boundary (London -> NY
+                # Lunch -> NY PM), and those boundaries are exactly the moments
+                # worth seeing in the log. Minutes inside one window render the
+                # same string, so the 5s poll still cannot spam.
+                prev_line: str | None = None
+                warned_backfill: set[str] = set()
                 while not self._stop_event.is_set():
+                    # ---- session-hours gate -------------------------------- #
+                    now_ny = tu.now_ny()
+                    active, activity, next_open = self._session_gate(now_ny)
+                    with self._state_lock:
+                        self._live.active = active
+                        self._live.activity = activity
+                        self._live.next_open_utc = next_open
+
+                    line = sess.activity_log_line(now_ny, active, activity)
+                    if line != prev_line:
+                        # The next-open hint is genuinely useful but is not part
+                        # of the operator's line format, so it goes to the event
+                        # log rather than the console line.
+                        detail = line
+                        if not active:
+                            detail += (" — " + (f"next open "
+                                                f"{self._format_open(next_open)}"
+                                                if next_open
+                                                else "no open within 7 days"))
+                        self._emit(line)
+                        self._log(repo, "INFO", "scanner", detail)
+                        prev_line = line
+
+                    if not active:
+                        # Nothing to poll for. Wait on the event so Stop is still
+                        # immediate, capped so a clock jump cannot make us
+                        # oversleep — see SESSION_SLEEP_CAP_SECONDS.
+                        wait = SESSION_SLEEP_CAP_SECONDS
+                        if next_open is not None:
+                            wait = min(wait,
+                                       max(0.0, (next_open - tu.now_utc()).total_seconds()))
+                        self._stop_event.wait(wait)
+                        continue
+
                     # Once per poll, not only when a signal fires (which is what
                     # `equity` is for): a quiet session would otherwise leave the
                     # dashboard's balance tile frozen at whenever the last signal
                     # happened to appear.
                     account_snapshot()
                     for name, sc in scanners.items():
-                        candles = market.poll_closed_candles(sc.symbol, lookback=5)
+                        lookback, missing = self._backfill_plan(sc)
+                        if missing and name not in warned_backfill:
+                            # A truncated backfill is a standing property of the
+                            # stream, not an event: a symbol whose history has
+                            # genuinely run out would otherwise repeat this every
+                            # poll for as long as the session runs. Once per
+                            # asset is enough to be unmissable without burying
+                            # the log.
+                            warned_backfill.add(name)
+                            self._log(repo, "WARN", "scanner",
+                                      f"{name}: backfill capped at {lookback} M1 — "
+                                      f"{missing} minute(s) of history are missing "
+                                      "from the stream")
+                        candles = market.poll_closed_candles(sc.symbol,
+                                                             lookback=lookback)
                         handled = sc.feed_new(candles)
                         last = sc.last_candle_time_utc()
                         with self._state_lock:
@@ -518,6 +688,12 @@ class JobManager:
                         if handled:
                             self._log(repo, "INFO", "scanner",
                                       f"{name}: {handled} new signal(s)")
+                    # After the whole poll, not inside it: one pass over the
+                    # scanners instead of one full dict rebuild per asset.
+                    with self._state_lock:
+                        self._live.setups = {
+                            name: self._setup_states(sc)
+                            for name, sc in scanners.items()}
                     # Wait on the event so Stop takes effect immediately rather
                     # than after the full poll interval.
                     self._stop_event.wait(poll)
@@ -534,6 +710,10 @@ class JobManager:
             with self._state_lock:
                 self._live.stopped_at_utc = tu.now_utc()
                 self._live.last_error = error
+                self._live.setups = {}   # no engine behind it any more
+                self._live.active = False
+                self._live.activity = ""
+                self._live.next_open_utc = None
                 self._live.state = LIVE_ERROR if error else LIVE_STOPPED
 
     # ------------------------------------------------------------------ #
@@ -965,6 +1145,27 @@ class JobManager:
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+    def _attach_console(self, sc) -> None:
+        """Give a scanner the live session's console sink.
+
+        Assigned here rather than passed into ``_default_scanner_factory``
+        because that factory's call signature is relied on by callers and tests.
+        A scanner that will not take the attribute is left alone — the session
+        still runs, it just has no console stream.
+        """
+        try:
+            sc.on_event = self._emit
+        except Exception:
+            pass
+
+    @staticmethod
+    def _setup_states(sc) -> dict[str, str]:
+        """A scanner's per-direction setup state; ``{}`` if it cannot report one."""
+        try:
+            return sc.setup_states()
+        except Exception:
+            return {}
+
     def _emit(self, message: str) -> None:
         if self.on_event is None:
             return

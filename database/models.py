@@ -63,6 +63,7 @@ class Signal(Base):
     macro: Mapped[str | None] = mapped_column(String(32), nullable=True)
     liquidity_type: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     liquidity_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    purge_grade: Mapped[str] = mapped_column(String(16), nullable=False, default="")
     purge_time_ny: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cisd_tf: Mapped[str] = mapped_column(String(8), nullable=False, default="")
     cisd_confirm_time_ny: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -70,7 +71,24 @@ class Signal(Base):
     fvg_lower: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     fvg_upper: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     fvg_formation_time_ny: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Stop anchor: the M5 candle that took the liquidity the stop sits behind.
     structure_extreme_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    structure_time_ny: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Take-profit target: the liquidity pull the trade is aimed at, which is a
+    # different level from the one that was purged (``liquidity_type`` above).
+    target_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    target_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    target_grade: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    # Geometry and the transparent efficiency score.
+    risk_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reward_points: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    efficiency_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Deterministic setup identity and the state the engine settled in.
+    setup_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    # Price precision of the instrument, so the dashboard can format the levels
+    # in an alert without re-reading the asset registry.
+    digits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     rr: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
     reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
