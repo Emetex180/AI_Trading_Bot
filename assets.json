@@ -186,28 +186,6 @@
       "volume_step": 0.01,
       "volume_max": 0.0,
       "overrides": {}
-    },
-    {
-      "name": "BTCUSD",
-      "broker_symbol": "BTCUSD",
-      "enabled": true,
-      "digits": 2,
-      "contract_size": 1.0,
-      "volume_min": 0.01,
-      "volume_step": 0.01,
-      "volume_max": 0.0,
-      "overrides": {}
-    },
-    {
-      "name": "ETHUSD",
-      "broker_symbol": "ETHUSD",
-      "enabled": true,
-      "digits": 2,
-      "contract_size": 1.0,
-      "volume_min": 0.01,
-      "volume_step": 0.01,
-      "volume_max": 0.0,
-      "overrides": {}
     }
   ]
 }
