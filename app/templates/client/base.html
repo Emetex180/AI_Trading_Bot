@@ -1,0 +1,166 @@
+{# Client platform shell — sidebar + content, distinct from the console's
+   horizontal topbar. See app/static/css/client.css §2.
+
+   The one thing every page in this area shares is the New York clock in the
+   topbar. It is not decoration: every setup time, session window and filter on
+   this platform is denominated in NY local time, so the reader needs to see
+   what "now" is on that clock without doing arithmetic. It is rendered on the
+   server for the first paint and then ticked by client.js, which resolves the
+   zone from window.ictClock — the same zone the server's `ny` filter uses, so
+   the browser and the tables can never disagree. #}
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Dashboard{% endblock %} · {{ platform_name | default("ICT Trading Platform") }}</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='css/app.css') }}" rel="stylesheet">
+  {# client.css wins ties on equal specificity — loaded last, like app.css is
+     after Bootstrap in the console. #}
+  <link href="{{ url_for('static', filename='css/client.css') }}" rel="stylesheet">
+</head>
+<body>
+{% set u = current_user %}
+{% set nav = nav | default('') %}
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <a class="sidebar-brand" href="{{ url_for('root') }}">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>
+        <span class="sidebar-brand-text">{{ platform_name | default("ICT Platform") }}</span>
+        <span class="sidebar-brand-sub">New York sessions</span>
+      </span>
+    </a>
+
+    {# The product navigation. A block so the admin area can prepend its own
+       section and keep these links underneath — an operator needs to move
+       between the two surfaces without going through the URL bar. #}
+    {% block sidebar_nav %}
+    <div>
+      <div class="sidebar-section">Analysis</div>
+      <nav class="sidebar-nav">
+        <a class="sidebar-link {{ 'active' if nav == 'overview' }}"
+           href="{{ url_for('client.overview') }}">
+          <span class="sidebar-glyph">O</span> Overview
+        </a>
+        <a class="sidebar-link {{ 'active' if nav == 'market' }}"
+           href="{{ url_for('client.market') }}">
+          <span class="sidebar-glyph">M</span> Live Market
+        </a>
+        <a class="sidebar-link {{ 'active' if nav in ('setups', 'setup_detail') }}"
+           href="{{ url_for('client.setups') }}">
+          <span class="sidebar-glyph">S</span> Setups
+        </a>
+        <a class="sidebar-link {{ 'active' if nav == 'history' }}"
+           href="{{ url_for('client.history') }}">
+          <span class="sidebar-glyph">H</span> History
+        </a>
+        <a class="sidebar-link {{ 'active' if nav == 'analysis' }}"
+           href="{{ url_for('client.analysis') }}">
+          <span class="sidebar-glyph">A</span> Market Analysis
+        </a>
+      </nav>
+    </div>
+    {% endblock %}
+
+    {% if u and u.is_admin %}
+    {# Admins get the operator surfaces too. A client never renders this block,
+       and the routes behind it refuse them regardless of what renders. #}
+    <div>
+      <div class="sidebar-section">Operator</div>
+      <nav class="sidebar-nav">
+        <a class="sidebar-link" href="{{ url_for('admin.index') }}">
+          <span class="sidebar-glyph">A</span> Admin
+        </a>
+        <a class="sidebar-link" href="{{ url_for('index') }}">
+          <span class="sidebar-glyph">C</span> Console
+        </a>
+      </nav>
+    </div>
+    {% endif %}
+
+    <div class="sidebar-foot">
+      <div class="sidebar-user">
+        <span class="sidebar-glyph">{{ (u.username if u else '?')[:1] }}</span>
+        <div>
+          <div class="sidebar-user-name">{{ (u.display_name or u.username) if u else 'Unknown' }}</div>
+          <div class="sidebar-user-role">{{ (u.role if u else '') }}</div>
+        </div>
+      </div>
+      <form method="post" action="{{ url_for('auth.logout') }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="btn btn-outline-secondary btn-sm w-100" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <div class="main-col">
+
+    <div class="client-topbar">
+      <div class="client-topbar-clocks">
+        {# Served values paint the first byte; client.js ticks them after that. #}
+        <span class="clock-chip">
+          <span class="clock-time" id="ny-clock">{{ status.ny_time if status else '--:--:--' }}</span>
+          <span class="clock-zone">New York <span id="ny-zone">{{ status.ny_zone if status else '' }}</span></span>
+        </span>
+
+        {# `status` is read directly rather than aliased to a short local: a
+           top-level `{% set %}` in a parent template is visible inside a
+           child's blocks, so a one-letter alias here would shadow whatever a
+           page passed under that name. #}
+        <span class="pill {{ 'tone-danger' if cfg and cfg.effective_auto_trading else 'tone-success' }}"
+              id="nav-auto">
+          <span class="dot"></span>{{ 'AUTO-TRADING ENABLED' if cfg and cfg.effective_auto_trading else 'ALERT ONLY' }}
+        </span>
+
+        {# Rewritten in place by client.js from the same `/api/client/*` payload
+           the page was rendered from; the server-rendered text is the first
+           paint, not a separate source of truth. #}
+        {% if status %}
+        <span class="pill {{ 'tone-success' if status.scanner_active else 'tone-secondary' }}"
+              id="nav-scanner">
+          <span class="dot"></span>
+          {%- if status.scanner_active -%}
+            Scanner on · {{ status.session_label }}
+          {%- elif status.scanner_running -%}
+            Scanner idle · {{ status.session_label }}
+          {%- else -%}
+            Scanner stopped
+          {%- endif -%}
+        </span>
+        {% endif %}
+      </div>
+
+      <div class="d-flex align-items-center gap-2">
+        <span class="setup-meta">
+          {% if status and status.session_window %}{{ status.session_window }} NY{% endif %}
+        </span>
+      </div>
+    </div>
+
+    <main class="main-pad">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+
+<script>window.ictClock = {
+  nyZone: {{ ny_zone | default("America/New_York") | tojson }},
+  nyOffsetHours: {{ ny_offset_hours | default(-4) }}
+};</script>
+{# Each page declares what its poller should fetch, before client.js runs. A page
+   with no block here simply gets the clock and the status chrome, which is the
+   right default: nothing is polled that the page does not show. #}
+{% block poll_config %}{% endblock %}
+<script src="{{ url_for('static', filename='js/client.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

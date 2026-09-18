@@ -1,0 +1,159 @@
+{% extends "client/base.html" %}
+{% from "_macros.html" import stat %}
+{% from "client/_ui.html" import setup_card, feed_list %}
+{% block title %}Overview{% endblock %}
+{% block poll_config %}<script>window.clientPoll = { kind: "overview" };</script>{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    {# The hour comes off the same NY clock the rest of the page is denominated
+       in, so the greeting cannot disagree with the timestamps below it. #}
+    {% set hour = status.ny_time[:2] | int %}
+    <h1>Good {{ 'morning' if hour < 12 else ('afternoon' if hour < 17 else 'evening') }},
+        {{ current_user.display_name or current_user.username }}</h1>
+    <p>{{ status.ny_date }} · {{ status.ny_time }} New York ({{ status.ny_zone }})</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.market') }}">Live market</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.history') }}">History</a>
+  </div>
+</div>
+
+{# Session state first. "Is the engine watching right now" is the question that
+   decides whether anything else on this page can change in the next minute. #}
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="d-flex flex-wrap align-items-center gap-3">
+      <span id="ov-session" class="state-chip {{ 'is-confirmed' if status.scanner_active else ('is-working' if status.scanner_running else 'is-idle') }}">
+        {%- if status.scanner_active %}<span class="dot"></span>{% endif -%}
+        {{ status.session_label }}
+      </span>
+      <span class="setup-meta">
+        {%- if status.session_window -%}
+          Window {{ status.session_window }} NY
+        {%- else -%}
+          No tradeable session open
+        {%- endif -%}
+      </span>
+      {% if status.session_trade and status.session_trade != 'yes' %}
+      <span class="setup-meta">Entries: {{ status.session_trade }}</span>
+      {% endif %}
+      <span class="setup-meta" id="ov-scanner">
+        {%- if status.scanner_running -%}
+          Scanner {{ status.scanner_state or 'running' }}
+        {%- else -%}
+          Scanner stopped
+        {%- endif -%}
+      </span>
+      {% if status.next_open_ny %}
+      <span class="setup-meta">Next window {{ status.next_open_ny }} NY</span>
+      {% endif %}
+    </div>
+
+    {% if not status.scanner_running %}
+    <div class="notice mt-3">
+      <span><strong>The scanner is not running.</strong> Nothing on this page is
+      updating. Setups below are the last ones the engine recorded, not a live
+      view.</span>
+    </div>
+    {% elif not status.scanner_active %}
+    <div class="notice mt-3">
+      <span><strong>Outside a tradeable session.</strong> The scanner is up and
+      will begin polling when the next window opens
+      {%- if status.next_open_ny %} at {{ status.next_open_ny }} NY{% endif %}.</span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="stat-grid mb-4">
+  {{ stat('Active setups', active | length, 'success',
+          'confirmed and risk-approved', id='ov-count-active') }}
+  {{ stat('Setups recorded', counts.setups_total, '',
+          'all time', id='ov-count-total') }}
+  {{ stat('Approved', counts.setups_approved, '',
+          'passed the risk gate', id='ov-count-approved') }}
+  {{ stat('Assets monitored', counts.assets_monitored, 'info',
+          'in the running session', id='ov-count-assets') }}
+</div>
+
+<div class="row g-3">
+  <div class="col-12 col-xl-8">
+
+    <div class="d-flex align-items-center justify-content-between mb-2">
+      <div class="section-label mb-0">Active setups</div>
+      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.setups') }}">All setups</a>
+    </div>
+
+    {# Populated by the poller when a setup confirmed. Nothing is inserted that
+       the server did not send; see client.js. #}
+    <div id="ov-new-notice"></div>
+
+    {% if active %}
+    <div class="setup-grid mb-4" id="ov-active">
+      {% for s in active %}{{ setup_card(s, show_conditions=False) }}{% endfor %}
+    </div>
+    {% else %}
+    <div class="card mb-4" id="ov-active-empty">
+      <div class="card-body">
+        <p class="empty-state mb-0">
+          No confirmed setup is open right now.
+          {%- if status.scanner_active %}
+          The engine is watching {{ counts.assets_monitored }} asset(s) for a
+          1H liquidity purge.
+          {%- endif %}
+        </p>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="card mb-3">
+      <div class="card-header">
+        <span>Recent setups</span>
+        <span class="card-header-note">Newest first</span>
+      </div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Time (NY)</th><th>Asset</th><th>Dir</th>
+              <th class="text-end">Entry</th><th class="text-end">R:R</th>
+              <th>Session</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in recent %}
+            <tr class="row-highlight">
+              <td class="mono">{{ s.entry_time_ny }}</td>
+              <td><a class="row-link" href="{{ s.url }}">{{ s.asset }}</a></td>
+              <td>{{ s.direction }}</td>
+              <td class="text-end mono">{{ (s.entry | price(s.asset)) or '—' }}</td>
+              <td class="text-end mono">{{ s.rr_label }}</td>
+              <td>{{ s.session_label }}</td>
+              <td>{{ s.status | status }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" class="empty-state">
+              No setups have been recorded yet.
+            </td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-xl-4">
+    <div class="card">
+      <div class="card-header">
+        <span>Engine activity</span>
+        <a class="card-header-note" href="{{ url_for('client.analysis') }}">Full analysis</a>
+      </div>
+      <div class="card-body" id="ov-feed">
+        {{ feed_list(feed) }}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

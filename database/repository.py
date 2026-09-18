@@ -257,15 +257,62 @@ class Repository:
         return self.session.get(m.Signal, signal_id)
 
     def find_signals(self, *, status: str | None = None, asset: str | None = None,
+                     direction: str | None = None, session: str | None = None,
+                     date_from: datetime | None = None,
+                     date_to: datetime | None = None,
                      limit: int = 500) -> list[m.Signal]:
-        """Filtered listing (newest first) for the dashboard signals page."""
+        """Filtered listing (newest first) for the dashboard signals page.
+
+        Every filter past ``status``/``asset`` is optional and defaulted, so the
+        original two-argument call sites (the admin signals page, the tests)
+        behave exactly as before.
+
+        ``session`` matches ``session_primary`` — the single session the setup is
+        *filed under*, which is what the UI displays and lets a reader filter by.
+        ``session_keys`` is the full overlap list and would match several rows
+        per setup, so it is deliberately not what this filters on.
+
+        ``date_from``/``date_to`` are naive-UTC instants compared against
+        ``entry_time_utc`` (inclusive at both ends). Conversion from a NY date
+        picker happens in the caller, through ``trading.time_utils``.
+        """
         stmt = select(m.Signal)
         if status:
             stmt = stmt.where(m.Signal.status == status)
         if asset:
             stmt = stmt.where(m.Signal.asset == asset)
+        if direction:
+            stmt = stmt.where(m.Signal.direction == direction)
+        if session:
+            stmt = stmt.where(m.Signal.session_primary == session)
+        if date_from is not None:
+            stmt = stmt.where(m.Signal.entry_time_utc >= date_from)
+        if date_to is not None:
+            stmt = stmt.where(m.Signal.entry_time_utc <= date_to)
         stmt = stmt.order_by(m.Signal.id.desc()).limit(limit)
         return list(self.session.execute(stmt).scalars().all())
+
+    def distinct_sessions(self) -> list[str]:
+        """Session keys actually present in the signal history, for a filter list.
+
+        Read from the data rather than from ``trading.sessions`` so the filter
+        offers only values that can return rows — a dropdown listing sessions
+        that produce nothing reads as a broken filter.
+        """
+        rows = self.session.execute(
+            select(m.Signal.session_primary).where(m.Signal.session_primary != "")
+            .distinct().order_by(m.Signal.session_primary)
+        ).scalars().all()
+        return [r for r in rows if r]
+
+    def active_setups(self, limit: int = 50) -> list[m.Signal]:
+        """Setups the engine has confirmed and that are still the latest word.
+
+        "Active" means APPROVED — the deterministic rules and the risk manager
+        both passed, so it is a setup the platform is standing behind. Pending
+        and rejected rows are history, not active setups.
+        """
+        return self.find_signals(status="APPROVED", limit=limit)
 
     def count_signals(self, status: str | None = None) -> int:
         stmt = select(func.count()).select_from(m.Signal)
@@ -427,6 +474,27 @@ class Repository:
         ).scalars().all()
         return list(rows)
 
+    def recent_events_by_source(self, source: str, limit: int = 100,
+                                sources: tuple[str, ...] | None = None
+                                ) -> list[m.SystemEvent]:
+        """Newest events from one source, or any of several.
+
+        Filtering in SQL rather than in the caller because the event log is the
+        busiest table in the schema — every poll writes session lines, so a
+        client asking for just the strategy's decision lines would otherwise
+        pull hundreds of unrelated rows across the wire to discard them.
+
+        ``sources`` wins when supplied; ``source`` is the single-source shorthand.
+        """
+        wanted = list(sources) if sources else ([source] if source else [])
+        stmt = select(m.SystemEvent)
+        if wanted:
+            stmt = stmt.where(m.SystemEvent.source.in_(wanted))
+        rows = self.session.execute(
+            stmt.order_by(m.SystemEvent.id.desc()).limit(limit)
+        ).scalars().all()
+        return list(rows)
+
     # ------------------------------------------------------------------ #
     # Assets
     # ------------------------------------------------------------------ #
@@ -448,6 +516,175 @@ class Repository:
     def list_assets(self) -> list[m.Asset]:
         rows = self.session.execute(select(m.Asset).order_by(m.Asset.name)).scalars().all()
         return list(rows)
+
+    # ------------------------------------------------------------------ #
+    # Platform accounts (admin / client)
+    #
+    # The repository stays the only thing that touches the ORM; the auth layer
+    # never builds a query of its own. Password hashing happens in
+    # ``app.auth`` — these methods receive an already-hashed value, so no
+    # plaintext password is ever passed into this module.
+    # ------------------------------------------------------------------ #
+    def create_user(self, *, username: str, password_hash_or_plain: str,
+                    role: str = m.ROLE_CLIENT, email: str = "",
+                    display_name: str = "", created_by: str = "",
+                    notes: str = "", subscribe: bool = False) -> m.User:
+        """Insert a user. ``password_hash_or_plain`` is hashed here if it is not.
+
+        Accepting either is a convenience for the CLI and tests, and it is
+        unambiguous because a Werkzeug hash always carries a recognisable
+        method prefix — a raw password with that prefix would have to be
+        deliberately crafted, and would simply be hashed again anyway.
+        """
+        pw = password_hash_or_plain
+        if not pw.startswith(("pbkdf2:", "scrypt:", "argon2")):
+            from app.auth import hash_password
+
+            pw = hash_password(pw)
+
+        row = m.User(username=username.strip(), email=(email or "").strip(),
+                     password_hash=pw, role=role, status=m.STATUS_ACTIVE,
+                     display_name=(display_name or "").strip(),
+                     notes=(notes or "").strip(), created_by=created_by)
+        self.session.add(row)
+        if role == m.ROLE_CLIENT and subscribe:
+            self.session.flush()   # assign row.id before the profile references it
+            self.session.add(m.ClientProfile(user_id=row.id))
+        self.session.commit()
+        return row
+
+    def get_user(self, user_id: int) -> m.User | None:
+        return self.session.get(m.User, user_id)
+
+    def get_user_by_username(self, username: str) -> m.User | None:
+        """Case-insensitive lookup, so ``Admin`` and ``admin`` are one account."""
+        if not username:
+            return None
+        return self.session.execute(
+            select(m.User).where(func.lower(m.User.username) == username.strip().lower())
+        ).scalars().first()
+
+    def list_users(self, *, role: str | None = None) -> list[m.User]:
+        stmt = select(m.User)
+        if role:
+            stmt = stmt.where(m.User.role == role)
+        stmt = stmt.order_by(m.User.role.desc(), m.User.username)
+        return list(self.session.execute(stmt).scalars().all())
+
+    def list_clients(self) -> list[m.User]:
+        return self.list_users(role=m.ROLE_CLIENT)
+
+    def count_users(self) -> int:
+        return int(self.session.execute(
+            select(func.count()).select_from(m.User)).scalar_one())
+
+    def set_user_password(self, user_id: int, password: str) -> bool:
+        """Replace a user's password hash. Returns False if the user is gone."""
+        from app.auth import hash_password
+
+        row = self.session.get(m.User, user_id)
+        if row is None:
+            return False
+        row.password_hash = hash_password(password)
+        self.session.commit()
+        return True
+
+    def set_user_status(self, user_id: int, status: str) -> m.User | None:
+        """Activate or suspend an account (takes effect on the next request)."""
+        row = self.session.get(m.User, user_id)
+        if row is None:
+            return None
+        row.status = status
+        self.session.commit()
+        return row
+
+    def touch_user_login(self, user_id: int, when: datetime | None = None) -> None:
+        from trading import time_utils as tu
+
+        row = self.session.get(m.User, user_id)
+        if row is None:
+            return
+        # The project-wide naive-UTC convention, not ``datetime.utcnow()`` — the
+        # dashboard renders every stored instant through ``time_utils.utc_to_ny``.
+        row.last_login_at = when or tu.now_utc()
+        self.session.commit()
+
+    def update_client_profile(self, user_id: int, **fields) -> m.ClientProfile | None:
+        """Set subscription fields on a client's profile, creating it if needed.
+
+        Only the known subscription columns are writable; an unexpected key is
+        ignored rather than raising, so a form field added in the template can
+        never break the save.
+        """
+        allowed = {"subscription_status", "subscription_plan",
+                   "subscription_expires_at"}
+        row = self.session.execute(
+            select(m.ClientProfile).where(m.ClientProfile.user_id == user_id)
+        ).scalars().first()
+        if row is None:
+            row = m.ClientProfile(user_id=user_id)
+            self.session.add(row)
+        for key, value in fields.items():
+            if key in allowed:
+                setattr(row, key, value)
+        self.session.commit()
+        return row
+
+    def client_profile(self, user_id: int) -> m.ClientProfile | None:
+        return self.session.execute(
+            select(m.ClientProfile).where(m.ClientProfile.user_id == user_id)
+        ).scalars().first()
+
+    # ------------------------------------------------------------------ #
+    # Client broker-account links
+    # ------------------------------------------------------------------ #
+    def add_broker_account(self, *, user_id: int, login: str, server: str = "",
+                           provider: str = "mt5", label: str = "") -> m.BrokerAccount:
+        row = m.BrokerAccount(user_id=user_id, provider=provider,
+                              login=(login or "").strip(),
+                              server=(server or "").strip(),
+                              label=(label or "").strip())
+        self.session.add(row)
+        self.session.commit()
+        return row
+
+    def list_broker_accounts(self, user_id: int | None = None) -> list[m.BrokerAccount]:
+        stmt = select(m.BrokerAccount)
+        if user_id is not None:
+            stmt = stmt.where(m.BrokerAccount.user_id == user_id)
+        return list(self.session.execute(
+            stmt.order_by(m.BrokerAccount.id)).scalars().all())
+
+    def remove_broker_account(self, account_id: int) -> bool:
+        row = self.session.get(m.BrokerAccount, account_id)
+        if row is None:
+            return False
+        self.session.delete(row)
+        self.session.commit()
+        return True
+
+    def latest_snapshot(self, broker_account_id: int) -> m.BrokerAccountSnapshot | None:
+        """The most recent reading for a link, or ``None`` if it was never read.
+
+        ``None`` is the honest answer for a link with no provider behind it, and
+        is why the admin UI renders "not connected" rather than a zero.
+        """
+        return self.session.execute(
+            select(m.BrokerAccountSnapshot)
+            .where(m.BrokerAccountSnapshot.broker_account_id == broker_account_id)
+            .order_by(m.BrokerAccountSnapshot.fetched_at_utc.desc(),
+                      m.BrokerAccountSnapshot.id.desc())
+        ).scalars().first()
+
+    def save_broker_snapshot(self, broker_account_id: int, *, balance=None,
+                             equity=None, margin_free=None, currency=None,
+                             source: str = "") -> m.BrokerAccountSnapshot:
+        row = m.BrokerAccountSnapshot(
+            broker_account_id=broker_account_id, balance=balance, equity=equity,
+            margin_free=margin_free, currency=currency, source=source)
+        self.session.add(row)
+        self.session.commit()
+        return row
 
 
 def iter_session(settings: Settings | None = None) -> Iterator[Session]:

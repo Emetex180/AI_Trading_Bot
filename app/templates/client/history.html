@@ -1,0 +1,127 @@
+{% extends "client/base.html" %}
+{% from "_macros.html" import empty %}
+{% from "client/_ui.html" import state_chip %}
+{% block title %}History{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Setup history</h1>
+    <p>Everything the engine has recorded. Dates and times are New York local
+       ({{ status.ny_zone }}).</p>
+  </div>
+  <div class="page-actions">
+    <span class="setup-meta">{{ total }} matching setup{{ '' if total == 1 else 's' }}</span>
+  </div>
+</div>
+
+{# A GET form: every filter lives in the URL, so a narrowed view is a link the
+   reader can bookmark or send. #}
+<form class="filter-bar" method="get" action="{{ url_for('client.history') }}">
+  <div>
+    <label class="form-label" for="f-asset">Asset</label>
+    <select class="form-select form-select-sm" id="f-asset" name="asset">
+      <option value="">All assets</option>
+      {% for a in assets %}
+      <option value="{{ a.name }}" {{ 'selected' if filters.asset == a.name }}>
+        {{ a.name }}{{ '' if a.enabled else ' (disabled)' }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div>
+    <label class="form-label" for="f-direction">Direction</label>
+    <select class="form-select form-select-sm" id="f-direction" name="direction">
+      <option value="">Both</option>
+      <option value="buy"  {{ 'selected' if filters.direction == 'buy' }}>Buy</option>
+      <option value="sell" {{ 'selected' if filters.direction == 'sell' }}>Sell</option>
+    </select>
+  </div>
+
+  <div>
+    <label class="form-label" for="f-session">Session</label>
+    <select class="form-select form-select-sm" id="f-session" name="session">
+      <option value="">All sessions</option>
+      {% for s in sessions %}
+      <option value="{{ s.key }}" {{ 'selected' if filters.session == s.key }}>{{ s.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div>
+    <label class="form-label" for="f-status">Status</label>
+    <select class="form-select form-select-sm" id="f-status" name="status">
+      <option value="">All</option>
+      <option value="APPROVED" {{ 'selected' if filters.status == 'APPROVED' }}>Approved</option>
+      <option value="REJECTED" {{ 'selected' if filters.status == 'REJECTED' }}>Rejected</option>
+      <option value="PENDING"  {{ 'selected' if filters.status == 'PENDING' }}>Pending</option>
+    </select>
+  </div>
+
+  <div>
+    <label class="form-label" for="f-from">From (NY)</label>
+    <input class="form-control form-control-sm mono" type="date" id="f-from"
+           name="from" value="{{ filters.raw_from }}">
+  </div>
+
+  <div>
+    <label class="form-label" for="f-to">To (NY)</label>
+    <input class="form-control form-control-sm mono" type="date" id="f-to"
+           name="to" value="{{ filters.raw_to }}">
+  </div>
+
+  <div class="d-flex gap-2">
+    <button class="btn btn-sm btn-primary" type="submit">Apply</button>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.history') }}">Reset</a>
+  </div>
+</form>
+
+<div class="card">
+  <div class="table-scroll">
+    <table class="table" id="history-table">
+      <thead>
+        <tr>
+          <th>Date (NY)</th><th>Time</th><th>Asset</th><th>Dir</th>
+          <th class="text-end">Entry</th>
+          <th class="text-end">Stop</th>
+          <th class="text-end">Target</th>
+          <th class="text-end">R:R</th>
+          <th>Session</th>
+          <th>State</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in setups %}
+        <tr class="row-highlight" data-asset="{{ s.asset }}">
+          <td class="mono">{{ s.entry_date_ny }}</td>
+          <td class="mono">{{ s.entry_time_short }}</td>
+          <td><a class="row-link" href="{{ s.url }}">{{ s.asset }}</a></td>
+          <td>{{ s.direction }}</td>
+          {# Em dashes, never zeros: a level the engine did not record is not a
+             level of zero. #}
+          <td class="text-end mono">{{ (s.entry | price(s.asset)) or '—' }}</td>
+          <td class="text-end mono">{{ (s.sl | price(s.asset)) or '—' }}</td>
+          <td class="text-end mono">{{ (s.tp | price(s.asset)) or '—' }}</td>
+          <td class="text-end mono">{{ s.rr_label }}</td>
+          <td>{{ s.session_label }}</td>
+          <td>{{ state_chip(s.state_info) }}</td>
+          <td>{{ s.status | status }}</td>
+        </tr>
+        {% else %}
+        {{ empty(11, 'No setups match these filters.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p class="setup-meta mt-3 mb-0">
+  Showing up to 500 rows, newest first.
+  {%- if filters.date_from or filters.date_to %}
+  Date filters are applied on the New York calendar day, so a filter of
+  {{ filters.raw_from or '…' }} to {{ filters.raw_to or '…' }} covers those NY
+  days end to end.
+  {%- endif %}
+</p>
+{% endblock %}

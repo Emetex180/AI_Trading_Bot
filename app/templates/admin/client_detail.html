@@ -1,0 +1,239 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ c.username }}{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>{{ c.display_name }}
+      <span class="badge tone-{{ 'success' if c.is_active else 'danger' }}">{{ c.status }}</span>
+      <span class="badge tone-{{ 'info' if c.role == 'admin' else 'secondary' }}">{{ c.role }}</span>
+    </h1>
+    <p>
+      {{ c.username }}
+      {%- if c.email %} · {{ c.email }}{% endif %}
+      · created {{ c.created_at_ny }} NY
+      {%- if c.created_by != '—' %} by {{ c.created_by }}{% endif %}
+    </p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.clients') }}">All clients</a>
+    {% if c.role != 'admin' %}
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.overview') }}">Client view</a>
+    {% endif %}
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-12 col-xl-6">
+
+    <div class="card mb-3">
+      <div class="card-header"><span>Account status</span></div>
+      <div class="card-body">
+        <p class="setup-meta">
+          Last signed in {{ c.last_login_ny or 'never' }}{% if c.last_login_ny %} NY{% endif %}.
+          A suspended account cannot sign in, but nothing it recorded is deleted.
+        </p>
+        <form method="post" action="{{ url_for('admin.set_client_status', user_id=c.id) }}"
+              class="d-flex flex-wrap align-items-end gap-2">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <div>
+            <label class="form-label" for="s-status">Status</label>
+            <select class="form-select form-select-sm" id="s-status" name="status">
+              {% for s in statuses %}
+              <option value="{{ s }}" {{ 'selected' if c.status == s }}>{{ s }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <button class="btn btn-sm btn-primary" type="submit">Apply</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header"><span>Subscription</span></div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('admin.set_client_profile', user_id=c.id) }}"
+              class="row g-3">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <div class="col-12 col-md-5">
+            <label class="form-label" for="p-status">State</label>
+            <select class="form-select" id="p-status" name="subscription_status">
+              {% for s in subscriptions %}
+              <option value="{{ s }}" {{ 'selected' if c.subscription_status == s }}>{{ s }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-12 col-md-4">
+            <label class="form-label" for="p-plan">Plan</label>
+            <input class="form-control" id="p-plan" name="subscription_plan"
+                   value="{{ c.subscription_plan }}" autocomplete="off">
+          </div>
+          <div class="col-12 col-md-3">
+            <label class="form-label" for="p-expires">Expires (NY date)</label>
+            <input class="form-control mono" id="p-expires" name="subscription_expires_at"
+                   type="date"
+                   value="{{ c.subscription_expires_ny[:10] if c.subscription_expires_ny else '' }}">
+          </div>
+          <div class="col-12">
+            <button class="btn btn-sm btn-primary" type="submit">Save subscription</button>
+          </div>
+        </form>
+        <p class="setup-meta mt-2 mb-0">
+          These fields are bookkeeping for your own records. Nothing in the
+          trading engine reads them, and no expiry here changes what the scanner
+          does.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Reset password</span></div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('admin.set_client_password', user_id=c.id) }}"
+              class="d-flex flex-wrap align-items-end gap-2">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <div>
+            <label class="form-label" for="pw-new">New password</label>
+            <input class="form-control" id="pw-new" name="password" type="password"
+                   required minlength="{{ min_password }}" autocomplete="new-password">
+          </div>
+          <button class="btn btn-sm btn-outline-danger" type="submit">Reset</button>
+        </form>
+        <p class="setup-meta mt-2 mb-0">
+          Only the hash is stored, so the current password cannot be shown — a
+          reset is the only way. The reset itself is written to the event log.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-xl-6">
+
+    <div class="card mb-3">
+      <div class="card-header">
+        <span>Broker accounts</span>
+        <span class="card-header-note">
+          {%- if integrations.available -%}
+            {{ integrations.available | join(', ') }} available
+          {%- else -%}
+            no provider configured
+          {%- endif -%}
+        </span>
+      </div>
+      <div class="card-body">
+        {% if broker_links %}
+        <div class="table-scroll mb-3">
+          <table class="table">
+            <thead>
+              <tr><th>Login</th><th>Server</th><th>Provider</th>
+                  <th class="text-end">Balance</th><th>Read (NY)</th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for b in broker_links %}
+              <tr>
+                <td class="mono">{{ b.login }}</td>
+                <td class="setup-meta">{{ b.server or '—' }}</td>
+                <td>
+                  {{ b.provider }}
+                  {% if not b.provider_available %}<span class="setup-meta">unavailable</span>{% endif %}
+                </td>
+                {# Never a zero: no snapshot at all is "not connected", and a
+                   snapshot the broker left blank is an em dash. #}
+                <td class="text-end mono">
+                  {%- if not b.connected -%}
+                    not connected
+                  {%- else -%}
+                    {{ b.balance | money }} {{ b.currency or '' }}
+                  {%- endif -%}
+                </td>
+                <td class="mono setup-meta">{{ b.read_at_ny or '—' }}</td>
+                <td class="d-flex gap-1">
+                  <form method="post" action="{{ url_for('admin.refresh_broker_account', account_id=b.id) }}">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                    <button class="btn btn-sm btn-outline-secondary" type="submit"
+                            {{ 'disabled' if not b.provider_available }}>Read</button>
+                  </form>
+                  <form method="post" action="{{ url_for('admin.remove_broker_account', account_id=b.id) }}">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                    <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No broker account is linked to this client.</p>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('admin.add_broker_account', user_id=c.id) }}"
+              class="row g-2">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <div class="col-12 col-md-4">
+            <label class="form-label" for="b-login">Broker login</label>
+            <input class="form-control" id="b-login" name="login" required
+                   autocomplete="off" spellcheck="false">
+          </div>
+          <div class="col-12 col-md-4">
+            <label class="form-label" for="b-server">Server</label>
+            <input class="form-control" id="b-server" name="server" autocomplete="off">
+          </div>
+          <div class="col-12 col-md-2">
+            <label class="form-label" for="b-provider">Provider</label>
+            <input class="form-control" id="b-provider" name="provider" value="mt5">
+          </div>
+          <div class="col-12 col-md-2">
+            <label class="form-label" for="b-label">Label</label>
+            <input class="form-control" id="b-label" name="label" autocomplete="off">
+          </div>
+          <div class="col-12">
+            <button class="btn btn-sm btn-primary" type="submit">Link account</button>
+          </div>
+        </form>
+
+        {# Says plainly what linking does today, so nobody reads the link as a
+           balance the platform is quietly holding. No credential column exists
+           in this schema on purpose — see trading/broker_accounts.py. #}
+        <p class="setup-meta mt-3 mb-0">
+          Linking records which account belongs to this client. No broker
+          password is ever stored, and no balance is displayed until a provider
+          is registered and reads it — until then the account reads as
+          <em>not connected</em>.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Setup history</span>
+        <span class="card-header-note">Most recent {{ setups | length }}</span>
+      </div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead>
+            <tr><th>Time (NY)</th><th>Asset</th><th>Dir</th>
+                <th class="text-end">R:R</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {% for s in setups %}
+            <tr class="row-highlight">
+              <td class="mono">{{ s.entry_time_utc | ny }}</td>
+              <td><a class="row-link" href="{{ url_for('client.setup_detail', signal_id=s.id) }}">{{ s.asset }}</a></td>
+              <td>{{ (s.direction or '') | upper }}</td>
+              <td class="text-end mono">{{ s.rr | num(2) }}</td>
+              <td>{{ s.status | status }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="empty-state">
+              No setups recorded yet. This table is shared engine output — the
+              same setups every client sees.
+            </td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

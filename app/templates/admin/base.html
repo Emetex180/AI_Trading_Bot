@@ -1,0 +1,32 @@
+{# Admin area shell.
+
+   Extends the client shell rather than the console's: an operator moving
+   between the two surfaces should not feel they changed products, and the
+   sidebar already carries the clock and the session pills that tell them
+   whether the engine is awake. Only the navigation differs. #}
+{% extends "client/base.html" %}
+
+{% block sidebar_nav %}
+<div>
+  <div class="sidebar-section">Administration</div>
+  <nav class="sidebar-nav">
+    <a class="sidebar-link {{ 'active' if nav == 'admin' }}"
+       href="{{ url_for('admin.index') }}">
+      <span class="sidebar-glyph">A</span> Overview
+    </a>
+    <a class="sidebar-link {{ 'active' if nav == 'admin-clients' }}"
+       href="{{ url_for('admin.clients') }}">
+      <span class="sidebar-glyph">C</span> Clients
+    </a>
+    <a class="sidebar-link {{ 'active' if nav == 'admin-activity' }}"
+       href="{{ url_for('admin.activity') }}">
+      <span class="sidebar-glyph">T</span> Trading activity
+    </a>
+    <a class="sidebar-link {{ 'active' if nav == 'admin-accounts' }}"
+       href="{{ url_for('admin.accounts') }}">
+      <span class="sidebar-glyph">B</span> Broker accounts
+    </a>
+  </nav>
+</div>
+{{ super() }}
+{% endblock %}

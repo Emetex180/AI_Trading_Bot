@@ -1,5 +1,5 @@
 """Database layer tests (in-memory SQLite)."""
-from dataclasses import dataclass, fields as dc_fields
+from dataclasses import dataclass, fields as dc_fields, replace
 from datetime import datetime
 
 import pytest
@@ -8,6 +8,7 @@ from database.repository import Repository
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from config import get_settings
 from trading.signal_engine import Signal
 
 from database import models as m
@@ -299,12 +300,13 @@ def test_the_dashboard_entry_point_migrates_an_existing_database(tmp_path):
     engine = _legacy_engine(tmp_path)
     legacy_url = f"sqlite:///{tmp_path/'legacy.db'}"
 
-    class _Cfg:
-        """Just enough settings for ``create_app`` to open the legacy file."""
+    # Real settings, pointed at the legacy file. A hand-rolled stub used to do
+    # here, but ``create_app`` now also wires authentication, which reads the
+    # session and throttle settings — so the stub has to be the real thing.
+    cfg = replace(get_settings(), db_url=legacy_url,
+                  flask_secret_key="test-secret")
 
-        db_url = legacy_url
-
-    create_app(settings=_Cfg())          # setup_db defaults to True
+    create_app(settings=cfg)             # setup_db defaults to True
     engine.dispose()
 
     from sqlalchemy import create_engine as _create

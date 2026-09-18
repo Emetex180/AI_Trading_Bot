@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · {% block brand %}{{ platform_name | default("ICT Trading Platform") }}{% endblock %}</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='css/app.css') }}" rel="stylesheet">
+  <link href="{{ url_for('static', filename='css/client.css') }}" rel="stylesheet">
+</head>
+<body class="auth-body">
+
+<main class="auth-wrap">
+  {# The sign-in card is the whole page: there is no navigation to offer someone
+     who is not yet authenticated, and every link here would be a dead end. #}
+  <div class="auth-card card">
+    <div class="auth-brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <div class="auth-title">{{ platform_name | default("ICT Trading Platform") }}</div>
+        <div class="auth-sub">New York session analysis</div>
+      </div>
+    </div>
+
+    <div class="card-body">
+      {# `error` is set by app.auth.login_post. Rendered as an alert rather than
+         flashed so it survives the re-render of the same request. #}
+      {% if error %}
+      <div class="alert alert-danger" role="alert">{{ error }}</div>
+      {% endif %}
+
+      <form method="post" action="{{ url_for('auth.login_post') }}" autocomplete="on">
+        {# Carries the page the user was trying to reach. Already validated by
+           _safe_next() in app/auth.py, which rejects absolute and //host forms
+           so this cannot become an open redirect. #}
+        {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+        {# Session-bound CSRF token. Issued on the GET that rendered this form,
+           so a forged cross-site POST cannot carry a matching value. #}
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+
+        <div class="mb-3">
+          <label class="form-label" for="username">Username</label>
+          <input class="form-control" id="username" name="username" type="text"
+                 value="{{ username | default('') }}" required autofocus
+                 autocomplete="username" spellcheck="false">
+        </div>
+
+        <div class="mb-4">
+          <label class="form-label" for="password">Password</label>
+          <input class="form-control" id="password" name="password" type="password"
+                 required autocomplete="current-password">
+        </div>
+
+        <button class="btn btn-primary w-100" type="submit">Sign in</button>
+      </form>
+    </div>
+
+    <div class="auth-foot">
+      {# No public sign-up route exists by design: accounts are created by an
+         administrator. Saying so is more useful than a disabled button. #}
+      Accounts are issued by your administrator.
+    </div>
+  </div>
+
+  <p class="auth-note">
+    All setup times are shown in <span class="mono">America/New_York</span>,
+    daylight-saving aware.
+  </p>
+</main>
+
+</body>
+</html>

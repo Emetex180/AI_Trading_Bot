@@ -1,0 +1,101 @@
+{% extends "client/base.html" %}
+{% from "client/_ui.html" import state_chip, feed_list %}
+{% block title %}Market Analysis{% endblock %}
+{% block poll_config %}<script>window.clientPoll = { kind: "analysis" };</script>{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Market analysis</h1>
+    <p>The engine's own decision log — purges it found, CISDs it confirmed, gaps
+       it formed, and the reason it refused a candidate.</p>
+  </div>
+  <div class="page-actions">
+    <span class="state-chip {{ 'is-confirmed' if status.scanner_active else 'is-idle' }}">
+      {%- if status.scanner_active %}<span class="dot"></span>{% endif -%}
+      {{ status.session_label }}
+    </span>
+  </div>
+</div>
+
+{# This is not generated commentary. Every line below is a row the scanner or
+   the strategy wrote to the event log while it ran. When the engine has been
+   quiet, the feed is empty and says so — the platform does not write prose to
+   fill it. #}
+<div class="notice mb-3">
+  <span>These are the engine's recorded decisions, not a written analysis. Each
+  line is drawn from the event log the scanner and strategy write to as they
+  work, so the feed only shows what actually happened.</span>
+</div>
+
+<div class="row g-3">
+  <div class="col-12 col-xl-7">
+    <div class="card">
+      <div class="card-header">
+        <span>Decision log</span>
+        <span class="card-header-note" id="analysis-count">{{ feed | length }} recent entries</span>
+      </div>
+      <div class="card-body" id="analysis-feed">
+        {{ feed_list(feed, 'No engine activity has been recorded yet. The feed
+        fills as the scanner works through a session.') }}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-xl-5">
+    <div class="card">
+      <div class="card-header">
+        <span>Current model state</span>
+        <span class="card-header-note">One row per enabled asset</span>
+      </div>
+      <div class="table-scroll">
+        <table class="table" id="analysis-states">
+          <thead>
+            <tr><th>Asset</th><th>Buy</th><th>Sell</th></tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+            <tr data-asset="{{ r.name }}"
+                data-buy-state="{{ r.buy.key }}" data-sell-state="{{ r.sell.key }}">
+              <td>
+                <span class="setup-asset">{{ r.name }}</span>
+                {% if r.monitored %}<span class="setup-meta">· monitored</span>{% endif %}
+              </td>
+              <td data-role="buy">{{ state_chip(r.buy) }}</td>
+              <td data-role="sell">{{ state_chip(r.sell) }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3" class="empty-state">
+              No enabled assets in the registry.
+            </td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card mt-3">
+      <div class="card-header"><span>Session windows (New York)</span></div>
+      <div class="card-body">
+        <p class="setup-meta mb-2">
+          The engine only scans inside these windows. They are defined in
+          <span class="mono">America/New_York</span> local time and follow DST, so
+          the UTC hours shift twice a year.
+        </p>
+        <div class="conditions">
+          {% for w in session_windows %}
+          <div class="condition {{ 'met' if w.key == status.session_key else 'unmet' }}">
+            <span class="condition-mark">{{ '✓' if w.key == status.session_key else '·' }}</span>
+            <span>
+              {{ w.label }}
+              <span class="setup-meta mono">{{ w.start_hhmm }}–{{ w.end_hhmm }}</span>
+              {% if w.key == status.session_key %}<span class="setup-meta">← now</span>{% endif %}
+            </span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

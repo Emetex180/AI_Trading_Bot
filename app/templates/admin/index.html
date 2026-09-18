@@ -1,0 +1,188 @@
+{% extends "admin/base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}Admin{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Administration</h1>
+    <p>Clients, engine activity and the configuration the platform is running on.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-primary" href="{{ url_for('admin.clients') }}">Manage clients</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.activity') }}">Trading activity</a>
+  </div>
+</div>
+
+{# Safety state first, deliberately above everything else: whether the bot may
+   place orders is the one fact an operator should never have to go looking for. #}
+{% if auto_trading %}
+<div class="notice mb-3" style="border-color: var(--c-neg)">
+  <span><strong>Automatic trading is ON.</strong> The engine may place orders.
+  This is the master switch, not the alert-only scanner.</span>
+</div>
+{% else %}
+<div class="notice mb-3">
+  <span><strong>Alert only.</strong> The scanner detects and records setups; it
+  does not place orders.</span>
+</div>
+{% endif %}
+
+<div class="stat-grid mb-4">
+  {{ stat('Clients', counts.clients, 'info',
+          counts.clients_active ~ ' active') }}
+  {{ stat('User accounts', counts.users, '', 'clients and admins') }}
+  {{ stat('Setups recorded', counts.setups_total, '',
+          counts.setups_approved ~ ' approved') }}
+  {{ stat('Backtests', counts.backtests, '') }}
+</div>
+
+<div class="row g-3">
+  <div class="col-12 col-xl-7">
+    <div class="card mb-3">
+      <div class="card-header">
+        <span>Engine</span>
+        <span class="card-header-note">
+          {{ 'running' if jobs_status.live_running else 'stopped' }}
+        </span>
+      </div>
+      <div class="card-body">
+        <div class="meta-grid">
+          <div><span class="section-label">Live thread</span>
+            <div class="mono">{{ jobs_status.live.state or '—' }}</div></div>
+          <div><span class="section-label">Active session</span>
+            <div>{{ 'yes' if live.active else 'no' }}</div></div>
+          <div><span class="section-label">Monitored assets</span>
+            <div class="mono">{{ live.assets | length }}</div></div>
+          <div><span class="section-label">Setups this session</span>
+            <div class="mono">{{ live.signals_session }}</div></div>
+          <div><span class="section-label">Last candle (NY)</span>
+            <div class="mono">{{ (live.last_candle_utc | ny) or '—' }}</div></div>
+          <div><span class="section-label">Next window (NY)</span>
+            <div class="mono">{{ (live.next_open_utc | ny) or '—' }}</div></div>
+        </div>
+        {% if live.activity %}
+        <p class="setup-meta mt-3 mb-0">{{ live.activity }}</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Recent system events</span>
+        <span class="card-header-note">Newest first</span>
+      </div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead><tr><th>Time (NY)</th><th>Level</th><th>Source</th><th>Message</th></tr></thead>
+          <tbody>
+            {% for e in recent_events %}
+            <tr>
+              <td class="mono">{{ e.event_time_utc | ny }}</td>
+              <td><span class="badge tone-{{ 'danger' if e.level == 'ERROR' else ('warning' if e.level == 'WARN' else 'secondary') }}">{{ e.level }}</span></td>
+              <td class="setup-meta">{{ e.source }}</td>
+              <td>{{ e.message }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" class="empty-state">No events recorded yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-xl-5">
+    <div class="card mb-3">
+      <div class="card-header">
+        <span>Scanner account</span>
+        <span class="card-header-note">
+          {{ 'as of ' ~ (account.fetched_at_utc | ny) if account.fetched_at_utc else 'not read yet' }}
+        </span>
+      </div>
+      <div class="card-body">
+        <div class="stat-grid">
+          {{ stat('Balance', account.balance | money, 'info', account.currency or '') }}
+          {{ stat('Equity', account.equity | money, '', account.currency or '') }}
+          {{ stat('Free margin', account.margin_free | money, '', account.currency or '') }}
+        </div>
+        <p class="setup-meta mt-3 mb-0">
+          {% if account.login %}
+            {{ account.name or 'Account' }} · {{ account.login }}
+            {%- if account.server %} · {{ account.server }}{% endif %}
+          {% else %}
+            The terminal has not been read. A balance is never shown until the
+            engine has actually read one.
+          {% endif %}
+        </p>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header"><span>Integrations</span></div>
+      <div class="card-body">
+        <div class="conditions">
+          <div class="condition {{ 'met' if telegram.configured else 'unmet' }}">
+            <span class="condition-mark">{{ '✓' if telegram.configured else '·' }}</span>
+            <span>Telegram notifications
+              <span class="setup-meta">
+                {%- if not telegram.enabled -%}
+                  disabled by configuration
+                {%- elif telegram.configured -%}
+                  enabled and configured
+                {%- else -%}
+                  enabled but no token/chat id set
+                {%- endif -%}
+              </span>
+            </span>
+          </div>
+          {% for name in integrations.configured %}
+          <div class="condition {{ 'met' if name in integrations.available else 'unmet' }}">
+            <span class="condition-mark">{{ '✓' if name in integrations.available else '·' }}</span>
+            <span>Broker provider <span class="mono">{{ name }}</span>
+              <span class="setup-meta">
+                {{ 'available' if name in integrations.available else 'registered but unavailable' }}
+              </span>
+            </span>
+          </div>
+          {% else %}
+          <div class="condition unmet">
+            <span class="condition-mark">·</span>
+            <span>No broker provider is registered
+              <span class="setup-meta">client balances show as not connected</span>
+            </span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Broker links</span>
+        <a class="card-header-note" href="{{ url_for('admin.accounts') }}">All accounts</a>
+      </div>
+      <div class="card-body">
+        {% if broker_links %}
+        <div class="conditions">
+          {% for b in broker_links %}
+          <div class="condition {{ 'met' if b.connected else 'unmet' }}">
+            <span class="condition-mark">{{ '✓' if b.connected else '·' }}</span>
+            <span><span class="mono">{{ b.login }}</span>
+              <span class="setup-meta">
+                {{ b.provider }}{% if b.server %} · {{ b.server }}{% endif %} ·
+                {% if b.connected %}read {{ b.read_at_ny }} NY
+                {%- else %}not connected{% endif %}
+              </span>
+            </span>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty-state mb-0">No broker accounts are linked.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

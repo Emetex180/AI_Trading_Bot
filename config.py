@@ -43,6 +43,19 @@ def _env_str(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 
+def _env_str_or(key: str, default: str) -> str:
+    """A string setting where a *blank* value means "use the default".
+
+    Distinct from :func:`_env_str`, where blank is a legitimate value: an empty
+    ``MT5_LOGIN`` genuinely means "use the account the terminal already has", and
+    an empty ``FLASK_SECRET_KEY`` means "generate a temporary one". For a setting
+    like ``DATABASE_URL`` blank is never a real choice — it is what an operator
+    gets by uncommenting a line in a copied ``.env`` without filling it in — and
+    letting that through would replace the working default with an empty string.
+    """
+    return (os.getenv(key) or "").strip() or default
+
+
 def _env_bool(key: str, default: bool = False) -> bool:
     raw = os.getenv(key)
     if raw is None:
@@ -249,6 +262,37 @@ class Settings:
     # ones above; every construction site uses keywords, so position is free.
     auto_trading_override: bool | None = None
 
+    # --- Web platform: sessions and accounts ----------------------------------
+    # Everything below is defaulted for the same reason as ``auto_trading_override``
+    # above, and so that tests constructing a Settings via ``dataclasses.replace``
+    # keep working without naming any of it.
+    #
+    #: Signs the Flask session cookie. **Required in production.** When blank the
+    #: app generates a temporary key at startup and warns: sessions then reset on
+    #: every restart, which is logged-out-but-not-insecure. Blank is never
+    #: silently accepted in place of a real key on a client-facing deployment.
+    flask_secret_key: str = ""
+    #: Set ``SESSION_COOKIE_SECURE=true`` in production. Left False by default so
+    #: a plain-HTTP localhost run can still log in — a Secure cookie is never sent
+    #: over http, so a local run would be unable to authenticate at all.
+    session_cookie_secure: bool = False
+    session_lifetime_hours: int = 12
+    #: Trust ``X-Forwarded-*`` from the reverse proxy (IIS/ARR). Must stay False
+    #: when the app is reached directly, or a client could forge its own scheme
+    #: and host through those headers.
+    trust_proxy: bool = False
+    #: First-run admin, created only while the users table is empty.
+    bootstrap_admin_username: str = ""
+    bootstrap_admin_password: str = ""
+    bootstrap_admin_email: str = ""
+    #: Login throttle: failed attempts per username+address before a cooldown.
+    login_max_attempts: int = 5
+    login_lockout_minutes: int = 15
+    #: Enforced wherever a password is set (CLI, admin console).
+    min_password_length: int = 12
+    #: Waitress worker threads for ``run.py serve``.
+    serve_threads: int = 8
+
     @property
     def effective_auto_trading(self) -> bool:
         """The value every gate, log line and badge must read.
@@ -315,7 +359,7 @@ def _build_settings() -> Settings:
         flask_host=_env_str("FLASK_HOST", "127.0.0.1"),
         flask_port=_env_int("FLASK_PORT", 5000),
         flask_debug=_env_bool("FLASK_DEBUG"),
-        db_url=_env_str("DATABASE_URL", f"sqlite:///{DATA_DIR / 'trading.db'}"),
+        db_url=_env_str_or("DATABASE_URL", f"sqlite:///{DATA_DIR / 'trading.db'}"),
         llm_timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 20.0),
         telegram_timeout_seconds=_env_float("TELEGRAM_TIMEOUT_SECONDS", 10.0),
         asset_env={k: v for k, v in os.environ.items() if k.startswith("ASSET_")},
@@ -346,6 +390,18 @@ def _build_settings() -> Settings:
         efficiency_weight_rr=_env_float("EFFICIENCY_WEIGHT_RR", 0.5),
         efficiency_weight_liquidity=_env_float("EFFICIENCY_WEIGHT_LIQUIDITY", 0.3),
         efficiency_weight_distance=_env_float("EFFICIENCY_WEIGHT_DISTANCE", 0.2),
+        # --- Web platform -------------------------------------------------- #
+        flask_secret_key=_env_str("FLASK_SECRET_KEY"),
+        session_cookie_secure=_env_bool("SESSION_COOKIE_SECURE", default=False),
+        session_lifetime_hours=_env_int("SESSION_LIFETIME_HOURS", 12),
+        trust_proxy=_env_bool("TRUST_PROXY", default=False),
+        bootstrap_admin_username=_env_str("ADMIN_USERNAME"),
+        bootstrap_admin_password=_env_str("ADMIN_PASSWORD"),
+        bootstrap_admin_email=_env_str("ADMIN_EMAIL"),
+        login_max_attempts=_env_int("LOGIN_MAX_ATTEMPTS", 5),
+        login_lockout_minutes=_env_int("LOGIN_LOCKOUT_MINUTES", 15),
+        min_password_length=_env_int("MIN_PASSWORD_LENGTH", 12),
+        serve_threads=_env_int("SERVE_THREADS", 8),
     )
 
 

@@ -1,0 +1,117 @@
+{% extends "client/base.html" %}
+{% from "client/_ui.html" import state_chip %}
+{% block title %}Live Market{% endblock %}
+{% block poll_config %}<script>window.clientPoll = { kind: "market" };</script>{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Live market</h1>
+    <p>Every asset in the scanner's registry, with the state its setup model is
+       currently in.</p>
+  </div>
+  <div class="page-actions">
+    <span class="state-chip {{ 'is-confirmed' if status.scanner_active else 'is-idle' }}">
+      {%- if status.scanner_active %}<span class="dot"></span>{% endif -%}
+      {{ status.session_label }}
+    </span>
+  </div>
+</div>
+
+{% if not status.scanner_running %}
+<div class="notice mb-3">
+  <span><strong>The scanner is not running.</strong> Prices are blank and every
+  setup model is shown as watching, because there is no engine to report from.</span>
+</div>
+{% elif not status.scanner_active %}
+<div class="notice mb-3">
+  <span><strong>Outside a tradeable session.</strong> The scanner is up but not
+  polling{% if status.next_open_ny %}; the next window opens at
+  {{ status.next_open_ny }} NY{% endif %}.</span>
+</div>
+{% endif %}
+
+{# The legend is built from the states actually on the page rather than from the
+   full vocabulary, so it explains what the reader is looking at and nothing
+   else. Labels and explanations come from the same table the chips do. #}
+{% set seen = {} %}
+{% for r in rows %}
+  {% set _ = seen.update({r.buy.key: r.buy}) %}
+  {% set _ = seen.update({r.sell.key: r.sell}) %}
+{% endfor %}
+
+<div class="card mb-3">
+  <div class="card-header">
+    <span>Monitored assets</span>
+    <span class="card-header-note">
+      {{ status.monitored_assets | length }} in the running session · {{ rows | length }} registered
+    </span>
+  </div>
+  <div class="table-scroll">
+    <table class="table" id="market-table">
+      <thead>
+        <tr>
+          <th>Asset</th>
+          <th>Symbol</th>
+          <th class="text-end">Price</th>
+          <th>Updated (NY)</th>
+          <th>Buy model</th>
+          <th>Sell model</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr class="{{ 'row-highlight' if r.is_active_setup }} {{ '' if r.enabled else 'text-muted' }}"
+            data-asset="{{ r.name }}"
+            data-buy-state="{{ r.buy.key }}"
+            data-sell-state="{{ r.sell.key }}">
+          <td>
+            <span class="setup-asset">{{ r.name }}</span>
+            {% if not r.enabled %}<span class="setup-meta">disabled</span>{% endif %}
+            {% if r.monitored %}<span class="setup-meta">· monitored</span>{% endif %}
+          </td>
+          <td class="mono setup-meta">{{ r.symbol or '—' }}</td>
+          {# An unread price is an em dash. It is never rendered as 0.0000, which
+             would read as a real quote of zero. #}
+          <td class="text-end mono" data-role="price">
+            {{ (r.price | price(r.name)) or '—' }}
+          </td>
+          <td class="setup-meta mono" data-role="price-time">{{ r.price_time_ny or '—' }}</td>
+          <td data-role="buy">{{ state_chip(r.buy) }}</td>
+          <td data-role="sell">{{ state_chip(r.sell) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty-state">
+          No assets are registered. Add one from the operator console.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if seen %}
+<div class="card">
+  <div class="card-header"><span>What these states mean</span></div>
+  <div class="card-body">
+    <div class="conditions">
+      {% for key, info in seen.items() %}
+      <div class="condition {{ 'met' if info.tone in ('is-confirmed', 'is-ready') else ('unmet' if info.tone == 'is-idle' else '') }}">
+        <span class="condition-mark">·</span>
+        <span>
+          <strong>{{ info.label }}</strong>
+          {% if info.note %}<span class="setup-meta">{{ info.note }}</span>{% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="setup-meta mt-3 mb-0">
+      A state describes where one asset sits in the model. Only a setup that
+      reaches <strong>Trade confirmed</strong> and clears the risk gate is
+      recorded — intermediate states exist only while the engine is running, and
+      the analysis page keeps the decision log behind them.
+    </p>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

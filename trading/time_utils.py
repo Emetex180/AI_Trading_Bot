@@ -306,6 +306,24 @@ def ny_offset_label(utc_dt: datetime | None = None) -> str:
     return f"{name} ({sign}{hh:02d}:{mm:02d})"
 
 
+def ny_zone_abbr(utc_dt: datetime | None = None) -> str:
+    """``EDT`` / ``EST`` at a UTC instant, read from the zone database.
+
+    A separate function from :func:`ny_offset_label` because the abbreviation is
+    what a rendered time needs next to it, without the offset arithmetic.
+
+    It cannot be had from ``utc_to_ny(...).strftime("%Z")``: that returns a
+    *naive* NY wall clock (every stored timestamp in this project is naive, so
+    nothing downstream has to think about tzinfo), and ``%Z`` on a naive
+    datetime is the empty string on every platform. The abbreviation has to be
+    taken from the aware value, before the tzinfo is dropped.
+    """
+    if NY_TZ is None:  # pragma: no cover - no tz database on this host
+        return ""
+    instant = utc_dt if utc_dt is not None else now_utc()
+    return instant.replace(tzinfo=_UTC).astimezone(NY_TZ).tzname() or ""
+
+
 # --------------------------------------------------------------------------- #
 # Debug: the MT5 -> UTC -> New York -> session chain
 # --------------------------------------------------------------------------- #

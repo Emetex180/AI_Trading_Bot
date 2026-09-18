@@ -1,0 +1,135 @@
+{# Client-platform components.
+
+   Imported explicitly per page (Jinja does not expose a parent template's
+   macros inside a child's `{% block %}`):
+     {% from "client/_ui.html" import state_chip, setup_card, conditions, feed_list, level %}
+
+   Everything here renders a value that a view model in app/client.py already
+   decided. The macros do no arithmetic and invent no fallback number: an
+   unread price prints an em dash, and a condition with no recorded value shows
+   an empty detail rather than a zero. The one thing they must never do is
+   turn "the engine has not said yet" into something that looks like a fact. #}
+
+{% from "_macros.html" import dir_badge, status_badge %}
+
+{# The 8 strategy states, painted from app/client.py's STATE_INFO. `label`
+   overrides the state's own wording for the narrow table columns. #}
+{% macro state_chip(info, label=None) -%}
+  <span class="state-chip {{ info.tone }}" title="{{ info.note }}">
+    {%- if info.tone in ('is-working', 'is-ready') %}<span class="dot"></span>{% endif -%}
+    {{ label or info.label }}
+  </span>
+{%- endmacro %}
+
+{# One of entry / stop / target in a setup card's three-up header. #}
+{% macro level(label, value, asset, cls='') -%}
+  <div class="setup-level {{ cls }}">
+    <div class="setup-level-label">{{ label }}</div>
+    <div class="setup-level-value">{{ (value | price(asset)) or '—' }}</div>
+  </div>
+{%- endmacro %}
+
+{# The model conditions this setup cleared, each with the value that records it.
+
+   Read from the setup's own columns, not inferred from its final status, so a
+   REJECTED setup still shows the steps it did pass and the reason it failed is
+   stated separately. #}
+{% macro conditions(items, compact=False) -%}
+  <ul class="conditions">
+    {% for c in items %}
+    <li class="condition {{ 'met' if c.met else 'unmet' }}">
+      <span class="condition-mark" aria-hidden="true">{{ '✓' if c.met else '·' }}</span>
+      <span>
+        {{ c.label }}
+        {%- if c.detail and not compact %}
+        <span class="setup-meta mono">{{ c.detail }}</span>
+        {%- endif %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+{%- endmacro %}
+
+{# A confirmed setup. `s` is app/client.py:setup_card()'s dict, which is also
+   what /api/client/setups returns — the poller and this render agree by
+   construction. #}
+{% macro setup_card(s, show_conditions=True) -%}
+  <article class="setup-card {{ 'dir-buy' if s.is_buy else 'dir-sell' }}"
+           data-signal-id="{{ s.id }}" data-asset="{{ s.asset }}">
+    <header class="setup-head">
+      <div>
+        <div class="setup-asset">{{ s.asset }}</div>
+        <div class="setup-meta">
+          {{- s.session_label -}}
+          {%- if s.silver_bullet %} · {{ s.silver_bullet }}{% endif -%}
+          {%- if s.macro %} · {{ s.macro }}{% endif -%}
+        </div>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        {{ dir_badge(s.direction) }}
+        {{ status_badge(s.status) }}
+      </div>
+    </header>
+
+    <div class="setup-levels">
+      {{ level('Entry', s.entry, s.asset) }}
+      {{ level('Stop', s.sl, s.asset) }}
+      {{ level('Target', s.tp, s.asset) }}
+    </div>
+
+    <div class="setup-body">
+      <div class="meter-row">
+        <span>Risk / reward <strong class="mono">{{ s.rr_label }}</strong></span>
+        <span>{{ s.entry_time_ny }} NY</span>
+      </div>
+
+      {% if s.efficiency_score is not none %}
+      <div>
+        <div class="meter-row">
+          <span>Setup efficiency</span>
+          <span class="mono">{{ s.efficiency_score | num(0) }}</span>
+        </div>
+        <div class="meter">
+          <div class="meter-fill" style="width: {{ [[s.efficiency_score, 0] | max, 100] | min }}%"></div>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if show_conditions %}
+      <div>
+        <div class="meter-row"><span>Conditions cleared</span>
+          <span class="mono">{{ s.conditions_met }}/{{ s.conditions_total }}</span></div>
+        {{ conditions(s.conditions, compact=True) }}
+      </div>
+      {% endif %}
+
+      {% if s.reason and not s.risk_approved %}
+      <div class="notice"><span><strong>Not taken.</strong> {{ s.reason }}</span></div>
+      {% endif %}
+    </div>
+
+    <footer class="setup-foot">
+      <span class="setup-meta">{{ s.state_info.label }}</span>
+      <a class="btn btn-sm btn-outline-secondary" href="{{ s.url }}">Details</a>
+    </footer>
+  </article>
+{%- endmacro %}
+
+{# The engine's own decision log, newest first. Every line is a `system_events`
+   row the scanner or strategy wrote — this is the engine narrating itself, and
+   nothing on this platform generates commentary to fill the space. #}
+{% macro feed_list(items, empty_message='No engine activity recorded yet.') -%}
+  {% if items %}
+  <ul class="feed">
+    {% for e in items %}
+    <li class="feed-item">
+      <span class="feed-time">{{ e.date_ny }} {{ e.time_short }}</span>
+      <span class="feed-source">{{ e.source_label }}</span>
+      <span class="feed-text">{{ e.message }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty-state">{{ empty_message }}</p>
+  {% endif %}
+{%- endmacro %}

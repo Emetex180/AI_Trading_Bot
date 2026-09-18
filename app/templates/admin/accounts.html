@@ -1,0 +1,134 @@
+{% extends "admin/base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}Broker accounts{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Broker accounts</h1>
+    <p>Every broker link on the platform, and whatever a provider has actually
+       read from it.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.clients') }}">Clients</a>
+  </div>
+</div>
+
+{# The honesty rule this page is built on, stated before the table rather than
+   buried under it: a link with no reading is "not connected", and a reading the
+   broker left blank is an em dash. Neither is ever a zero, which would read as
+   a real balance of nothing. #}
+<div class="notice mb-3">
+  <span>
+    <strong>No broker integration is configured.</strong>
+    {%- if integrations.configured %}
+      Registered providers: {{ integrations.configured | join(', ') }} —
+      {%- if integrations.available %}
+        available: {{ integrations.available | join(', ') }}.
+      {%- else %}
+        none of them report as available.
+      {%- endif %}
+    {%- else %}
+      Until one is registered, no account balance can be read and every link
+      below shows <em>not connected</em>. That is a statement about the platform,
+      not about the client's money.
+    {%- endif %}
+    The engine's own scanner account is shown separately at the bottom — it is
+    the platform's account, not a client's.
+  </span>
+</div>
+
+<div class="stat-grid mb-4">
+  {{ stat('Broker links', links | length, 'info') }}
+  {{ stat('Connected', links | selectattr('connected') | list | length,
+          'success', 'a provider has read them') }}
+  {{ stat('Not connected',
+          (links | rejectattr('connected') | list | length),
+          '', 'no reading on record') }}
+  {{ stat('Providers available', integrations.available | length, '',
+          (integrations.available | join(', ')) or 'none registered') }}
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">
+    <span>Client broker links</span>
+    <span class="card-header-note">Newest first</span>
+  </div>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Client</th><th>Login</th><th>Server</th><th>Provider</th>
+          <th class="text-end">Balance</th><th class="text-end">Equity</th>
+          <th class="text-end">Free margin</th><th>Last read (NY)</th>
+          <th>Source</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in links %}
+        <tr class="row-highlight">
+          <td><a class="row-link" href="{{ url_for('admin.client_detail', user_id=b.user_id) }}">{{ b.username }}</a></td>
+          <td class="mono">{{ b.login }}</td>
+          <td class="setup-meta">{{ b.server or '—' }}</td>
+          <td>
+            {{ b.provider }}
+            {% if not b.provider_available %}<span class="setup-meta">unavailable</span>{% endif %}
+          </td>
+          {% if b.connected %}
+          <td class="text-end mono">{{ b.balance | money }} <span class="setup-meta">{{ b.currency or '' }}</span></td>
+          <td class="text-end mono">{{ b.equity | money }}</td>
+          <td class="text-end mono">{{ b.margin_free | money }}</td>
+          <td class="mono setup-meta">{{ b.read_at_ny or '—' }}</td>
+          <td class="setup-meta">{{ b.source or '—' }}</td>
+          {% else %}
+          {# One cell spanning the figures, so the row cannot be misread as a
+             row of zeros. #}
+          <td colspan="5" class="setup-meta">
+            Not connected — no provider has read this account.
+          </td>
+          {% endif %}
+          <td>
+            <form method="post" action="{{ url_for('admin.refresh_broker_account', account_id=b.id) }}">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <button class="btn btn-sm btn-outline-secondary" type="submit"
+                      {{ 'disabled' if not b.provider_available }}>Read</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="10" class="empty-state">
+          No client has a broker account linked. Links are added from a client's
+          page.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span>Scanner account</span>
+    <span class="card-header-note">
+      the platform's own terminal, not a client's
+    </span>
+  </div>
+  <div class="card-body">
+    <div class="stat-grid">
+      {{ stat('Balance', operator.balance | money, 'info', operator.currency or '') }}
+      {{ stat('Equity', operator.equity | money, '', operator.currency or '') }}
+      {{ stat('Free margin', operator.margin_free | money, '', operator.currency or '') }}
+    </div>
+    <p class="setup-meta mt-3 mb-0">
+      {%- if operator.fetched_at_utc -%}
+        Read {{ operator.fetched_at_utc | ny }} NY
+        {%- if operator.login %} · {{ operator.login }}{% endif -%}
+        {%- if operator.server %} · {{ operator.server }}{% endif -%}
+      {%- else -%}
+        The terminal has not been read. This is the account the scanner runs
+        against; it is never shown to a client.
+      {%- endif -%}
+    </p>
+  </div>
+</div>
+{% endblock %}

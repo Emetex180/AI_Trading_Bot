@@ -1,0 +1,183 @@
+{% extends "client/base.html" %}
+{% from "_macros.html" import dir_badge, status_badge %}
+{% from "client/_ui.html" import conditions, level %}
+{% block title %}{{ s.asset }} {{ s.direction }}{% endblock %}
+
+{% block content %}
+{# Where the setup got to. STATE_SEQUENCE is the model's own order; the rank map
+   folds "waiting for FVG retracement" onto the FVG step, because it is a
+   position within that step rather than a step of its own. An unrecognised or
+   invalidated state ranks below the first step, so nothing is marked reached. #}
+{% set rank_map = {'NO_SETUP': 0, 'LIQUIDITY_PURGED': 1, 'CISD_CONFIRMED': 2,
+                   'FVG_FOUND': 3, 'WAITING_FOR_FVG_RETRACE': 3,
+                   'RETRACE_CONFIRMED': 4, 'TRADE_CONFIRMED': 5} %}
+{% set reached = rank_map.get(s.state, -1) %}
+
+<div class="client-hero">
+  <div>
+    <h1>{{ s.asset }} <span class="setup-meta">{{ s.direction }}</span></h1>
+    <p>
+      {{ s.session_label }} session · {{ s.entry_time_ny }} NY
+      {%- if s.silver_bullet %} · {{ s.silver_bullet }}{% endif -%}
+      {%- if s.macro %} · {{ s.macro }}{% endif %}
+    </p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.setups') }}">Back to setups</a>
+  </div>
+</div>
+
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  {{ dir_badge(s.direction) }}
+  {{ status_badge(s.status) }}
+  <span class="state-chip {{ s.state_info.tone }}">
+    {%- if s.state_info.tone in ('is-working', 'is-ready') %}<span class="dot"></span>{% endif -%}
+    {{ s.state_info.label }}
+  </span>
+  <span class="setup-meta">{{ s.state_info.note }}</span>
+</div>
+
+{% if s.reason and not s.risk_approved %}
+<div class="notice mb-3">
+  <span><strong>Not taken:</strong> {{ s.reason }}</span>
+</div>
+{% endif %}
+
+<div class="card mb-3">
+  <div class="card-header">
+    <span>Levels</span>
+    <span class="card-header-note">Risk / reward {{ s.rr_label }}</span>
+  </div>
+  <div class="setup-levels">
+    {{ level('Entry', s.entry, s.asset) }}
+    {{ level('Stop loss', s.sl, s.asset) }}
+    {{ level('Target', s.tp, s.asset) }}
+    {{ level('Risk / reward', s.rr, s.asset, 'rr') }}
+  </div>
+  <div class="card-body">
+    <div class="meta-grid">
+      <div><span class="section-label">Risk</span>
+        <div class="mono">{{ (s.risk_points | price(s.asset)) or '—' }}</div></div>
+      <div><span class="section-label">Reward</span>
+        <div class="mono">{{ (s.reward_points | price(s.asset)) or '—' }}</div></div>
+      <div><span class="section-label">Price precision</span>
+        <div class="mono">{{ s.digits }}</div></div>
+      <div><span class="section-label">Risk gate</span>
+        <div>{{ 'Approved' if s.risk_approved else 'Not cleared' }}</div></div>
+      {% if s.efficiency_score is not none %}
+      <div><span class="section-label">Efficiency</span>
+        <div class="mono">{{ s.efficiency_score | num(1) }}</div></div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header"><span>Model progress</span></div>
+  <div class="card-body">
+    <ul class="conditions">
+      {% for step in sequence %}
+      {% set i = loop.index0 %}
+      <li class="condition {{ 'met' if i <= reached else 'unmet' }}">
+        <span class="condition-mark">{{ '✓' if i <= reached else ('›' if i == reached + 1 else '·') }}</span>
+        <span>
+          {{ step.label }}
+          <span class="setup-meta">{{ step.note }}</span>
+        </span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">
+    <span>Conditions the engine recorded</span>
+    <span class="card-header-note">{{ s.conditions_met }} of {{ s.conditions_total }} cleared</span>
+  </div>
+  <div class="card-body">
+    {# Read from the setup's own columns rather than inferred from its final
+       status, so this list is evidence of what the model actually found. #}
+    {{ conditions(s.conditions) }}
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">
+    <span>Model record</span>
+    <span class="card-header-note">Raw column values, New York time</span>
+  </div>
+  <div class="table-scroll">
+    <table class="table kv-table">
+      <tbody>
+        <tr><th>State</th><td class="mono">{{ s.state or '—' }}</td></tr>
+        <tr><th>Liquidity taken</th>
+            <td>{{ raw.liquidity_type or '—' }}
+              {%- if raw.purge_grade %} (grade {{ raw.purge_grade }}){% endif %}</td></tr>
+        <tr><th>Purge time (NY)</th>
+            <td class="mono">{{ (raw.purge_time_ny | ny) or '—' }}</td></tr>
+        <tr><th>CISD timeframe</th><td class="mono">{{ raw.cisd_tf or '—' }}</td></tr>
+        <tr><th>CISD confirmed (NY)</th>
+            <td class="mono">{{ (raw.cisd_confirm_time_ny | ny) or '—' }}</td></tr>
+        <tr><th>FVG direction</th><td>{{ raw.fvg_direction or '—' }}</td></tr>
+        <tr><th>FVG bounds</th>
+            <td class="mono">
+              {%- if raw.fvg_lower is not none and raw.fvg_upper is not none -%}
+                {{ raw.fvg_lower | price(s.asset) }} – {{ raw.fvg_upper | price(s.asset) }}
+              {%- else -%}—{%- endif -%}
+            </td></tr>
+        <tr><th>Structure anchor</th>
+            <td class="mono">{{ (raw.structure_extreme_price | price(s.asset)) or '—' }}
+              {%- if raw.structure_time_ny %}
+              <span class="setup-meta">· {{ raw.structure_time_ny | ny }} NY</span>
+              {%- endif %}</td></tr>
+        <tr><th>Target liquidity</th>
+            <td>{{ raw.target_kind or '—' }}
+              {%- if raw.target_grade %} (grade {{ raw.target_grade }}){% endif %}
+              {%- if raw.target_price is not none %}
+              <span class="mono">at {{ raw.target_price | price(s.asset) }}</span>
+              {%- endif %}</td></tr>
+        <tr><th>Sessions</th>
+            <td>{{ s.session_keys | join(', ') or s.session_label or '—' }}</td></tr>
+        <tr><th>Recorded</th>
+            <td class="mono">{{ s.created_at | ny }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# AI advisory. This section renders only what the record contains. When the
+   advisory is not enabled or did not run, it says so rather than printing a
+   score or a paragraph of prose the engine never produced. #}
+<div class="card">
+  <div class="card-header">
+    <span>Advisory review</span>
+    {% if s.ai_status %}<span class="badge tone-info">{{ s.ai_status }}</span>{% endif %}
+  </div>
+  <div class="card-body">
+    {% if s.ai_status %}
+      <div class="d-flex flex-wrap align-items-center gap-3 mb-2">
+        {% if s.ai_decision %}<span class="badge tone-secondary">{{ s.ai_decision }}</span>{% endif %}
+        {% if s.ai_score is not none %}
+        <span class="setup-meta mono">score {{ s.ai_score | num(1) }}/100</span>{% endif %}
+        {% if s.ai_confidence is not none %}
+        <span class="setup-meta mono">confidence {{ s.ai_confidence | num(0) }}%</span>{% endif %}
+      </div>
+      {% if s.ai_reasoning %}<p>{{ s.ai_reasoning }}</p>{% endif %}
+      {% if s.ai_strengths %}
+      <div class="setup-meta text-pos">Strengths: {{ s.ai_strengths | join(' · ') }}</div>
+      {% endif %}
+      {% if s.ai_risks %}
+      <div class="setup-meta text-neg">Risks: {{ s.ai_risks | join(' · ') }}</div>
+      {% endif %}
+    {% else %}
+      <p class="empty-state mb-0">
+        No advisory review is recorded for this setup. This section shows the
+        model's output when the advisory step is enabled and runs; it is not a
+        summary written by the platform, so it stays empty rather than being
+        filled with commentary.
+      </p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

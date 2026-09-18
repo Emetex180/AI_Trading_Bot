@@ -1,0 +1,63 @@
+{% extends "client/base.html" %}
+{% from "_macros.html" import stat %}
+{% from "client/_ui.html" import setup_card %}
+{% block title %}Setups{% endblock %}
+{% block poll_config %}<script>window.clientPoll = { kind: "setups" };</script>{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Active setups</h1>
+    <p>Setups the engine confirmed and the risk manager approved. Each one shows
+       the conditions it cleared and the levels it would be traded from.</p>
+  </div>
+  <div class="page-actions">
+    <span class="state-chip {{ 'is-confirmed' if status.scanner_active else 'is-idle' }}">
+      {%- if status.scanner_active %}<span class="dot"></span>{% endif -%}
+      {{ status.session_label }}
+    </span>
+  </div>
+</div>
+
+{% if not status.session_accepts_entries %}
+<div class="notice mb-3">
+  <span><strong>No session is accepting entries right now.</strong>
+  {%- if status.next_open_ny %} The next window opens at
+  {{ status.next_open_ny }} NY.{% endif %}
+  These setups remain on record; nothing new will be added until then.</span>
+</div>
+{% endif %}
+
+<div class="stat-grid mb-4">
+  {{ stat('Open setups', setups | length, 'success', 'confirmed and approved',
+          id='setups-count') }}
+  {{ stat('Session', status.session_label, '',
+          (status.session_window ~ ' NY') if status.session_window else 'outside all windows') }}
+  {{ stat('Assets watched', status.monitored_assets | length, 'info',
+          'in the running session') }}
+</div>
+
+<div id="setups-new-notice"></div>
+
+{% if setups %}
+<div class="setup-grid" id="setups-grid">
+  {% for s in setups %}{{ setup_card(s) }}{% endfor %}
+</div>
+{% else %}
+<div class="card">
+  <div class="card-body">
+    <p class="empty-state mb-0">
+      No confirmed setup is open.
+      {%- if status.scanner_active %}
+      The engine is monitoring {{ status.monitored_assets | length }} asset(s)
+      and will record one when the full sequence completes and the risk gate
+      passes.
+      {%- else %}
+      The scanner is not in an active session, so no new setups are being
+      produced.
+      {%- endif %}
+    </p>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

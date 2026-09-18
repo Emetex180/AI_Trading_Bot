@@ -1,0 +1,136 @@
+{% extends "admin/base.html" %}
+{% block title %}Clients{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Clients</h1>
+    <p>Accounts are created here. There is no public sign-up — an account exists
+       only because an admin made it.</p>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">
+    <span>Create an account</span>
+    <span class="card-header-note">Minimum password length: {{ min_password }}</span>
+  </div>
+  <div class="card-body">
+    {# Every mutation in this area is POST + CSRF-checked. The token comes from
+       the session (app.auth.csrf_token) and is compared in constant time. #}
+    <form method="post" action="{{ url_for('admin.create_client') }}" class="row g-3">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+
+      <div class="col-12 col-md-4">
+        <label class="form-label" for="n-username">Username</label>
+        <input class="form-control" id="n-username" name="username" required
+               autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="col-12 col-md-4">
+        <label class="form-label" for="n-display">Display name</label>
+        <input class="form-control" id="n-display" name="display_name"
+               autocomplete="off">
+      </div>
+
+      <div class="col-12 col-md-4">
+        <label class="form-label" for="n-email">Email</label>
+        <input class="form-control" id="n-email" name="email" type="email"
+               autocomplete="off">
+      </div>
+
+      <div class="col-12 col-md-4">
+        <label class="form-label" for="n-password">Password</label>
+        <input class="form-control" id="n-password" name="password" type="password"
+               required minlength="{{ min_password }}" autocomplete="new-password">
+        <div class="form-hint">Stored as a hash; never in plain text.</div>
+      </div>
+
+      <div class="col-12 col-md-4">
+        <label class="form-label" for="n-role">Role</label>
+        <select class="form-select" id="n-role" name="role">
+          <option value="client" selected>Client</option>
+          <option value="admin">Admin</option>
+        </select>
+        <div class="form-hint">Admins can reach the console and this area.</div>
+      </div>
+
+      <div class="col-12 col-md-4">
+        <label class="form-label" for="n-plan">Plan (clients)</label>
+        <input class="form-control" id="n-plan" name="subscription_plan"
+               placeholder="e.g. monthly" autocomplete="off">
+      </div>
+
+      <div class="col-12">
+        <button class="btn btn-primary" type="submit">Create account</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">
+    <span>Clients</span>
+    <span class="card-header-note">{{ clients | length }} account{{ '' if clients | length == 1 else 's' }}</span>
+  </div>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Username</th><th>Name</th><th>Email</th><th>Status</th>
+          <th>Subscription</th><th>Last sign-in (NY)</th><th>Created (NY)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in clients %}
+        <tr class="row-highlight">
+          <td><a class="row-link" href="{{ url_for('admin.client_detail', user_id=c.id) }}">{{ c.username }}</a></td>
+          <td>{{ c.display_name }}</td>
+          <td class="setup-meta">{{ c.email or '—' }}</td>
+          <td>
+            <span class="badge tone-{{ 'success' if c.is_active else 'danger' }}">{{ c.status }}</span>
+          </td>
+          <td>
+            {{ c.subscription_status }}
+            {%- if c.subscription_expires_ny %}
+            <span class="setup-meta">to {{ c.subscription_expires_ny }}</span>
+            {%- endif %}
+          </td>
+          <td class="mono">{{ c.last_login_ny or 'never' }}</td>
+          <td class="mono">{{ c.created_at_ny }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty-state">No client accounts yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span>Administrators</span>
+    <span class="card-header-note">{{ admins | length }}</span>
+  </div>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr><th>Username</th><th>Name</th><th>Status</th><th>Created (NY)</th><th>Created by</th></tr>
+      </thead>
+      <tbody>
+        {% for a in admins %}
+        <tr class="row-highlight">
+          <td><a class="row-link" href="{{ url_for('admin.client_detail', user_id=a.id) }}">{{ a.username }}</a></td>
+          <td>{{ a.display_name }}</td>
+          <td><span class="badge tone-{{ 'success' if a.is_active else 'danger' }}">{{ a.status }}</span></td>
+          <td class="mono">{{ a.created_at_ny }}</td>
+          <td class="setup-meta">{{ a.created_by }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="empty-state">No administrators.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

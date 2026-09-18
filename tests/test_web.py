@@ -1,6 +1,13 @@
-"""Flask dashboard tests (test client + in-memory SQLite; no MT5/network)."""
+"""Flask dashboard tests (test client + in-memory SQLite; no MT5/network).
+
+The console is no longer the public surface of the app: every route behind
+``/console`` and ``/api/*`` now requires the ``admin`` role, and ``/`` is a
+role-aware redirect. The helpers below sign a test client in as an admin so each
+test can stay about the thing it actually tests, rather than restating the auth
+setup. Role *rejection* is tested explicitly in ``test_auth.py``.
+"""
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime
 
 import pytest
@@ -9,12 +16,23 @@ from sqlalchemy.orm import sessionmaker
 
 from app.web import create_app
 from config import get_settings
-from database.models import Base
+from database.models import ROLE_ADMIN, ROLE_CLIENT, Base
 from database.repository import Repository
+from runner import (AccountState, BacktestState, BrokerState, LiveState,
+                    ProbeState)
 from trading import time_utils as tu
 from trading.executor import ExecutionResult
 
 from test_database import _signal
+
+#: Long enough for the default MIN_PASSWORD_LENGTH, so no helper has to
+#: special-case the policy check.
+_PASSWORD = "test-password-long-enough"
+
+#: The session CSRF token the helpers plant. Sent in the login form body; a
+#: console or API POST does not need it (those rely on the origin check), so
+#: only the admin-console tests thread it through explicitly.
+_CSRF = "test-csrf"
 
 
 def _repo():
@@ -24,8 +42,34 @@ def _repo():
     return Repository(session=maker())
 
 
-def _client(repo):
-    return create_app(repository=repo, setup_db=False).test_client()
+def _sign_in(client, repo, *, role=ROLE_ADMIN, username="tester"):
+    """Create an account, sign the client in, and return the user row.
+
+    A fresh account per test, inside that test's own in-memory database, so no
+    test depends on the order another ran in.
+    """
+    user = repo.create_user(username=username, password_hash_or_plain=_PASSWORD,
+                            role=role, display_name=username,
+                            subscribe=(role == ROLE_CLIENT))
+    client.get("/login")
+    with client.session_transaction() as sess:
+        sess["csrf"] = _CSRF
+    resp = client.post("/login", data={"username": username,
+                                       "password": _PASSWORD,
+                                       "_csrf": _CSRF})
+    assert resp.status_code == 302, f"sign-in returned {resp.status_code}"
+    return user
+
+
+def _client(repo, *, role=ROLE_ADMIN, settings=None):
+    """An app test client already signed in as ``role``."""
+    app = create_app(
+        settings=settings or replace(get_settings(),
+                                     flask_secret_key="test-secret"),
+        repository=repo, setup_db=False)
+    client = app.test_client()
+    _sign_in(client, repo, role=role)
+    return client
 
 
 def _save_signal(repo, **kw):
@@ -61,7 +105,7 @@ def test_index_renders_auto_trading_off_and_seeded_signal():
     row = _save_signal(repo)
     client = _client(repo)
 
-    resp = client.get("/")
+    resp = client.get("/console")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert "ICT Multi-Asset Scanner" in body
@@ -78,10 +122,10 @@ def test_signals_page_filters():
                  direction="sell")
     client = _client(repo)
 
-    all_body = client.get("/signals").get_data(as_text=True)
+    all_body = client.get("/console/signals").get_data(as_text=True)
     assert "APPROVED" in all_body and "REJECTED" in all_body
 
-    appr = client.get("/signals?status=APPROVED").get_data(as_text=True)
+    appr = client.get("/console/signals?status=APPROVED").get_data(as_text=True)
     # Prices render at the asset's registered precision (USTEC is 2 digits in the
     # registry), not a fixed 4 — see app.web._price.
     assert "101.70" in appr and "99.00" not in appr  # rejected row gone
@@ -101,7 +145,7 @@ def test_signal_detail_shows_ai_and_executions():
     repo.save_trade(res, signal_id=row.id)
     client = _client(repo)
 
-    body = client.get(f"/signals/{row.id}").get_data(as_text=True)
+    body = client.get(f"/console/signals/{row.id}").get_data(as_text=True)
     assert "AI_ANALYZED" in body or "AI analysis" in body
     assert "agree" in body
     assert "auto_trading_disabled" in body
@@ -109,7 +153,7 @@ def test_signal_detail_shows_ai_and_executions():
 
 def test_unknown_signal_is_404():
     client = _client(_repo())
-    assert client.get("/signals/999").status_code == 404
+    assert client.get("/console/signals/999").status_code == 404
 
 
 def test_backtests_list_and_detail_with_equity_chart():
@@ -119,12 +163,12 @@ def test_backtests_list_and_detail_with_equity_chart():
 
     # The list is a list of *batches*. A row written before batching existed
     # surfaces as a one-asset batch rather than disappearing from the page.
-    body = client.get("/backtests").get_data(as_text=True)
+    body = client.get("/console/backtests").get_data(as_text=True)
     assert "TEST" in body
     assert "/backtests/batch/" in body
 
     bt = repo.recent_backtests()[0]
-    resp = client.get(f"/backtests/{bt.id}")
+    resp = client.get(f"/console/backtests/{bt.id}")
     assert resp.status_code == 200
     text = resp.get_data(as_text=True)
     assert "Equity curve" in text
@@ -141,7 +185,7 @@ def test_backtest_detail_states_the_window_and_analyses_it_by_period():
     _save_backtest(repo)
     bt = repo.recent_backtests()[0]
 
-    text = _client(repo).get(f"/backtests/{bt.id}").get_data(as_text=True)
+    text = _client(repo).get(f"/console/backtests/{bt.id}").get_data(as_text=True)
 
     # The window, in full: both ends, the duration and the bar count. The seeded
     # row spans 2026-01-01T00:00Z to 2026-01-02T00:00Z, i.e. 2025-12-31 19:00 to
@@ -198,7 +242,7 @@ def test_backtest_batch_comparison_ranks_assets_by_expectancy():
     _save_batch_asset(repo, batch, "BAD", total_r=-2.0, wins=0, losses=2)
     client = _client(repo)
 
-    body = client.get(f"/backtests/batch/{batch}").get_data(as_text=True)
+    body = client.get(f"/console/backtests/batch/{batch}").get_data(as_text=True)
     assert "Best asset by expectancy" in body
     # Ranked best-first: the profitable asset is rendered before the losing one.
     assert body.index("GOOD") < body.index("BAD")
@@ -210,7 +254,7 @@ def test_backtest_batch_with_no_trades_ranks_nothing_best():
     _save_batch_asset(repo, batch, "QUIET", total_r=0.0, wins=0, losses=0)
     client = _client(repo)
 
-    body = client.get(f"/backtests/batch/{batch}").get_data(as_text=True)
+    body = client.get(f"/console/backtests/batch/{batch}").get_data(as_text=True)
     # "Never traded" is no evidence, so it must not be presented as a pick.
     assert "No asset produced a closed trade" in body
     assert "Best asset by expectancy" not in body
@@ -218,7 +262,7 @@ def test_backtest_batch_with_no_trades_ranks_nothing_best():
 
 def test_unknown_batch_is_404():
     client = _client(_repo())
-    assert client.get("/backtests/batch/nope").status_code == 404
+    assert client.get("/console/backtests/batch/nope").status_code == 404
 
 
 def test_health_endpoint():
@@ -232,28 +276,20 @@ def test_health_endpoint():
 # Control API (start/stop live, run backtest, poll status)
 # --------------------------------------------------------------------------- #
 class _FakeJobs:
-    """Stand-in for runner.JobManager so no test can reach MT5."""
+    """Stand-in for runner.JobManager so no test can reach MT5.
+
+    The three state dicts are built from the real dataclasses rather than
+    restated: a stand-in that lists its keys by hand drifts the moment a field
+    is added, and the drift shows up as a 500 in a template that reads the new
+    key rather than as a failure here.
+    """
 
     def __init__(self):
-        self.live = {"state": "idle", "started_at_utc": None,
-                     "stopped_at_utc": None, "assets": [],
-                     "last_candle_utc": None, "signals_session": 0,
-                     "last_error": ""}
-        self.backtest = {"state": "idle", "asset": None, "mode": "bars",
-                         "bars": None, "start_utc": None, "end_utc": None,
-                         "max_hold_m1": None, "queued": False,
-                         "queued_reason": "", "progress_done": 0,
-                         "progress_total": 0, "last_backtest_id": None,
-                         "last_error": "", "finished_at_utc": None}
-        self.probe = {"state": "idle", "asset": None, "symbol": None,
-                      "n_bars": 0, "oldest_utc": None, "newest_utc": None,
-                      "last_error": "", "finished_at_utc": None}
-        self.broker = {"state": "idle", "n_symbols": 0, "last_error": "",
-                       "finished_at_utc": None}
-        self.account = {"state": "idle", "balance": None, "equity": None,
-                        "margin_free": None, "currency": None, "login": None,
-                        "server": None, "name": None, "last_error": "",
-                        "fetched_at_utc": None}
+        self.live = asdict(LiveState())
+        self.backtest = asdict(BacktestState())
+        self.probe = asdict(ProbeState())
+        self.broker = asdict(BrokerState())
+        self.account = asdict(AccountState())
         self.symbols = []
         self.scan_result = {"ok": True, "message": "Reading the broker's symbol list…"}
         self.account_result = {"ok": True, "message": "Reading the account…"}
@@ -340,11 +376,17 @@ class _FakeJobs:
 
 
 def _api_client(repo, jobs=None, cfg=None):
-    """Client with Telegram forced off so UI warnings are deterministic."""
+    """Signed-in admin client, Telegram off so UI warnings are deterministic."""
     settings = cfg or replace(get_settings(), telegram_enabled=False,
-                              telegram_bot_token="", telegram_chat_id="")
-    return create_app(settings=settings, repository=repo, setup_db=False,
-                      jobs=jobs or _FakeJobs()).test_client()
+                              telegram_bot_token="", telegram_chat_id="",
+                              flask_secret_key="test-secret")
+    if not settings.flask_secret_key:
+        settings = replace(settings, flask_secret_key="test-secret")
+    app = create_app(settings=settings, repository=repo, setup_db=False,
+                     jobs=jobs or _FakeJobs())
+    client = app.test_client()
+    _sign_in(client, repo)
+    return client
 
 
 def _same_origin():
@@ -387,7 +429,7 @@ def test_status_reports_new_signals_after_id():
     assert ids == [second.id]
     assert payload["signals"]["last_id"] == second.id
     new = payload["signals"]["new"][0]
-    assert new["direction"] == "sell" and new["url"].endswith(f"/signals/{second.id}")
+    assert new["direction"] == "sell" and new["url"].endswith(f"/console/signals/{second.id}")
 
 
 def test_live_start_and_stop_endpoints():
@@ -471,7 +513,7 @@ def test_cross_origin_backtest_post_is_refused():
 
 
 def test_dashboard_renders_live_controls():
-    body = _api_client(_repo()).get("/").get_data(as_text=True)
+    body = _api_client(_repo()).get("/console").get_data(as_text=True)
     assert "Live session" in body
     assert 'id="live-start"' in body and 'id="live-stop"' in body
     assert "dashboard.js" in body
@@ -479,7 +521,7 @@ def test_dashboard_renders_live_controls():
 
 def test_dashboard_warns_when_telegram_unconfigured():
     """Signals would be detected but silently go nowhere; the UI must say so."""
-    body = _api_client(_repo()).get("/").get_data(as_text=True)
+    body = _api_client(_repo()).get("/console").get_data(as_text=True)
     assert "Telegram is not configured" in body
 
 
@@ -490,7 +532,7 @@ def test_dashboard_lists_every_asset_not_only_the_enabled_ones(registry_cfg):
     fraction of the registry with nothing to say the rest existed.
     """
     body = _registry_client(_repo(), _FakeJobs(), registry_cfg).get(
-        "/").get_data(as_text=True)
+        "/console").get_data(as_text=True)
 
     assert ">USTEC</span>" in body      # enabled
     assert ">GOLD</span>" in body       # disabled, and still listed
@@ -499,7 +541,7 @@ def test_dashboard_lists_every_asset_not_only_the_enabled_ones(registry_cfg):
 
 
 def test_dashboard_renders_the_account_tile_and_its_refresh_control():
-    body = _api_client(_repo()).get("/").get_data(as_text=True)
+    body = _api_client(_repo()).get("/console").get_data(as_text=True)
     assert 'id="account-card"' in body
     assert 'id="account-refresh"' in body
     assert 'id="account-balance"' in body
@@ -509,7 +551,7 @@ def test_dashboard_renders_the_account_tile_and_its_refresh_control():
 
 def test_the_account_tile_says_so_when_nothing_has_been_read_yet():
     """An em dash, never a fabricated 0.00 — the account may be funded."""
-    body = _api_client(_repo()).get("/").get_data(as_text=True)
+    body = _api_client(_repo()).get("/console").get_data(as_text=True)
     assert "not read yet" in body
     assert ">0.00<" not in body
 
@@ -522,7 +564,7 @@ def test_the_account_tile_paints_the_snapshot_it_was_given(registry_cfg):
                     "server": "Broker-Demo",
                     "fetched_at_utc": datetime(2026, 1, 6, 18, 32)}
 
-    body = _registry_client(_repo(), jobs, registry_cfg).get("/").get_data(
+    body = _registry_client(_repo(), jobs, registry_cfg).get("/console").get_data(
         as_text=True)
 
     assert "10,000.00" in body          # thousands-separated, not 10000.0
@@ -533,7 +575,7 @@ def test_the_account_tile_paints_the_snapshot_it_was_given(registry_cfg):
 
 
 def test_backtests_page_renders_run_form():
-    body = _api_client(_repo()).get("/backtests").get_data(as_text=True)
+    body = _api_client(_repo()).get("/console/backtests").get_data(as_text=True)
     assert "Run a backtest" in body
     assert 'id="backtest-form"' in body
     assert "USTEC" in body            # asset dropdown populated from the registry
@@ -664,12 +706,15 @@ def registry_cfg(tmp_path):
     ]}), encoding="utf-8")
     return replace(get_settings(), assets_file=path,
                    telegram_enabled=False, telegram_bot_token="",
-                   telegram_chat_id="")
+                   telegram_chat_id="", flask_secret_key="test-secret")
 
 
 def _registry_client(repo, jobs, cfg):
-    return create_app(settings=cfg, repository=repo, setup_db=False,
-                      jobs=jobs).test_client()
+    """Signed-in admin client against a throwaway asset registry."""
+    app = create_app(settings=cfg, repository=repo, setup_db=False, jobs=jobs)
+    client = app.test_client()
+    _sign_in(client, repo)
+    return client
 
 
 def _read_registry(cfg) -> dict:
@@ -760,8 +805,8 @@ def test_dropdowns_read_the_registry_not_a_stale_db_row(registry_cfg):
     """
     repo = _repo()
     repo.upsert_asset("GHOST", "GHOSTX", enabled=True)
-    body = _registry_client(repo, _FakeJobs(), registry_cfg).get("/backtests") \
-        .get_data(as_text=True)
+    body = _registry_client(repo, _FakeJobs(), registry_cfg) \
+        .get("/console/backtests").get_data(as_text=True)
 
     assert "USTEC" in body
     assert "GHOST" not in body
@@ -962,7 +1007,7 @@ def test_signal_detail_surfaces_the_ict_lineage():
                        digits=2,
                        structure_extreme_price=99.5,
                        structure_time_ny=datetime(2026, 1, 6, 8, 30))
-    body = _client(repo).get(f"/signals/{row.id}").get_data(as_text=True)
+    body = _client(repo).get(f"/console/signals/{row.id}").get_data(as_text=True)
 
     for expected in ("VERY_HIGH",        # purge strength and target strength
                      "PDH",              # the take-profit target
@@ -981,5 +1026,5 @@ def test_signal_detail_renders_a_signal_with_no_ict_metadata():
     row = _save_signal(repo, purge_grade="", target_kind="", target_price=0.0,
                        target_grade="", efficiency_score=0.0, setup_id="",
                        state="", structure_time_ny=None)
-    resp = _client(repo).get(f"/signals/{row.id}")
+    resp = _client(repo).get(f"/console/signals/{row.id}")
     assert resp.status_code == 200

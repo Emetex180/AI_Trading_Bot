@@ -186,3 +186,152 @@ class SystemEvent(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False, default="")
     event_time_utc: Mapped[datetime] = mapped_column(DateTime, nullable=False,
                                                      default=_utcnow)
+
+
+# --------------------------------------------------------------------------- #
+# Web platform: accounts, access and broker links
+#
+# Added for the client-facing platform. Purely additive — no existing table is
+# altered, and every table below is created by the same ``create_all`` in
+# ``repository.ensure_schema`` that already builds the rest of the schema, so an
+# existing production database simply gains four new (empty) tables.
+# --------------------------------------------------------------------------- #
+#: Roles. ``admin`` sees the whole platform; ``client`` sees only the analysis.
+ROLE_ADMIN = "admin"
+ROLE_CLIENT = "client"
+ROLES = (ROLE_ADMIN, ROLE_CLIENT)
+
+#: Account lifecycle. A suspended account keeps its history but cannot log in.
+STATUS_ACTIVE = "active"
+STATUS_SUSPENDED = "suspended"
+
+#: Subscription state shown on the admin's client list. ``expired`` and ``none``
+#: are recorded states, not computed ones — nothing here is inferred.
+SUB_NONE = "none"
+SUB_TRIAL = "trial"
+SUB_ACTIVE = "active"
+SUB_EXPIRED = "expired"
+SUBSCRIPTION_STATES = (SUB_NONE, SUB_TRIAL, SUB_ACTIVE, SUB_EXPIRED)
+
+
+class User(Base):
+    """A person who can log in: platform admin or client.
+
+    Only the *hash* is stored — ``password_hash`` is produced by
+    ``werkzeug.security.generate_password_hash`` and is never reversible. There
+    is no column anywhere in this schema holding a plaintext password.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(254), nullable=False, default="")
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default=ROLE_CLIENT)
+    status: Mapped[str] = mapped_column(String(16), nullable=False,
+                                        default=STATUS_ACTIVE)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: Username of the admin who created the account ("" for the bootstrap admin).
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    profile: Mapped["ClientProfile | None"] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False)
+    broker_accounts: Mapped[list["BrokerAccount"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == ROLE_ADMIN
+
+    @property
+    def is_active(self) -> bool:
+        """Whether the account may log in at all.
+
+        Named ``is_active`` to match the flag Flask-Login expects, though this
+        app does its own session handling — see :mod:`app.auth`.
+        """
+        return self.status == STATUS_ACTIVE
+
+
+class ClientProfile(Base):
+    """Client-facing metadata that has nothing to do with trading.
+
+    Separate from :class:`User` because it is optional and client-specific: an
+    admin account has no subscription, and a row is only written when a client
+    is created.
+    """
+
+    __tablename__ = "client_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False,
+                                         unique=True)
+    subscription_status: Mapped[str] = mapped_column(String(16), nullable=False,
+                                                     default=SUB_NONE)
+    subscription_plan: Mapped[str] = mapped_column(String(64), nullable=False,
+                                                   default="")
+    subscription_expires_at: Mapped[datetime | None] = mapped_column(DateTime,
+                                                                    nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="profile")
+
+
+class BrokerAccount(Base):
+    """A client's broker account *link*.
+
+    Deliberately holds no money. Balance, equity and margin live in
+    :class:`BrokerAccountSnapshot` and are written **only** by a provider that
+    actually read them from a broker (see :mod:`trading.broker_accounts`). Until
+    such a provider is configured, a row here describes a link that is recorded
+    but not connected, and the UI says exactly that rather than showing a zero.
+    """
+
+    __tablename__ = "broker_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False,
+                                         index=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="mt5")
+    login: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    server: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    label: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="broker_accounts")
+    snapshots: Mapped[list["BrokerAccountSnapshot"]] = relationship(
+        back_populates="account", cascade="all, delete-orphan")
+
+
+class BrokerAccountSnapshot(Base):
+    """One reading of a client's broker account, with the moment it was taken.
+
+    A snapshot rather than a live value, for the same reason the operator's own
+    account is snapshotted (see ``runner.AccountState``): a figure whose age is
+    not displayed cannot be told apart from a current one.
+    """
+
+    __tablename__ = "broker_account_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broker_account_id: Mapped[int] = mapped_column(
+        ForeignKey("broker_accounts.id"), nullable=False, index=True)
+    balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_free: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: Which provider produced this reading, so a figure is always attributable.
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    fetched_at_utc: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                     default=_utcnow)
+
+    account: Mapped["BrokerAccount"] = relationship(back_populates="snapshots")

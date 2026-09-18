@@ -27,6 +27,8 @@ from flask import abort, g, jsonify, request, url_for
 from config import Settings
 from trading import time_utils as tu
 
+from .auth import admin_required
+
 # Bounds for the backtest form, so a typo cannot ask MT5 for 10 million bars.
 MIN_BACKTEST_BARS = 100
 MAX_BACKTEST_BARS = 500_000
@@ -202,6 +204,7 @@ def register_api(app) -> None:
     cfg: Settings = app.config["CFG"]
 
     @app.post("/api/live/start")
+    @admin_required
     def api_live_start():
         if not _origin_allowed():
             abort(403)
@@ -211,6 +214,7 @@ def register_api(app) -> None:
         return jsonify(result), (200 if result["ok"] else 409)
 
     @app.post("/api/live/stop")
+    @admin_required
     def api_live_stop():
         if not _origin_allowed():
             abort(403)
@@ -220,6 +224,7 @@ def register_api(app) -> None:
         return jsonify(result), (200 if result["ok"] else 409)
 
     @app.post("/api/backtest/run")
+    @admin_required
     def api_backtest_run():
         if not _origin_allowed():
             abort(403)
@@ -270,6 +275,7 @@ def register_api(app) -> None:
         return jsonify(result), (200 if result["ok"] else 409)
 
     @app.post("/api/data/probe")
+    @admin_required
     def api_data_probe():
         """Report the M1 history the broker holds, so a date range can be picked."""
         if not _origin_allowed():
@@ -330,6 +336,7 @@ def register_api(app) -> None:
                 pass
 
     @app.post("/api/assets/add")
+    @admin_required
     def api_assets_add():
         if not _origin_allowed():
             abort(403)
@@ -369,6 +376,7 @@ def register_api(app) -> None:
                         "assets": asset_choices(cfg, g.repo)})
 
     @app.post("/api/assets/toggle")
+    @admin_required
     def api_assets_toggle():
         if not _origin_allowed():
             abort(403)
@@ -393,6 +401,7 @@ def register_api(app) -> None:
                         "assets": asset_choices(cfg, g.repo)})
 
     @app.post("/api/assets/remove")
+    @admin_required
     def api_assets_remove():
         if not _origin_allowed():
             abort(403)
@@ -419,6 +428,7 @@ def register_api(app) -> None:
                         "assets": asset_choices(cfg, g.repo)})
 
     @app.post("/api/assets/set-all")
+    @admin_required
     def api_assets_set_all():
         """Enable or disable every registry entry in one action.
 
@@ -454,6 +464,7 @@ def register_api(app) -> None:
     # can be picked rather than only the hand-listed ones.
     # ------------------------------------------------------------------ #
     @app.get("/api/assets/broker")
+    @admin_required
     def api_broker_catalog():
         """The symbol list from the last scan, plus that scan's state.
 
@@ -483,6 +494,7 @@ def register_api(app) -> None:
                         "symbols": symbols})
 
     @app.post("/api/assets/broker/scan")
+    @admin_required
     def api_broker_scan():
         if not _origin_allowed():
             abort(403)
@@ -492,6 +504,7 @@ def register_api(app) -> None:
         return jsonify(result), (200 if result["ok"] else 409)
 
     @app.post("/api/assets/add-broker")
+    @admin_required
     def api_assets_add_broker():
         """Add one of the broker's own symbols to the registry.
 
@@ -555,6 +568,7 @@ def register_api(app) -> None:
                         "assets": asset_choices(cfg, g.repo)})
 
     @app.post("/api/account/refresh")
+    @admin_required
     def api_account_refresh():
         """Take a fresh account snapshot for the dashboard balance tile.
 
@@ -572,6 +586,7 @@ def register_api(app) -> None:
         return jsonify(result), (200 if result["ok"] else 409)
 
     @app.post("/api/auto-trading")
+    @admin_required
     def api_auto_trading():
         """Set or clear the runtime auto-trading override.
 
@@ -601,6 +616,7 @@ def register_api(app) -> None:
         return jsonify(result)
 
     @app.get("/api/status")
+    @admin_required
     def api_status():
         payload = jobs.status()
         live = _add_ny_times(payload["live"], ("started_at_utc", "stopped_at_utc",

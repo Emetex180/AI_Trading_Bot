@@ -1,0 +1,224 @@
+{% extends "admin/base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}Trading activity{% endblock %}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Trading activity</h1>
+    <p>What the engine is doing right now, and everything it has recorded.</p>
+  </div>
+  <div class="page-actions">
+    <span class="pill {{ 'tone-danger' if auto_trading else 'tone-success' }}"
+          id="nav-auto-mirror">
+      <span class="dot"></span>{{ 'AUTO-TRADING ON' if auto_trading else 'ALERT ONLY' }}
+    </span>
+  </div>
+</div>
+
+<div class="stat-grid mb-4">
+  {{ stat('Live thread', 'running' if jobs_status.live_running else 'stopped',
+          'success' if jobs_status.live_running else 'muted',
+          jobs_status.live.state or '') }}
+  {{ stat('In a session', 'yes' if live.active else 'no', 'info',
+          'polling for setups' if live.active else 'outside the windows') }}
+  {{ stat('Assets watched', monitored | length, '',
+          'in the running session') }}
+  {{ stat('Setups this session', live.signals_session, '',
+          live.activity or '') }}
+</div>
+
+<div class="row g-3">
+  <div class="col-12 col-xl-7">
+    <div class="card mb-3">
+      <div class="card-header">
+        <span>Registered assets</span>
+        <span class="card-header-note">
+          {{ assets | length }} in the registry · {{ monitored | length }} polling
+        </span>
+      </div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Asset</th><th>Symbol</th><th>State</th>
+              <th class="text-end">Last price</th><th>Candle (NY)</th>
+              <th>Buy model</th><th>Sell model</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for a in assets %}
+            {% set sm = setups.get(a.name) or {} %}
+            <tr class="{{ '' if a.enabled else 'text-muted' }}">
+              <td class="fw-semibold">{{ a.name }}</td>
+              <td class="mono setup-meta">{{ a.broker_symbol or '—' }}</td>
+              <td>
+                <span class="badge tone-{{ 'success' if a.enabled else 'secondary' }}">
+                  {{ 'enabled' if a.enabled else 'disabled' }}
+                </span>
+              </td>
+              {# An unread price is blank here, never 0 — the terminal has simply
+                 not delivered a candle for this asset yet. #}
+              <td class="text-end mono">{{ (prices.get(a.name) | price(a.name)) or '—' }}</td>
+              <td class="mono setup-meta">{{ (price_times.get(a.name) | ny) or '—' }}</td>
+              <td class="mono setup-meta">{{ sm.get('buy') or '—' }}</td>
+              <td class="mono setup-meta">{{ sm.get('sell') or '—' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" class="empty-state">No assets are registered.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">
+        <span>Recent signals</span>
+        <span class="card-header-note">{{ recent_signals | length }}</span>
+      </div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Time (NY)</th><th>Asset</th><th>Dir</th>
+              <th class="text-end">Entry</th><th class="text-end">R:R</th>
+              <th>Status</th><th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in recent_signals %}
+            <tr class="row-highlight">
+              <td class="mono">{{ s.entry_time_utc | ny }}</td>
+              <td><a class="row-link" href="{{ url_for('signal_detail', signal_id=s.id) }}">{{ s.asset }}</a></td>
+              <td>{{ (s.direction or '') | upper }}</td>
+              <td class="text-end mono">{{ (s.entry | price(s.asset)) or '—' }}</td>
+              <td class="text-end mono">{{ s.rr | num(2) }}</td>
+              <td>{{ s.status | status }}</td>
+              <td class="setup-meta">{{ s.reason or '—' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" class="empty-state">No signals recorded yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Recent executions</span>
+        <span class="card-header-note">
+          {%- if auto_trading -%}live trading enabled
+          {%- else -%}alert only — nothing is sent
+          {%- endif -%}
+        </span>
+      </div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Requested (NY)</th><th>Asset</th><th>Dir</th>
+              <th class="text-end">Lots</th><th>Status</th><th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in recent_trades %}
+            <tr>
+              <td class="mono">{{ t.requested_at_utc | ny }}</td>
+              <td>{{ t.asset }}</td>
+              <td>{{ (t.direction or '') | upper }}</td>
+              <td class="text-end mono">{{ t.lots | num(2) }}</td>
+              <td>{{ t.status | status }}</td>
+              <td class="setup-meta">{{ t.reason or '—' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" class="empty-state">
+              No execution attempts. With alert-only mode on, a confirmed setup
+              is recorded and notified but never sent to a broker.
+            </td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-xl-5">
+    <div class="card mb-3">
+      <div class="card-header"><span>Scanner account</span></div>
+      <div class="card-body">
+        <div class="stat-grid">
+          {{ stat('Balance', account.balance | money, 'info', account.currency or '') }}
+          {{ stat('Equity', account.equity | money, '', account.currency or '') }}
+          {{ stat('Free margin', account.margin_free | money, '', account.currency or '') }}
+        </div>
+        <p class="setup-meta mt-3 mb-0">
+          {%- if account.fetched_at_utc -%}
+            Read {{ account.fetched_at_utc | ny }} NY
+            {%- if account.login %} · {{ account.login }}{% endif -%}
+          {%- else -%}
+            The terminal has not been read yet.
+          {%- endif -%}
+        </p>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header"><span>Backtest job</span></div>
+      <div class="card-body">
+        <div class="meta-grid">
+          <div><span class="section-label">State</span>
+            <div class="mono">{{ backtest.state or 'idle' }}</div></div>
+          <div><span class="section-label">Progress</span>
+            <div class="mono">
+              {%- if backtest.progress_total -%}
+                {{ backtest.progress_done }}/{{ backtest.progress_total }}
+              {%- else -%}—{%- endif -%}
+            </div></div>
+          <div><span class="section-label">Asset</span>
+            <div class="mono">{{ backtest.asset or '—' }}</div></div>
+          <div><span class="section-label">Window</span>
+            <div class="mono">
+              {%- if backtest.start_utc and backtest.end_utc -%}
+                {{ backtest.start_utc | ny('%Y-%m-%d') }} → {{ backtest.end_utc | ny('%Y-%m-%d') }}
+              {%- elif backtest.bars -%}
+                last {{ backtest.bars }} bars
+              {%- else -%}—{%- endif -%}
+            </div></div>
+        </div>
+        {% if backtest.last_error %}
+        <p class="setup-meta mt-2 mb-0 text-neg">{{ backtest.last_error }}</p>
+        {% elif backtest.queued and backtest.queued_reason %}
+        <p class="setup-meta mt-2 mb-0">Queued: {{ backtest.queued_reason }}</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>System events</span>
+        <span class="card-header-note">{{ events | length }}</span>
+      </div>
+      <div class="card-body">
+        {# Rendered inline rather than through the feed macro: these are raw
+           SystemEvent rows, not the client feed's view model, and reshaping them
+           into one here would be a second place the same line gets formatted. #}
+        {% if events %}
+        <ul class="feed">
+          {% for e in events %}
+          <li class="feed-item">
+            <span class="feed-time">{{ e.event_time_utc | ny('%Y-%m-%d %H:%M:%S') }}</span>
+            <span class="feed-source">{{ e.level }}</span>
+            <span class="feed-text">{{ e.message }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="empty-state mb-0">No events recorded yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

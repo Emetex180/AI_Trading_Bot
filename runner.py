@@ -153,6 +153,20 @@ class LiveState:
     #: engine that produced it is gone, and a stale "waiting for retrace" would
     #: read as live.
     setups: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: asset name -> last *closed* M1 close, from the engine's own candle stream.
+    #: Published alongside ``setups`` for the client dashboard's market table.
+    #:
+    #: A separate key rather than a field inside ``setups``: that dict's shape is
+    #: ``{direction: state}`` and the console renders it as such, so widening it
+    #: would change a published contract for no gain. Read-only — it is the
+    #: engine's last seen price, never a quote fetched for display, so it is
+    #: always the same price the strategy itself acted on. Absent for an asset
+    #: whose stream has not seen a candle yet, which the UI renders as unknown
+    #: rather than as zero.
+    prices: dict[str, float] = field(default_factory=dict)
+    #: asset name -> UTC close time of the candle ``prices`` came from, so a
+    #: figure is never shown without its age.
+    price_times: dict[str, datetime] = field(default_factory=dict)
     #: Whether the session is *awake*. The live thread stays up around the clock
     #: but only polls inside a tradeable session on a trading day; this is False
     #: while it sleeps. A running-but-asleep session is still "running" for
@@ -806,6 +820,19 @@ class JobManager:
                         self._live.setups = {
                             name: self._setup_states(sc)
                             for name, sc in scanners.items()}
+                        # Same pass, same lock: the price table and the setup
+                        # table are read together by the dashboard, so publishing
+                        # them under one lock keeps them from disagreeing about
+                        # which poll they describe.
+                        self._live.prices = {
+                            name: price for name, price in
+                            ((n, self._last_price(sc)) for n, sc in scanners.items())
+                            if price is not None}
+                        self._live.price_times = {
+                            name: when for name, when in
+                            ((n, self._last_candle_time(sc))
+                             for n, sc in scanners.items())
+                            if when is not None}
                     # Wait on the event so Stop takes effect immediately rather
                     # than after the full poll interval.
                     self._stop_event.wait(poll)
@@ -823,6 +850,10 @@ class JobManager:
                 self._live.stopped_at_utc = tu.now_utc()
                 self._live.last_error = error
                 self._live.setups = {}   # no engine behind it any more
+                # Same reasoning as ``setups``: the stream that produced these
+                # died with the session, and a frozen price would read as live.
+                self._live.prices = {}
+                self._live.price_times = {}
                 self._live.active = False
                 self._live.activity = ""
                 self._live.next_open_utc = None
@@ -1277,6 +1308,30 @@ class JobManager:
             return sc.setup_states()
         except Exception:
             return {}
+
+    @staticmethod
+    def _last_price(sc) -> float | None:
+        """The close of the last M1 candle the scanner's engine has seen.
+
+        Read from the engine's own stream, so it is the price the strategy acted
+        on rather than a separately fetched quote that could disagree with it.
+        ``None`` when the stream is empty or the scanner cannot answer — the
+        caller drops those, and the UI shows "—" rather than a zero.
+        """
+        try:
+            candle = sc.engine.stream.last_m1()
+        except Exception:
+            return None
+        return getattr(candle, "close", None) if candle is not None else None
+
+    @staticmethod
+    def _last_candle_time(sc):
+        """UTC open time of the scanner's last M1 candle, or ``None``."""
+        try:
+            candle = sc.engine.stream.last_m1()
+        except Exception:
+            return None
+        return getattr(candle, "t_utc", None) if candle is not None else None
 
     def _emit(self, message: str) -> None:
         if self.on_event is None:

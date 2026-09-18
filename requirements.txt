@@ -5,6 +5,10 @@ numpy>=1.26.0
 
 # Web dashboard
 Flask>=3.0.0
+# Production WSGI server for `run.py serve`. Flask's own server is explicitly
+# for development only and is single-threaded, which a few clients polling every
+# five seconds would queue behind.
+waitress>=3.0.0
 
 # Persistence (SQLite now; PostgreSQL-ready schema)
 SQLAlchemy>=2.0.0

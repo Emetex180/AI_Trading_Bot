@@ -1,0 +1,553 @@
+/* ==========================================================================
+   Client platform — shell, auth page and setup presentation
+   --------------------------------------------------------------------------
+   Loaded *after* app.css on client-facing and admin pages, and on the login
+   page. app.css remains the single source of design tokens: every colour here
+   resolves through --c-* / --rgb-* so the two stylesheets cannot drift into
+   two different-looking products.
+
+   What this file adds that app.css has no opinion about:
+     - the sign-in page (there is no navigation for a logged-out user)
+     - a sidebar shell for the client/admin area, distinct from the console's
+       horizontal topbar — the console is a control panel, this is a product
+     - setup cards, the one component the client dashboard is built around
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Sign-in page
+   -------------------------------------------------------------------------- */
+.auth-body {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* A single soft indigo pool behind the card, so the page reads as deliberate
+     rather than as an unstyled form on a flat background. */
+  background:
+    radial-gradient(60rem 40rem at 50% -10%, rgba(var(--rgb-accent), .16), transparent 60%),
+    var(--c-bg);
+}
+
+.auth-wrap {
+  width: 100%;
+  max-width: 26rem;
+  padding: 2rem 1.25rem;
+}
+
+.auth-card {
+  overflow: hidden;
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: 1.5rem 1.5rem 1.25rem;
+  border-bottom: 1px solid var(--c-line-soft);
+}
+
+.auth-title {
+  font-weight: 600;
+  font-size: 1.0625rem;
+  letter-spacing: -.01em;
+  color: var(--c-text);
+}
+
+.auth-sub {
+  font-size: .8125rem;
+  color: var(--c-text-faint);
+}
+
+.auth-foot {
+  padding: .875rem 1.5rem;
+  border-top: 1px solid var(--c-line-soft);
+  background: var(--c-surface-2);
+  font-size: .8125rem;
+  color: var(--c-text-dim);
+  text-align: center;
+}
+
+.auth-note {
+  margin: 1.25rem 0 0;
+  text-align: center;
+  font-size: .75rem;
+  color: var(--c-text-faint);
+}
+
+/* --------------------------------------------------------------------------
+   2. Product shell — sidebar + content
+   --------------------------------------------------------------------------
+   The console keeps its horizontal topbar (app.css). This vertical shell is
+   for the client/admin area, where the navigation is a stable set of product
+   sections rather than a handful of operator tools.
+   -------------------------------------------------------------------------- */
+.app-shell {
+  display: grid;
+  grid-template-columns: 15.5rem 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding: 1.25rem 1rem;
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-line);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: .625rem;
+  padding: .25rem .5rem .75rem;
+  border-bottom: 1px solid var(--c-line-soft);
+}
+
+.sidebar-brand-text {
+  font-weight: 600;
+  font-size: .9375rem;
+  letter-spacing: -.01em;
+  color: var(--c-text);
+  line-height: 1.2;
+}
+
+.sidebar-brand-sub {
+  font-size: .6875rem;
+  color: var(--c-text-faint);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.sidebar-section {
+  font-size: .6875rem;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+  padding: 0 .5rem .375rem;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: .125rem;
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: .625rem;
+  padding: .5rem .625rem;
+  border-radius: var(--radius-sm);
+  color: var(--c-text-dim);
+  font-size: .875rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background .12s ease, color .12s ease;
+}
+
+.sidebar-link:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.sidebar-link.active {
+  background: rgba(var(--rgb-accent), .14);
+  color: var(--c-accent-soft);
+}
+
+/* A small leading glyph per link, drawn from the label's first letter — the
+   shell ships no icon font, and an empty box would read as a missing asset. */
+.sidebar-glyph {
+  flex: 0 0 auto;
+  width: 1.375rem;
+  height: 1.375rem;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--c-surface-3);
+  color: var(--c-text-faint);
+  font-size: .6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.sidebar-link.active .sidebar-glyph {
+  background: rgba(var(--rgb-accent), .22);
+  color: var(--c-accent-soft);
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  padding-top: 1rem;
+  border-top: 1px solid var(--c-line-soft);
+}
+
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: .625rem;
+  padding: .5rem;
+}
+
+.sidebar-user-name {
+  font-size: .8125rem;
+  font-weight: 600;
+  color: var(--c-text);
+  line-height: 1.25;
+}
+
+.sidebar-user-role {
+  font-size: .6875rem;
+  color: var(--c-text-faint);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+.main-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;      /* lets .table-scroll actually scroll inside the grid */
+}
+
+.client-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: .75rem var(--gutter);
+  border-bottom: 1px solid var(--c-line);
+  background: rgba(10, 14, 23, .85);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.client-topbar-clocks {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+}
+
+.main-pad {
+  padding: var(--gutter);
+  flex: 1 1 auto;
+}
+
+/* Session clock chip: the NY time the whole product is denominated in. */
+.clock-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: .5rem;
+  padding: .3rem .625rem;
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface);
+  font-size: .8125rem;
+}
+
+.clock-chip .clock-time {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.clock-chip .clock-zone {
+  font-size: .6875rem;
+  color: var(--c-text-faint);
+  letter-spacing: .04em;
+}
+
+@media (max-width: 992px) {
+  .app-shell { grid-template-columns: 1fr; }
+  .sidebar {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--c-line);
+  }
+  /* The nav becomes a horizontal scroller so the product still fits a phone
+     without hiding half the sections behind a hamburger. */
+  .sidebar-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: .25rem;
+  }
+  .sidebar-link { white-space: nowrap; }
+  .sidebar-foot { margin-top: .5rem; }
+}
+
+/* --------------------------------------------------------------------------
+   3. Setup cards — the client dashboard's primary unit
+   -------------------------------------------------------------------------- */
+.setup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(21rem, 1fr));
+  gap: 1rem;
+}
+
+.setup-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* The left edge carries direction, so a card is readable at a glance in a
+   grid without reading the BUY/SELL badge. */
+.setup-card.dir-buy  { border-left: 3px solid var(--c-pos); }
+.setup-card.dir-sell { border-left: 3px solid var(--c-neg); }
+
+.setup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .875rem 1rem;
+  border-bottom: 1px solid var(--c-line-soft);
+}
+
+.setup-asset {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--c-text);
+}
+
+.setup-meta {
+  font-size: .75rem;
+  color: var(--c-text-faint);
+}
+
+.setup-levels {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-bottom: 1px solid var(--c-line-soft);
+}
+
+.setup-level {
+  padding: .75rem 1rem;
+  border-right: 1px solid var(--c-line-soft);
+}
+
+.setup-level:last-child { border-right: 0; }
+
+.setup-level-label {
+  font-size: .6875rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+  margin-bottom: .125rem;
+}
+
+.setup-level-value {
+  font-family: var(--font-mono);
+  font-size: .9375rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text);
+}
+
+.setup-level.rr .setup-level-value { color: var(--c-accent-soft); }
+
+.setup-body {
+  padding: .875rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+  flex: 1 1 auto;
+}
+
+.setup-foot {
+  padding: .75rem 1rem;
+  border-top: 1px solid var(--c-line-soft);
+  background: var(--c-surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+}
+
+/* --- conditions checklist ------------------------------------------------ */
+.conditions {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.condition {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  font-size: .8125rem;
+  color: var(--c-text-dim);
+}
+
+.condition-mark {
+  flex: 0 0 auto;
+  width: 1rem;
+  text-align: center;
+  font-weight: 700;
+}
+
+/* Met and unmet are deliberately different colours *and* different glyphs, so
+   the checklist survives a colourblind reader and a greyscale print. */
+.condition.met .condition-mark   { color: var(--c-pos); }
+.condition.met                   { color: var(--c-text); }
+.condition.unmet .condition-mark { color: var(--c-text-faint); }
+.condition.unmet                 { color: var(--c-text-faint); }
+
+/* --- efficiency meter ---------------------------------------------------- */
+.meter {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--c-surface-3);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--c-accent), var(--c-accent-soft));
+}
+
+.meter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  font-size: .75rem;
+  color: var(--c-text-faint);
+  margin-bottom: .3rem;
+}
+
+/* --------------------------------------------------------------------------
+   4. Per-asset state chips (live market analysis)
+   -------------------------------------------------------------------------- */
+.state-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .375rem;
+  padding: .2rem .5rem;
+  border-radius: var(--radius-sm);
+  font-size: .75rem;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.state-chip.is-idle     { color: var(--c-text-faint);  background: var(--c-surface-3); border-color: var(--c-line); }
+.state-chip.is-working  { color: var(--c-info);        background: rgba(var(--rgb-info), .12);  border-color: rgba(var(--rgb-info), .3); }
+.state-chip.is-ready    { color: var(--c-warn);        background: rgba(var(--rgb-warn), .12);  border-color: rgba(var(--rgb-warn), .3); }
+.state-chip.is-confirmed{ color: var(--c-pos);         background: rgba(var(--rgb-pos), .12);   border-color: rgba(var(--rgb-pos), .3); }
+.state-chip.is-dead     { color: var(--c-neg);         background: rgba(var(--rgb-neg), .12);   border-color: rgba(var(--rgb-neg), .3); }
+
+/* A pulsing dot marks a state that is actively progressing, so a static table
+   distinguishes "moving" from "parked". */
+.state-chip.is-working .dot,
+.state-chip.is-ready .dot { animation: pulse 1.8s ease-in-out infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .35; }
+}
+
+/* --------------------------------------------------------------------------
+   5. Analysis feed
+   -------------------------------------------------------------------------- */
+.feed {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feed-item {
+  display: flex;
+  gap: .75rem;
+  padding: .625rem 0;
+  border-bottom: 1px solid var(--c-line-soft);
+  font-size: .8125rem;
+}
+
+.feed-item:last-child { border-bottom: 0; }
+
+.feed-time {
+  flex: 0 0 auto;
+  width: 7.5rem;
+  font-family: var(--font-mono);
+  font-size: .75rem;
+  color: var(--c-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.feed-text {
+  flex: 1 1 auto;
+  color: var(--c-text-dim);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.feed-source {
+  flex: 0 0 auto;
+  font-size: .6875rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+}
+
+/* --------------------------------------------------------------------------
+   6. Misc
+   -------------------------------------------------------------------------- */
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: .625rem;
+  padding: .75rem 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+  font-size: .8125rem;
+  color: var(--c-text-dim);
+}
+
+.notice strong { color: var(--c-text); }
+
+.client-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+
+.client-hero h1 {
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -.02em;
+  margin: 0;
+}
+
+.client-hero p {
+  margin: .25rem 0 0;
+  font-size: .875rem;
+  color: var(--c-text-dim);
+}

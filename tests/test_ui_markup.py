@@ -11,16 +11,19 @@ is what the browser receives.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from app.web import create_app
+from config import get_settings
+from database.models import ROLE_ADMIN
 from trading.executor import ExecutionResult
 
 from test_database import _signal
-from test_web import _FakeJobs, _repo
+from test_web import _FakeJobs, _repo, _sign_in
 
 
 # --------------------------------------------------------------------------- #
@@ -94,20 +97,25 @@ def populated_repo():
 
 @pytest.fixture
 def dashboard(populated_repo):
-    """Every page rendered once, keyed by a stable name, plus the test client."""
-    app = create_app(repository=populated_repo, setup_db=False, jobs=_FakeJobs())
+    """Every console page rendered once, keyed by a stable name, plus the client."""
+    app = create_app(settings=replace(get_settings(),
+                                      flask_secret_key="test-secret"),
+                     repository=populated_repo, setup_db=False, jobs=_FakeJobs())
     client = app.test_client()
+    _sign_in(client, populated_repo, role=ROLE_ADMIN)
     signal_id = populated_repo.recent_signals(1)[0].id
     bt_id = populated_repo.recent_backtests()[0].id
 
+    # These pages moved behind /console in the same change that required a
+    # sign-in; the markup contract below is unchanged, only its address is.
     paths = {
-        "dashboard": "/",
-        "signals": "/signals",
-        "signal_detail": f"/signals/{signal_id}",
-        "backtests": "/backtests",
-        "backtest_detail": f"/backtests/{bt_id}",
-        "batch": "/backtests/batch/batch-1",
-        "assets": "/assets",
+        "dashboard": "/console",
+        "signals": "/console/signals",
+        "signal_detail": f"/console/signals/{signal_id}",
+        "backtests": "/console/backtests",
+        "backtest_detail": f"/console/backtests/{bt_id}",
+        "batch": "/console/backtests/batch/batch-1",
+        "assets": "/console/assets",
     }
     html = {}
     for name, path in paths.items():

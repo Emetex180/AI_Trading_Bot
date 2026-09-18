@@ -1,16 +1,30 @@
-"""Flask dashboard and control panel.
+"""Flask application factory: the operator console, the client platform and
+the admin area, all built on one app.
 
-The dashboard **reads** signals, trades and backtests persisted by the scanner,
-and — through :mod:`app.api` — can also **operate** the bot: start/stop a live
-session and launch backtests. Those routes delegate to
-:class:`runner.JobManager`, which owns the background threads.
+Three surfaces, one process:
 
-What it still cannot do: reach past the master switch. ``AUTO_TRADING`` in
-``.env`` is the baseline, and the dashboard can set a session-only override on
+* **Client platform** (:mod:`app.client`, ``/dashboard`` and friends) — the
+  product. Read-only views of what the engine produced. Any authenticated user.
+* **Admin area** (:mod:`app.admin`, ``/admin``) — clients, activity, broker
+  accounts. Platform admins only.
+* **Operator console** (this module, ``/console``) — the original dashboard:
+  signals, trades, backtests, the asset registry, and the control routes in
+  :mod:`app.api` that start/stop a live session. Platform admins only.
+
+What the console still cannot do: reach past the master switch. ``AUTO_TRADING``
+in ``.env`` is the baseline, and the console can set a session-only override on
 top of it (:func:`app.api.api_auto_trading`) — deliberately never persisted, so
 a restart returns the bot to the ``.env`` value. No route here can touch any
-other gate in :mod:`trading.executor`, and session state is otherwise displayed
-read-only.
+other gate in :mod:`trading.executor`.
+
+Authentication is wired in :func:`create_app`. The ordering constraint that
+matters: :func:`app.auth.register_auth` **must** run after the ``before_request``
+hook that opens ``g.repo``, because the session loader reads the user row
+through that repository. Registering it earlier leaves ``g.repo`` unset on the
+very first request and every logged-in session silently fails to load.
+
+``/`` is role-aware — it sends a client to their dashboard and an admin to the
+console — so the domain root is the product rather than an operator tool.
 
 Routes that render pages touch no MT5, AI or Telegram, so they keep working when
 the terminal is closed; the control routes start work on a background thread
@@ -22,10 +36,8 @@ in-memory database with no terminal.
 """
 from __future__ import annotations
 
-from datetime import datetime
-from math import isinf
-
-from flask import Flask, abort, current_app, g, jsonify, render_template, request
+from flask import (Flask, abort, current_app, g, jsonify, redirect,
+                   render_template, request, url_for)
 from sqlalchemy.orm import sessionmaker
 
 from backtesting.compare import batch_totals, rank_assets
@@ -34,7 +46,29 @@ from config import Settings, get_settings
 from database.repository import Repository, ensure_schema, get_engine
 from trading import time_utils as tu
 
+from .admin import register_admin
 from .api import asset_choices, register_api
+from .auth import (admin_required, bootstrap_admin, current_user,
+                   register_auth)
+from .client import register_client
+# Shared presentation helpers. These used to live here; they moved to
+# ``app/display.py`` when the client platform needed the same price precision
+# and New York rendering, so both surfaces format a value identically. Aliased
+# to their old private names because the template filters below and a handful of
+# call sites still read better that way.
+from .display import digits_for as _digits_for
+from .display import iso_dt as _iso_dt
+from .display import money as _money
+from .display import num as _num
+from .display import ny_str as _ny_str
+from .display import price as _price
+from .display import profit_factor as _profit_factor
+from .display import span as _span
+from .display import status_label as _status_label
+
+#: Console routes are admin-only. Kept as a name so the intent is greppable and
+#: a future role (say, a read-only analyst) can be swapped in one place.
+_console_only = admin_required
 
 _TEMPLATES = "templates"
 
@@ -92,130 +126,12 @@ def _breakdown_matrix(ranked: list[dict], field: str) -> list[dict]:
 
 # --------------------------------------------------------------------------- #
 # Template helpers
+#
+# The number, money, price, status, profit-factor, NY-time and span helpers that
+# used to sit here now live in ``app/display.py`` — shared with the client and
+# admin surfaces so all three format a value the same way. They are imported at
+# the top of this module under their original private names.
 # --------------------------------------------------------------------------- #
-def _ny_str(naive_utc):
-    """Render a naive-UTC datetime on the New York clock (DST-aware)."""
-    if naive_utc is None:
-        return ""
-    return tu.utc_to_ny(naive_utc).strftime("%Y-%m-%d %H:%M")
-
-
-def _num(value, digits: int = 4):
-    if value is None:
-        return ""
-    try:
-        return f"{float(value):.{digits}f}"
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _money(value, digits: int = 2):
-    """Render an account figure with thousands separators.
-
-    ``None`` means "never read from the terminal", which is deliberately not the
-    same as a zero balance — the tile must be able to show an em dash rather than
-    claim the account is empty.
-    """
-    if value is None:
-        return "—"
-    try:
-        return f"{float(value):,.{digits}f}"
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _digits_map() -> dict[str, int]:
-    """Asset-name -> price decimals, from the registry the app is configured with.
-
-    The registry read is cached in :mod:`trading.asset_manager` and invalidated on
-    the file's mtime, so adding an asset through the dashboard shows up on the
-    next page render without any cache-busting call here.
-    """
-    try:
-        cfg = current_app.config.get("CFG")
-    except Exception:  # outside a request/app context (e.g. unit-testing the filter)
-        cfg = None
-
-    digits: dict[str, int] = {}
-    try:
-        from trading.asset_manager import AssetManager
-
-        for entry in AssetManager(settings=cfg).list_assets():
-            if entry.digits:
-                digits[entry.name.upper()] = int(entry.digits)
-    except Exception:
-        pass  # an unreadable registry must not break page rendering
-    return digits
-
-
-def _digits_for(asset: str | None, default: int = 4) -> int:
-    """Price decimals for an asset.
-
-    Four decimals is right for EURUSD and wrong for USDJPY (3), gold (2) and an
-    index (1–2). The registry is authoritative, and it is what the scanner and
-    backtester read, so a displayed price matches the traded one.
-    """
-    return _digits_map().get((asset or "").strip().upper(), default)
-
-
-def _price(value, asset: str | None = None):
-    """Render a price with the asset's own precision."""
-    return _num(value, _digits_for(asset))
-
-
-def _status_label(status: str) -> str:
-    return {"APPROVED": "Approved", "REJECTED": "Rejected", "PENDING": "Pending",
-            "SENT": "Sent", "SKIPPED": "Skipped", "FAILED": "Failed",
-            "AI_UNAVAILABLE": "AI Unavailable"}.get(status or "", status or "-")
-
-
-def _profit_factor(value) -> str:
-    """Render a profit factor, collapsing an infinite (no-loss) value to ∞."""
-    if value is None:
-        return "-"
-    try:
-        fv = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if isinf(fv):
-        return "∞"
-    return f"{fv:.2f}"
-
-
-def _span(start, end) -> str:
-    """Human duration between two datetimes, e.g. ``84 days, 3 h``.
-
-    A backtest window is stated as two dates, which does not tell you whether it
-    covers a fortnight or two years — the figure that decides whether a result is
-    worth reading. Days are dropped once the span is under a day so an intraday
-    replay reads as hours and minutes rather than as "0 days".
-    """
-    if start is None or end is None or end <= start:
-        return ""
-    minutes = int((end - start).total_seconds() // 60)
-    days, rem = divmod(minutes, 60 * 24)
-    hours, mins = divmod(rem, 60)
-    if days:
-        return f"{days} day{'s' if days != 1 else ''}, {hours} h"
-    if hours:
-        return f"{hours} h, {mins} min"
-    return f"{mins} min"
-
-
-def _iso_dt(value) -> datetime | None:
-    """Parse an ISO timestamp stored in ``summary_json``, or ``None``.
-
-    The summary carries these as strings because it is persisted as JSON, but
-    every template renders them through the ``ny`` filter, which operates on
-    datetimes. Converting here keeps that filter strict rather than teaching it
-    to guess at strings.
-    """
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
 
 
 #: The period breakdowns the detail page offers, as
@@ -334,9 +250,43 @@ def create_app(settings: Settings | None = None,
             repo.close()
 
     # ------------------------------------------------------------------ #
-    # Routes
+    # Authentication
+    #
+    # Strictly *after* ``_open_repo`` above: the session loader reads the user
+    # row through ``g.repo``, so registering this first would leave every
+    # logged-in session unable to resolve its user.
+    # ------------------------------------------------------------------ #
+    register_auth(app)
+
+    # ------------------------------------------------------------------ #
+    # Root
     # ------------------------------------------------------------------ #
     @app.get("/")
+    def root():
+        """The domain root, resolved by who is asking.
+
+        A logged-out visitor gets the login page; a client gets the product; an
+        admin gets the console. Deliberately a redirect rather than a rendered
+        page so there is exactly one canonical URL per surface — a client can
+        bookmark ``/dashboard`` and never see a second copy of it at ``/``.
+        """
+        user = current_user()
+        if user is None:
+            return redirect(url_for("auth.login"))
+        if user.is_admin:
+            return redirect(url_for("index"))
+        return redirect(url_for("client.overview"))
+
+    # ------------------------------------------------------------------ #
+    # Operator console
+    #
+    # These routes keep the endpoint *names* they have always had, so every
+    # ``url_for()`` in the existing templates keeps working; only the URLs move
+    # under ``/console`` and gain the admin guard. The console can start and
+    # stop a live trading session, so it is not client-facing.
+    # ------------------------------------------------------------------ #
+    @app.get("/console")
+    @_console_only
     def index():
         repo = g.repo
         # The registry, not the DB mirror. ``assets.json`` is what the scanner and
@@ -371,7 +321,8 @@ def create_app(settings: Settings | None = None,
                             and cfg.telegram_chat_id),
         )
 
-    @app.get("/signals")
+    @app.get("/console/signals")
+    @_console_only
     def signals_page():
         repo = g.repo
         asset = (request.args.get("asset") or "").strip() or None
@@ -385,7 +336,8 @@ def create_app(settings: Settings | None = None,
             filter_status=status,
         )
 
-    @app.get("/signals/<int:signal_id>")
+    @app.get("/console/signals/<int:signal_id>")
+    @_console_only
     def signal_detail(signal_id: int):
         repo = g.repo
         row = repo.get_signal(signal_id)
@@ -394,7 +346,8 @@ def create_app(settings: Settings | None = None,
         executions = repo.trades_for_fingerprint(row.fingerprint)
         return render_template("signal_detail.html", s=row, executions=executions)
 
-    @app.get("/backtests")
+    @app.get("/console/backtests")
+    @_console_only
     def backtests_page():
         repo = g.repo
         batches = []
@@ -416,7 +369,8 @@ def create_app(settings: Settings | None = None,
             default_bars=cfg.backtest_m1_bars,
         )
 
-    @app.get("/backtests/batch/<batch_id>")
+    @app.get("/console/backtests/batch/<batch_id>")
+    @_console_only
     def backtest_batch_page(batch_id: str):
         """Cross-asset comparison for one backtest campaign."""
         repo = g.repo
@@ -450,7 +404,8 @@ def create_app(settings: Settings | None = None,
             duration=_span(start_utc, end_utc),
         )
 
-    @app.get("/backtests/<int:bt_id>")
+    @app.get("/console/backtests/<int:bt_id>")
+    @_console_only
     def backtest_detail(bt_id: int):
         repo = g.repo
         bt = repo.get_backtest(bt_id)
@@ -484,7 +439,8 @@ def create_app(settings: Settings | None = None,
                      for key, label, attr, note in _PERIODS],
         )
 
-    @app.get("/assets")
+    @app.get("/console/assets")
+    @_console_only
     def assets_page():
         """Manage the registry, and browse what the broker actually offers.
 
@@ -510,15 +466,57 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/health")
     def health():
-        repo = g.repo
-        return jsonify({
-            "status": "ok",
-            "signals": repo.count_signals(),
-            "live_running": jobs.is_live_running(),
-            "backtest_state": jobs.backtest_state()["state"],
-        })
+        """Liveness probe. Deliberately public and deliberately thin.
+
+        A health check is polled by whatever is watching the process — a reverse
+        proxy, an uptime monitor, ``run.py smoke`` — none of which can hold a
+        session. So it answers the one question that needs no identity: is this
+        process serving? It reports no counts and no account state, because
+        those are operator data and this route has no way to check who is
+        asking.
+        """
+        return jsonify({"status": "ok", "live_running": jobs.is_live_running()})
 
     # Control endpoints (start/stop live, run backtest, poll status).
     register_api(app)
+    # Client-facing product, and the admin area.
+    register_client(app)
+    register_admin(app)
+
+    # First-run admin, from ADMIN_USERNAME/ADMIN_PASSWORD. Only ever fires while
+    # the users table is empty, so it cannot touch a live installation's
+    # accounts. Wrapped because a database that is unreachable must not stop the
+    # app from starting — an operator can still fix it and restart.
+    try:
+        with _repo_scope(app, cfg, repository) as repo:
+            bootstrap_admin(repo, cfg)
+    except Exception:  # pragma: no cover - startup best-effort
+        import logging
+        logging.getLogger(__name__).exception(
+            "Could not bootstrap the admin account; continuing without it.")
 
     return app
+
+
+class _repo_scope:
+    """A repository for one startup task, closed on exit.
+
+    Only used by the bootstrap above, which runs outside any request and so
+    cannot use the ``g.repo`` the request hooks provide.
+    """
+
+    def __init__(self, app, cfg, injected):
+        self._injected = injected
+        self._cfg = cfg
+        self._factory = app.config["SESSION_FACTORY"]
+
+    def __enter__(self) -> Repository:
+        self._repo = (self._injected if self._injected is not None
+                      else Repository(settings=self._cfg, session=self._factory()))
+        return self._repo
+
+    def __exit__(self, *exc):
+        # An injected repo belongs to the caller, so it is never closed here.
+        if self._injected is None:
+            self._repo.close()
+        return False
