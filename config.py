@@ -60,6 +60,23 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _env_optional_float(key: str) -> float | None:
+    """A float that may legitimately be absent.
+
+    Distinct from :func:`_env_float`: there, a missing key means "use the
+    default"; here it means "no value was configured at all", which is a
+    different answer from any number. ``MT5_SERVER_UTC_OFFSET`` relies on that
+    distinction — blank means "discover it from MT5", not "assume zero".
+    """
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def _env_int(key: str, default: int) -> int:
     raw = os.getenv(key)
     if raw is None or not raw.strip():
@@ -106,7 +123,10 @@ class Settings:
     mt5_login: str | None
     mt5_password: str | None
     mt5_server: str | None
-    mt5_server_utc_offset: float
+    #: Broker clock offset ahead of UTC, in hours. ``None`` (the default) means
+    #: *discover it from the live MT5 terminal* — see :mod:`trading.time_utils`.
+    #: Only set this to pin a number, and only when you know the broker's clock.
+    mt5_server_utc_offset: float | None
 
     # --- Assets --------------------------------------------------------------
     assets_file: Path
@@ -152,6 +172,9 @@ class Settings:
     telegram_timeout_seconds: float
     # Raw ``ASSET_<NAME>_<FIELD>`` entries, resolved by ``asset_overrides_for``.
     asset_env: dict[str, str] = field(default_factory=dict)
+    #: Log the MT5 -> UTC -> New York -> session conversion chain. Temporary
+    #: verification aid; falls back to ``flask_debug`` when unset.
+    time_debug: bool = False
 
     # --- ICT model -----------------------------------------------------------
     # All optional (defaulted) so the dataclass still allows the non-default
@@ -176,8 +199,18 @@ class Settings:
     max_cisd_candles: int = 8
     fvg_wait_m1: int = 90
     retrace_wait_m1: int = 90
-    # Minimum FVG depth as a fraction of 5M ATR; 0 disables the depth filter.
-    fvg_min_atr_frac: float = 0.0
+    # Minimum FVG depth as a fraction of 5M ATR. Defaults to 0.10: a gap thinner
+    # than a tenth of the M5 true range is noise, not displacement, and without
+    # a floor a single-tick gap qualifies as an FVG. 0 disables the filter.
+    fvg_min_atr_frac: float = 0.10
+    # Where the entry price must sit relative to the gap.
+    #   "inside_fvg"     – (default) the entry candle must CLOSE within
+    #                      [fvg.lower, fvg.upper]; the fill is the gap itself.
+    #   "reaction_close" – the older, looser rule: any close back beyond the gap
+    #                      that reclaims it counts, even if the close is outside
+    #                      the zone. Opt in only deliberately; it permits a
+    #                      signal whose entry price is not in the FVG at all.
+    fvg_entry_model: str = "inside_fvg"
     # Liquidity lookbacks.
     swing_lookback: int = 3
     session_lookback_days: int = 3
@@ -255,7 +288,7 @@ def _build_settings() -> Settings:
         mt5_login=_env_str("MT5_LOGIN") or None,
         mt5_password=_env_str("MT5_PASSWORD") or None,
         mt5_server=_env_str("MT5_SERVER") or None,
-        mt5_server_utc_offset=_env_float("MT5_SERVER_UTC_OFFSET", 2.0),
+        mt5_server_utc_offset=_env_optional_float("MT5_SERVER_UTC_OFFSET"),
         assets_file=assets_path,
         symbol_auto_resolve=_env_bool("SYMBOL_AUTO_RESOLVE", default=True),
         auto_trading=_env_bool("AUTO_TRADING", default=False),
@@ -265,7 +298,7 @@ def _build_settings() -> Settings:
         sl_buffer_atr=_env_float("SL_BUFFER_ATR", 0.25),
         valid_entry_sessions=_env_list(
             "VALID_ENTRY_SESSIONS",
-            ["london_open", "ny_premarket", "ny_am", "london_close", "ny_pm"],
+            ["london_open", "ny_am", "ny_pm", "power_hour"],
         ),
         cisd_threshold_hour_ny=_env_int("CISD_THRESHOLD_HOUR_NY", 9),
         order_deviation=_env_int("ORDER_DEVIATION", 20),
@@ -286,6 +319,7 @@ def _build_settings() -> Settings:
         llm_timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 20.0),
         telegram_timeout_seconds=_env_float("TELEGRAM_TIMEOUT_SECONDS", 10.0),
         asset_env={k: v for k, v in os.environ.items() if k.startswith("ASSET_")},
+        time_debug=_env_bool("TIME_DEBUG"),
         # --- ICT model ----------------------------------------------------- #
         cisd_timeframe=_env_str("CISD_TIMEFRAME", "M5"),
         sl_min_offset_ticks=_env_float("SL_MIN_OFFSET_TICKS", 2.0),
@@ -297,7 +331,8 @@ def _build_settings() -> Settings:
         max_cisd_candles=_env_int("MAX_CISD_CANDLES", 8),
         fvg_wait_m1=_env_int("FVG_WAIT_M1", 90),
         retrace_wait_m1=_env_int("RETRACE_WAIT_M1", 90),
-        fvg_min_atr_frac=_env_float("FVG_MIN_ATR_FRAC", 0.0),
+        fvg_min_atr_frac=_env_float("FVG_MIN_ATR_FRAC", 0.10),
+        fvg_entry_model=_env_str("FVG_ENTRY_MODEL", "inside_fvg").strip().lower(),
         swing_lookback=_env_int("SWING_LOOKBACK", 3),
         session_lookback_days=_env_int("SESSION_LOOKBACK_DAYS", 3),
         max_signals_per_session=_env_int("MAX_SIGNALS_PER_SESSION", 0),

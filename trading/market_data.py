@@ -2,6 +2,11 @@
 
 All timezone conversion from the broker clock to the project NY clock happens
 here (through ``trading.bars`` / ``trading.time_utils``); nothing else may do it.
+
+The broker offset is passed as ``None`` by default, which means "ask
+:mod:`trading.time_utils` for the offset currently in force" — that module holds
+the value discovered from the live terminal. Passing an explicit number pins it
+(tests, replays of a known broker).
 """
 from __future__ import annotations
 
@@ -9,10 +14,13 @@ from datetime import datetime, timedelta
 
 from .bars import BarSet, Candle
 from .mt5_client import MT5Client, row_time_to_server_naive
+from . import sessions as sess
 from . import time_utils as tu
 
+__all__ = ["MarketData", "row_to_candle", "describe_candle_time"]
 
-def row_to_candle(row: tuple, server_utc_offset_hours: float) -> Candle:
+
+def row_to_candle(row: tuple, server_utc_offset_hours: float | None) -> Candle:
     """Convert one raw MT5 row into a Candle (NY time derived centrally)."""
     server_naive = row_time_to_server_naive(row[0])
     t_utc = tu.broker_to_utc(server_naive, server_utc_offset_hours)
@@ -27,12 +35,59 @@ def row_to_candle(row: tuple, server_utc_offset_hours: float) -> Candle:
     )
 
 
+def describe_candle_time(row: tuple, candle: Candle,
+                         server_utc_offset_hours: float | None) -> str:
+    """The MT5 -> UTC -> NY -> session trace for one raw row.
+
+    The session named here is the one ``trading.strategy`` will actually gate on,
+    so this line is evidence about the decision rather than a parallel opinion:
+    every value comes from the same conversion the pipeline used.
+    """
+    broker_naive = row_time_to_server_naive(row[0])
+    minute = tu.minute_of_day(candle.t_ny)
+    window = sess.primary_session(minute)
+    label = window.label if window else "Outside session"
+    return tu.format_time_chain(broker_naive, candle.t_utc, candle.t_ny,
+                                session=label,
+                                offset_hours=server_utc_offset_hours)
+
+
 class MarketData:
     """Fetches closed M1 history and streams newly closed M1 candles."""
 
-    def __init__(self, client: MT5Client, server_utc_offset_hours: float):
+    def __init__(self, client: MT5Client,
+                 server_utc_offset_hours: float | None = None,
+                 on_debug=None):
         self.client = client
+        #: ``None`` -> resolve through :mod:`trading.time_utils` on every call,
+        #: which is how the discovered broker offset reaches the conversions.
         self.offset = server_utc_offset_hours
+        self._on_debug = on_debug
+        #: Throttle for the time trace: one per (symbol, NY minute).
+        self._last_debug_key: tuple[str, str] | None = None
+
+    def set_debug_sink(self, sink) -> None:
+        """Attach the console sink the time trace is written to.
+
+        A setter rather than a constructor argument so the runner can keep
+        building this through its two-argument ``market_factory`` (which tests
+        replace with fakes) and hand over its own emit function afterwards.
+        """
+        self._on_debug = sink
+
+    def _debug_candle_time(self, symbol: str, row: tuple, candle: Candle) -> None:
+        """Emit the conversion trace for a candle, at most once per NY minute."""
+        if self._on_debug is None or not tu.time_debug_enabled():
+            return
+        key = (symbol, candle.t_ny.strftime("%Y-%m-%d %H:%M"))
+        if key == self._last_debug_key:
+            return
+        self._last_debug_key = key
+        try:
+            self._on_debug(f"[scan] {symbol}\n"
+                           + describe_candle_time(row, candle, self.offset))
+        except Exception:  # a broken console must never stop a session
+            pass
 
     # ------------------------------------------------------------------ #
     def fetch_m1_closed(self, symbol: str, count: int, drop_forming: bool = True) -> list[Candle]:
@@ -127,4 +182,7 @@ class MarketData:
         """
         rows = self.client.copy_rates_from_pos(symbol, "M1", 0, lookback + 1)
         closed_rows = rows[:-1]
-        return [row_to_candle(r, self.offset) for r in closed_rows]
+        candles = [row_to_candle(r, self.offset) for r in closed_rows]
+        if closed_rows and candles:
+            self._debug_candle_time(symbol, closed_rows[-1], candles[-1])
+        return candles

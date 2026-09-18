@@ -446,12 +446,104 @@ class JobManager:
             client = self._client_factory(self.settings)
             client.connect()
             try:
-                yield client, self._market_factory(client, self.settings)
+                self._resolve_broker_clock(client)
+                market = self._market_factory(client, self.settings)
+                sink = getattr(market, "set_debug_sink", None)
+                if callable(sink):
+                    sink(self._emit)
+                yield client, market
             finally:
                 try:
                     client.disconnect()
                 except Exception:
                     pass
+
+    def _resolve_broker_clock(self, client) -> None:
+        """Discover the broker's UTC offset once per terminal session.
+
+        Runs immediately after connecting, before any candle is fetched, because
+        every later broker->UTC conversion reads the published value. The offset
+        is *measured* from the terminal's own clock, never assumed: see
+        :meth:`trading.mt5_client.MT5Client.discover_server_utc_offset_hours`.
+
+        Called on the one code path all four MT5 jobs share, so live scanning,
+        backtesting, the history probe and the catalogue browser cannot end up
+        with different ideas of what the broker clock means.
+
+        A failure here is not fatal — the conversion layer keeps its previous or
+        pinned value — but it is never silent, because an unverified broker
+        offset mis-dates every session window.
+        """
+        discover = getattr(client, "discover_and_publish_server_offset", None)
+        if callable(discover):
+            preferred = [a.broker_symbol for a in self._enabled_broker_symbols()]
+            try:
+                offset, detail = discover(preferred or None)
+            except Exception as exc:  # a probe must never take down a session
+                offset, detail = None, f"discovery raised: {exc}"
+            if offset is not None:
+                self._emit(f"[time] MT5 broker clock: UTC{offset:+.2f} — {detail}")
+            else:
+                self._emit(f"[time] MT5 broker clock NOT verified: {detail}")
+
+        warning = tu.warn_if_server_offset_unverified()
+        if warning:
+            self._emit(f"[time] ERROR {warning}")
+
+    def _retry_broker_clock(self, client, repo, *, announce: bool = True) -> bool:
+        """One re-attempt at verifying the broker offset. ``True`` when it took.
+
+        Discovery needs a *live* tick to confirm the reading (see
+        :meth:`trading.mt5_client.MT5Client.discover_server_utc_offset_hours`),
+        so a terminal connected while the market was shut cannot resolve the
+        offset at startup and only ever can once quotes resume. Retrying here is
+        what lets the session recover on its own instead of sitting dead until
+        the operator restarts it — and the gate stays closed until it succeeds,
+        so the retry can never let a mis-dated scan through.
+
+        ``announce`` is False for the steady state of a still-closed gate: the
+        condition is a standing property, not an event, and repeating it every
+        poll would bury the log it is trying to protect.
+        """
+        discover = getattr(client, "discover_and_publish_server_offset", None)
+        if not callable(discover):
+            self._clock_blocked(repo, announce=announce)
+            return False
+        try:
+            preferred = [a.broker_symbol for a in self._enabled_broker_symbols()]
+            offset, detail = discover(preferred or None)
+        except Exception as exc:  # a probe must never take down a session
+            offset, detail = None, f"discovery raised: {exc}"
+        if offset is None or not tu.broker_offset_verified():
+            self._clock_blocked(repo, detail, announce=announce)
+            return False
+        self._emit(f"[time] MT5 broker clock verified: UTC{offset:+.2f} — {detail}")
+        self._log(repo, "INFO", "scanner", f"broker clock verified: UTC{offset:+.2f}")
+        return True
+
+    def _clock_blocked(self, repo, detail: str = "", *, announce: bool = True) -> None:
+        """Say why the scanner is idle — which is never a reason to scan anyway."""
+        if not announce:
+            return
+        message = ("scanner held: the MT5 broker clock is still NOT verified, so "
+                   "every ICT session window would be mis-dated. Retrying; set "
+                   "MT5_SERVER_UTC_OFFSET to pin a verified value and start "
+                   "immediately.")
+        if detail:
+            message += f" ({detail})"
+        self._emit(f"[time] ERROR {message}")
+        self._log(repo, "ERROR", "scanner", message)
+
+    def _enabled_broker_symbols(self) -> list:
+        """The traded assets' broker symbols, for broker-clock probing.
+
+        Best-effort: the registry may be unreadable at this point in startup, and
+        a probe with no preferred symbols still works from the majors fallback.
+        """
+        try:
+            return list(self._manager_factory(self.settings).enabled_assets())
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------ #
     # Session-hours gate
@@ -623,6 +715,9 @@ class JobManager:
                 # same string, so the 5s poll still cannot spam.
                 prev_line: str | None = None
                 warned_backfill: set[str] = set()
+                #: The unverified-broker-clock hold is announced once, not on
+                #: every poll — same reasoning as ``prev_line`` above.
+                clock_warned = False
                 while not self._stop_event.is_set():
                     # ---- session-hours gate -------------------------------- #
                     now_ny = tu.now_ny()
@@ -657,6 +752,23 @@ class JobManager:
                                        max(0.0, (next_open - tu.now_utc()).total_seconds()))
                         self._stop_event.wait(wait)
                         continue
+
+                    # ---- broker-clock gate (fail closed) -------------------- #
+                    # Every session window is derived from the broker->UTC
+                    # conversion, so an unverified offset mis-dates all of them
+                    # at once and the scanner would trade a confidently wrong
+                    # clock. Refusing to scan is the recoverable failure; a
+                    # signal from a mis-dated window is not. Discovery is
+                    # re-attempted here because it needs a *live tick* to
+                    # confirm, so a terminal that was quiet at connect can still
+                    # resolve it a poll later without a restart.
+                    if not tu.broker_offset_verified():
+                        if not self._retry_broker_clock(client, repo,
+                                                        announce=not clock_warned):
+                            clock_warned = True
+                            self._stop_event.wait(poll)
+                            continue
+                        clock_warned = False
 
                     # Once per poll, not only when a signal fires (which is what
                     # `equity` is for): a quiet session would otherwise leave the

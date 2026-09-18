@@ -102,7 +102,8 @@ check("the completed direction reads TRADE_CONFIRMED",
       states.get("buy") == "TRADE_CONFIRMED", str(states))
 check("every reported state is one of the defined states",
       all(v in {"NO_SETUP", "LIQUIDITY_PURGED", "CISD_CONFIRMED", "FVG_FOUND",
-                "WAITING_FOR_FVG_RETRACE", "TRADE_CONFIRMED", "INVALIDATED"}
+                "WAITING_FOR_FVG_RETRACE", "RETRACE_CONFIRMED",
+                "TRADE_CONFIRMED", "INVALIDATED"}
           for v in states.values()), str(states))
 print(f"      (this scenario also sweeps sell-side, so sell ended at "
       f"{states.get('sell')} — the two directions are independent)")

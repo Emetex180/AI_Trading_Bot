@@ -20,10 +20,27 @@ from trading import time_utils as tu
 from trading.market_data import MarketData, row_to_candle
 from trading import mt5_client as mc
 
-#: Broker clock ahead of UTC. NY is a fixed UTC-4, so NY -> broker is +6h.
+#: Broker clock ahead of UTC (an explicit pin, so these tests do not depend on
+#: what the terminal would discover).
 OFFSET = 2.0
 
 BASE_EPOCH = 1_700_000_000  # an arbitrary fixed instant; never "now"
+
+#: The epoch MT5 counts from — the broker's wall clock read as if it were UTC.
+_MT5_EPOCH = datetime(1970, 1, 1)
+
+
+def mt5_epoch(server_naive: datetime) -> int:
+    """The MT5 row timestamp for a broker *wall clock* time.
+
+    MT5 encodes the server clock as an epoch, so a wall-clock datetime has to be
+    read back as UTC. ``datetime.timestamp()`` on a naive datetime would instead
+    use the **machine's** timezone — which silently cancels out a local-time
+    parse in the reader and makes a round-trip test pass while the real
+    conversion is wrong by the host's UTC offset. Building epochs this way keeps
+    these tests independent of where the suite happens to run.
+    """
+    return int((server_naive - _MT5_EPOCH).total_seconds())
 
 
 # --------------------------------------------------------------------------- #
@@ -130,7 +147,7 @@ def test_fetch_m1_range_converts_utc_range_to_the_broker_clock():
 def test_fetch_m1_range_returns_candles_on_the_utc_clock():
     """A broker-clock row must come back as the matching UTC instant."""
     broker_time = datetime(2024, 1, 1, 6, 0)
-    epoch = int(broker_time.timestamp())
+    epoch = mt5_epoch(broker_time)
     client = _FakeClient(rows=[(epoch, 100.0, 101.0, 99.0, 100.5, 1, 0, 0)])
     market = MarketData(client, OFFSET)
 
@@ -138,16 +155,17 @@ def test_fetch_m1_range_returns_candles_on_the_utc_clock():
                                     datetime(2024, 1, 5))
 
     assert len(candles) == 1
-    # Row time is a *local* naive datetime by construction; what must hold is
-    # that it is not treated as UTC directly.
-    expected = tu.broker_to_utc(mc.row_time_to_server_naive(epoch), OFFSET)
-    assert candles[0].t_utc == expected
+    # Broker 06:00 with a +2 server is real UTC 04:00, which is NY 23:00 on
+    # 2023-12-31 (EST, UTC-5). Pinned absolutely so a host-timezone leak in the
+    # epoch parse cannot make this pass.
+    assert candles[0].t_utc == datetime(2024, 1, 1, 4, 0)
+    assert candles[0].t_ny == datetime(2023, 12, 31, 23, 0)
 
 
 def test_fetch_m1_range_keeps_a_closed_historical_bar():
     """A range ending well in the past has no forming bar to drop."""
     past = datetime(2020, 1, 1, 12, 0)
-    epoch = int(past.timestamp())
+    epoch = mt5_epoch(past)
     client = _FakeClient(rows=[(epoch, 100.0, 101.0, 99.0, 100.5, 1, 0, 0)])
     market = MarketData(client, OFFSET)
 
@@ -160,8 +178,8 @@ def test_fetch_m1_range_keeps_a_closed_historical_bar():
 def test_fetch_m1_range_drops_the_forming_bar_when_the_range_reaches_now():
     """A range ending right now does contain the still-forming bar; drop it."""
     now_broker = tu.utc_to_broker(tu.now_utc(), OFFSET).replace(second=0, microsecond=0)
-    epoch = int(now_broker.timestamp())
-    older = int((now_broker - timedelta(minutes=5)).timestamp())
+    epoch = mt5_epoch(now_broker)
+    older = mt5_epoch(now_broker - timedelta(minutes=5))
     client = _FakeClient(rows=[
         (older, 100.0, 101.0, 99.0, 100.5, 1, 0, 0),
         (epoch, 100.0, 101.0, 99.0, 100.5, 1, 0, 0),
@@ -268,11 +286,51 @@ def test_copy_rates_from_pos_still_raises_on_empty(fake_mt5):
 # row_to_candle
 # --------------------------------------------------------------------------- #
 def test_row_to_candle_uses_the_broker_offset():
-    epoch = 1_700_000_000
-    server_naive = mc.row_time_to_server_naive(epoch)
+    # Broker 2024-01-01 06:00 with a +2 server.
+    epoch = mt5_epoch(datetime(2024, 1, 1, 6, 0))
     candle = row_to_candle((epoch, 1.0, 2.0, 0.5, 1.5, 7, 0, 0), OFFSET)
 
-    assert candle.t_utc == tu.broker_to_utc(server_naive, OFFSET)
-    assert candle.t_ny == tu.utc_to_ny(candle.t_utc)
+    # 06:00 broker -> 04:00 UTC -> 23:00 NY on 2023-12-31 (EST).
+    assert candle.t_utc == datetime(2024, 1, 1, 4, 0)
+    assert candle.t_ny == datetime(2023, 12, 31, 23, 0)
     assert (candle.open, candle.high, candle.low, candle.close) == (1.0, 2.0, 0.5, 1.5)
     assert candle.volume == 7
+
+
+def test_row_time_to_server_naive_reads_the_epoch_as_utc():
+    """The epoch parse must not read the *machine's* clock.
+
+    ``datetime.fromtimestamp`` without a tz would interpret an MT5 epoch in the
+    host's zone, shifting every candle by the machine's own UTC offset before a
+    broker offset is even applied. The parse is pinned to UTC, so it must equal
+    the epoch counted from 1970 — on any host.
+    """
+    broker_naive = datetime(2024, 1, 1, 6, 0)
+    assert mc.row_time_to_server_naive(mt5_epoch(broker_naive)) == broker_naive
+
+
+def test_row_time_to_server_naive_ignores_the_host_timezone(monkeypatch):
+    """Same epoch, a deliberately different host clock: same answer."""
+    epoch = mt5_epoch(datetime(2024, 1, 1, 6, 0))
+    baseline = mc.row_time_to_server_naive(epoch)
+
+    import os
+    import time
+
+    original = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    try:
+        time.tzset()  # POSIX only; a no-op on Windows, where the value is
+    except (AttributeError, OSError):  # already pinned by the test above.
+        pass
+    try:
+        assert mc.row_time_to_server_naive(epoch) == baseline
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        try:
+            time.tzset()
+        except (AttributeError, OSError):
+            pass

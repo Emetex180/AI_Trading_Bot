@@ -18,6 +18,7 @@ from trading.sessions import (
     MACRO_WINDOWS,
     OBSERVED_WINDOWS,
     OUTSIDE_SESSION_REASON,
+    SESSION_INDEX,
     SILVER_BULLET_WINDOWS,
     TRADE_CLOSED,
     TRADE_CONDITIONAL,
@@ -31,9 +32,13 @@ from trading.sessions import (
     active_silver_bullet_key,
     activity_log_line,
     entry_permission,
+    get_trading_session,
+    get_trading_session_key,
+    get_trading_session_label,
     hm_to_minutes,
     is_trading_day,
     next_activity_start_utc,
+    normalize_session_keys,
     parse_trading_days,
     primary_session,
     session_activity,
@@ -52,22 +57,40 @@ def hm(h, m=0):
 # --------------------------------------------------------------------------- #
 def test_spec_windows_present():
     keys = {w.key for w in CORE_SESSIONS}
-    assert keys == {"asian_range", "london_open", "ny_premarket", "ny_am",
-                    "ny_lunch", "london_close", "ny_pm"}
+    assert keys == {"asian_range", "london_open", "ny_am", "ny_pm", "power_hour"}
 
 
 @pytest.mark.parametrize("key,start,end,trade", [
-    ("asian_range", hm(20), hm(24), TRADE_NO),
+    ("asian_range", hm(19), hm(24), TRADE_NO),
     ("london_open", hm(2), hm(5), TRADE_YES),
-    ("ny_premarket", hm(7), hm(9, 30), TRADE_CONDITIONAL),
-    ("ny_am", hm(9, 30), hm(11, 30), TRADE_YES),
-    ("ny_lunch", hm(11, 30), hm(13, 30), TRADE_NO),
-    ("london_close", hm(10), hm(12), TRADE_CONDITIONAL),
-    ("ny_pm", hm(13, 30), hm(16), TRADE_YES),
+    ("ny_am", hm(7), hm(11), TRADE_YES),
+    ("ny_pm", hm(13), hm(15), TRADE_YES),
+    ("power_hour", hm(15), hm(16), TRADE_YES),
 ])
 def test_window_table_matches_the_spec(key, start, end, trade):
     window = next(w for w in CORE_SESSIONS if w.key == key)
     assert (window.start, window.end, window.trade) == (start, end, trade)
+
+
+def test_retired_window_keys_are_gone():
+    """The old seven-window table must not linger as a second source of truth."""
+    keys = {w.key for w in CORE_SESSIONS}
+    assert not keys & {"ny_premarket", "ny_lunch", "london_close"}
+
+
+def test_the_legacy_allowlist_still_resolves():
+    """An existing VALID_ENTRY_SESSIONS must keep selecting something.
+
+    The retired keys map onto their successors rather than vanishing, or the
+    operator's configured allow-list would silently resolve to nothing and no
+    session would ever be tradeable.
+    """
+    resolve = lambda keys: normalize_session_keys(keys)
+    assert resolve(["london_open", "ny_premarket", "ny_am",
+                    "london_close", "ny_pm"]) == ["london_open", "ny_am", "ny_pm"]
+    assert resolve(["ny_premarket"]) == ["ny_am"]
+    assert resolve(["ny_lunch"]) == []          # a block with no successor
+    assert resolve(["power_hour"]) == ["power_hour"]
 
 
 def test_no_macro_logic_is_scheduled():
@@ -78,18 +101,46 @@ def test_no_macro_logic_is_scheduled():
 
 def test_default_entry_sessions_exclude_the_no_trade_windows():
     assert "asian_range" not in DEFAULT_ENTRY_SESSIONS
-    assert "ny_lunch" not in DEFAULT_ENTRY_SESSIONS
-    assert {"london_open", "ny_am", "ny_pm"} <= set(DEFAULT_ENTRY_SESSIONS)
+    assert {"london_open", "ny_am", "ny_pm", "power_hour"} <= set(
+        DEFAULT_ENTRY_SESSIONS)
 
 
 # --------------------------------------------------------------------------- #
 # Boundaries
 # --------------------------------------------------------------------------- #
 def test_asian_range_boundaries():
-    # 20:00 is inclusive, 00:00 is exclusive.
-    assert "asian_range" in active_session_keys(hm(20, 0))
+    # 19:00 is inclusive, 00:00 is exclusive.
+    assert "asian_range" not in active_session_keys(hm(18, 59))
+    assert "asian_range" in active_session_keys(hm(19, 0))
     assert "asian_range" in active_session_keys(hm(23, 59))
     assert "asian_range" not in active_session_keys(0)
+
+
+def test_the_asian_window_ends_at_midnight_rather_than_wrapping():
+    """``19:00 - 00:00`` is a same-day interval ending *at* the day boundary.
+
+    The window must not be read as wrapping (which would put the Asian range on
+    the far side of midnight, contradicting the other sessions' minutes). Its
+    end is ``24:00`` — minute 1440 — so it is a plain half-open interval, and
+    ``spans_midnight`` must say so.
+    """
+    asian = SESSION_INDEX["asian_range"]
+    assert (asian.start, asian.end) == (hm(19), hm(24))
+    assert asian.spans_midnight is False
+    assert asian.end_hhmm == "24:00"
+    # Midnight belongs to no session at all — it is the next day's minute zero.
+    assert active_session_keys(hm(0, 0)) == []
+
+
+def test_a_genuinely_wrapping_window_is_still_supported():
+    """The other shape: ``23:00 - 02:00`` really does cross midnight."""
+    wrapped = Window("night", "Night", hm(23), hm(2))
+    assert wrapped.spans_midnight is True
+    assert wrapped.contains(hm(23, 30))
+    assert wrapped.contains(hm(0, 30))
+    assert wrapped.contains(hm(1, 59))
+    assert not wrapped.contains(hm(2, 0))
+    assert not wrapped.contains(hm(12, 0))
 
 
 def test_london_open_boundaries():
@@ -100,9 +151,18 @@ def test_london_open_boundaries():
 
 
 def test_ny_am_boundaries():
-    assert "ny_am" not in active_session_keys(hm(9, 29))
-    assert "ny_am" in active_session_keys(hm(9, 30))
-    assert "ny_am" in active_session_keys(hm(11, 29))
+    assert "ny_am" not in active_session_keys(hm(6, 59))
+    assert "ny_am" in active_session_keys(hm(7, 0))
+    assert "ny_am" in active_session_keys(hm(10, 59))
+    assert "ny_am" not in active_session_keys(hm(11, 0))
+
+
+def test_ny_pm_and_power_hour_are_adjacent_not_overlapping():
+    """13:00-15:00 then 15:00-16:00: Power Hour starts as NY PM closes."""
+    assert active_session_keys(hm(13, 0)) == ["ny_pm"]
+    assert active_session_keys(hm(14, 59)) == ["ny_pm"]
+    assert active_session_keys(hm(15, 0)) == ["power_hour"]
+    assert active_session_keys(hm(15, 59)) == ["power_hour"]
 
 
 def test_window_contains_exclusive_end():
@@ -112,25 +172,18 @@ def test_window_contains_exclusive_end():
 
 
 # --------------------------------------------------------------------------- #
-# Overlaps — the precedence rule
+# No two core sessions overlap
+#
+# The previous seven-window table overlapped on purpose and needed a documented
+# precedence rule to resolve it. The operator's five-session table does not, and
+# asserting that is what keeps the simpler invariant from silently regressing.
 # --------------------------------------------------------------------------- #
-def test_ny_am_overlaps_london_close():
-    keys = set(active_session_keys(hm(10, 30)))
-    assert {"ny_am", "london_close"} <= keys
-
-
-def test_overlap_hours_resolve_to_trade_yes():
-    """NY AM (yes) sits under London Close (conditional) — yes wins."""
-    assert session_trade_mode(hm(10, 30)) == TRADE_YES
-    assert entry_permission(hm(10, 30), conditional_ok=False)[0] is True
-
-
-def test_ny_lunch_blocks_even_though_london_close_overlaps():
-    """NY Lunch (no) is a hard block; London Close runs until 12:00."""
-    assert session_trade_mode(hm(11, 45)) == TRADE_NO
-    assert session_trade_mode(hm(12, 30)) == TRADE_NO
-    assert entry_permission(hm(11, 45), conditional_ok=True)[0] is False
-    assert entry_permission(hm(11, 45))[1] == "session_not_tradable"
+@pytest.mark.parametrize("hour,minute", [
+    (2, 0), (3, 0), (4, 59), (7, 0), (9, 30), (10, 59), (13, 0), (14, 0),
+    (15, 0), (15, 59), (19, 0), (22, 0), (23, 59),
+])
+def test_no_two_core_sessions_overlap(hour, minute):
+    assert len(active_core_sessions(hm(hour, minute))) <= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -141,21 +194,36 @@ def test_ny_lunch_blocks_even_though_london_close_overlaps():
     (1, 30, TRADE_CLOSED),
     (3, 0, TRADE_YES),          # London
     (6, 0, TRADE_CLOSED),       # 05:00-07:00 gap
-    (8, 0, TRADE_CONDITIONAL),  # NY Premarket
-    (10, 0, TRADE_YES),         # NY AM
-    (12, 0, TRADE_NO),          # NY Lunch
+    (8, 0, TRADE_YES),          # NY AM (07:00-11:00)
+    (10, 30, TRADE_YES),
+    (12, 0, TRADE_CLOSED),      # 11:00-13:00 gap
     (14, 0, TRADE_YES),         # NY PM
-    (17, 0, TRADE_CLOSED),      # after NY PM, before Asian
+    (15, 30, TRADE_YES),        # Power Hour
+    (17, 0, TRADE_CLOSED),      # after Power Hour, before Asian
     (21, 0, TRADE_NO),          # Asian range
 ])
 def test_trade_mode_at_representative_hours(h, m, mode):
     assert session_trade_mode(hm(h, m)) == mode
 
 
+def test_the_midday_gap_is_closed_rather_than_a_no_trade_session():
+    """11:00-13:00 is outside every window, not a defined block.
+
+    Worth pinning because the two states are easy to conflate: a ``no`` window
+    keeps the bot awake to watch, whereas a gap sleeps and reports
+    ``outside_session``.
+    """
+    for minute in (hm(11, 0), hm(12, 0), hm(12, 59)):
+        assert session_trade_mode(minute) == TRADE_CLOSED
+        assert entry_permission(minute, conditional_ok=True) == (
+            False, "outside_session")
+
+
 def test_no_trade_sessions_block_regardless_of_conditional_ok():
     """A `no` session blocks an otherwise qualifying setup."""
-    for minute in (hm(21, 0), hm(12, 0)):
-        assert entry_permission(minute, conditional_ok=True)[0] is False
+    assert entry_permission(hm(21, 0), conditional_ok=True)[0] is False
+    assert entry_permission(hm(22, 30), conditional_ok=True)[1] == \
+        "session_not_tradable"
 
 
 def test_closed_hours_block():
@@ -166,17 +234,22 @@ def test_closed_hours_block():
 
 # --------------------------------------------------------------------------- #
 # Conditional sessions
+#
+# The operator's five-session table has no CONDITIONAL window: every tradeable
+# session is an outright ``yes``. The mode is kept in the model (and resolved by
+# session_trade_mode for any future table), but nothing may silently depend on a
+# conditional window that no longer exists.
 # --------------------------------------------------------------------------- #
-def test_premarket_is_conditional():
-    assert session_trade_mode(hm(8, 0)) == TRADE_CONDITIONAL
-    assert entry_permission(hm(8, 0), conditional_ok=False)[0] is False
-    assert entry_permission(hm(8, 0), conditional_ok=True)[0] is True
-    assert entry_permission(hm(8, 0))[1] == "session_conditional_low_liquidity"
+def test_no_session_in_the_current_table_is_conditional():
+    assert all(w.trade != TRADE_CONDITIONAL for w in CORE_SESSIONS)
 
 
-def test_unconditional_sessions_ignore_conditional_ok():
+def test_tradeable_sessions_ignore_conditional_ok():
+    """A ``yes`` session must not require the conditional bar."""
     assert entry_permission(hm(3, 0), conditional_ok=False)[0] is True
+    assert entry_permission(hm(8, 0), conditional_ok=False)[0] is True
     assert entry_permission(hm(14, 0), conditional_ok=False)[0] is True
+    assert entry_permission(hm(15, 30), conditional_ok=False)[0] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -190,30 +263,50 @@ def test_allowlist_narrows_an_allowed_session():
 
 
 def test_allowlist_does_not_widen_a_blocked_session():
-    allowed, reason = entry_permission(hm(12, 0), conditional_ok=True,
-                                       allowed_sessions=["ny_lunch"])
+    allowed, reason = entry_permission(hm(21, 0), conditional_ok=True,
+                                       allowed_sessions=["asian_range"])
     assert allowed is False
     assert reason == "session_not_tradable"
+
+
+def test_allowlist_written_against_the_old_table_still_permits_trading():
+    """``ny_premarket``/``london_close`` resolve to ``ny_am`` rather than nothing.
+
+    Without the alias an existing ``.env`` would exclude every session and the
+    bot would scan all day without ever entering.
+    """
+    legacy = ["london_open", "ny_premarket", "ny_am", "london_close", "ny_pm"]
+    assert entry_permission(hm(8, 0), allowed_sessions=legacy)[0] is True
+    assert entry_permission(hm(14, 0), allowed_sessions=legacy)[0] is True
+    # ...and it still excludes what it never listed.
+    assert entry_permission(hm(15, 30), allowed_sessions=legacy)[1] == \
+        "session_not_in_allowlist"
 
 
 # --------------------------------------------------------------------------- #
 # Labelling
 # --------------------------------------------------------------------------- #
-def test_primary_session_picks_the_narrowest_window():
-    assert primary_session(hm(10, 30)).key == "ny_am"     # 2h beats London Close 2h tie -> defined order
-    assert primary_session(hm(8, 0)).key == "ny_premarket"
+def test_primary_session_picks_the_active_window():
+    assert primary_session(hm(10, 30)).key == "ny_am"
+    assert primary_session(hm(3, 0)).key == "london_open"
     assert primary_session(hm(14, 0)).key == "ny_pm"
-    assert primary_session(hm(12, 30)).key == "ny_lunch"
+    assert primary_session(hm(15, 30)).key == "power_hour"
+    assert primary_session(hm(21, 0)).key == "asian_range"
     assert primary_session(hm(1, 0)) is None
 
 
-def test_primary_session_labels_the_lunch_overlap_as_lunch():
-    """11:30-12:00 is NY Lunch *and* London Close — the spec's label is Lunch."""
-    assert primary_session(hm(11, 45)).key == "ny_lunch"
+def test_get_trading_session_is_the_public_entry_point():
+    """The NY instant -> session question, named the way the spec asks for it."""
+    assert get_trading_session_key(MON.replace(hour=10, minute=30)) == "ny_am"
+    assert get_trading_session_label(MON.replace(hour=15, minute=30)) == "Power Hour"
+    assert get_trading_session_label(MON.replace(hour=6, minute=0)) == \
+        "Outside session"
+    assert get_trading_session(MON.replace(hour=6, minute=0)) is None
 
 
-def test_active_core_sessions_can_overlap():
-    assert len(active_core_sessions(hm(10, 30))) == 2
+def test_at_most_one_session_is_active_at_a_time():
+    assert len(active_core_sessions(hm(10, 30))) == 1
+    assert len(active_core_sessions(hm(3, 0))) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -273,7 +366,7 @@ WED = datetime(2026, 9, 16)           # Wednesday
 
 #: Every session the spec marks tradeable, pinned explicitly so the calendar
 #: tests never depend on the developer's `.env` VALID_ENTRY_SESSIONS.
-ALLOW_SESSIONS = ["london_open", "ny_premarket", "ny_am", "london_close", "ny_pm"]
+ALLOW_SESSIONS = ["london_open", "ny_am", "ny_pm", "power_hour"]
 
 
 def test_parse_trading_days():
@@ -322,20 +415,16 @@ def test_a_saturday_morning_is_not_tradeable_though_london_reports_open():
     (4, 59, "london_open"),     # last minute before the 05:00 close
     (5, 0, None),               # the London window has closed
     (6, 0, None),               # nothing at all is open
-    (7, 0, "ny_premarket"),     # conditional, but tradeable
-    (9, 29, "ny_premarket"),
-    (9, 30, "ny_am"),
-    (11, 29, "ny_am"),
-    # 11:30 is NY Lunch (a hard NO) *and* London Close (conditional). The NO
-    # window wins, so there is nothing to be awake for.
-    (11, 30, None),
-    (11, 45, None),
-    (12, 30, None),
-    (13, 29, None),
-    (13, 30, "ny_pm"),
-    (15, 59, "ny_pm"),
-    (16, 0, None),              # NY PM closed
-    (20, 0, None),              # Asian range: a defined window, but a NO one
+    (7, 0, "ny_am"),            # NY AM opens
+    (10, 59, "ny_am"),
+    (11, 0, None),              # 11:00-13:00 is a genuine gap, not a block
+    (12, 0, None),
+    (13, 0, "ny_pm"),
+    (14, 59, "ny_pm"),
+    (15, 0, "power_hour"),      # Power Hour follows NY PM directly
+    (15, 59, "power_hour"),
+    (16, 0, None),              # Power Hour closed
+    (19, 0, None),              # Asian range: a defined window, but a NO one
     (22, 0, None),
     (23, 59, None),
 ])
@@ -378,17 +467,17 @@ def test_next_activity_start_utc_skips_the_weekend():
 
 def test_next_activity_start_utc_walks_the_weekday_gaps():
     """Asleep inside a trading day, the next open is that day's next window."""
-    # 06:00 Monday -> 07:00 (NY Premarket), not Tuesday.
+    # 06:00 Monday -> 07:00 (NY AM), not Tuesday.
     nxt = next_activity_start_utc(MON.replace(hour=6, minute=0))
     assert tu.utc_to_ny(nxt) == datetime(2026, 9, 14, 7, 0)
-    # 11:45 (NY Lunch) -> 13:30 (NY PM), the far side of the lunch hour.
+    # 11:45 sits in the midday gap -> 13:00 (NY PM), the far side of the gap.
     nxt = next_activity_start_utc(MON.replace(hour=11, minute=45))
-    assert tu.utc_to_ny(nxt) == datetime(2026, 9, 14, 13, 30)
+    assert tu.utc_to_ny(nxt) == datetime(2026, 9, 14, 13, 0)
     # 16:30, after NY PM closes -> the Asian range the same evening. It is an
     # observed window, so it counts: the bot wakes to watch a level it may not
     # trade, which is exactly the distinction wake_minute exists to draw.
     nxt = next_activity_start_utc(MON.replace(hour=16, minute=30))
-    assert tu.utc_to_ny(nxt) == datetime(2026, 9, 14, 20, 0)
+    assert tu.utc_to_ny(nxt) == datetime(2026, 9, 14, 19, 0)
     # 00:30, after the Asian range closes -> the same morning's London open.
     nxt = next_activity_start_utc(MON.replace(hour=0, minute=30))
     assert tu.utc_to_ny(nxt) == datetime(2026, 9, 14, 2, 0)
@@ -437,10 +526,10 @@ def test_next_activity_start_utc_gives_up_when_no_day_qualifies():
 #: The last one is the Asian range: no entry can be taken in it, but the bot is
 #: awake to observe the level the London open trades against, so it counts as
 #: awake here.
-EXPECTED_WEEKDAY_SPANS = [(2 * 60, 5 * 60),        # London
-                          (7 * 60, 11 * 60 + 30),  # Premarket + NY AM
-                          (13 * 60 + 30, 16 * 60),  # NY PM
-                          (20 * 60, 24 * 60)]      # Asian range (observed)
+EXPECTED_WEEKDAY_SPANS = [(2 * 60, 5 * 60),         # London
+                          (7 * 60, 11 * 60),        # NY AM
+                          (13 * 60, 16 * 60),       # NY PM + Power Hour (adjacent)
+                          (19 * 60, 24 * 60)]       # Asian range (observed)
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -520,12 +609,14 @@ def test_observed_windows_are_not_subject_to_the_entry_allowlist():
 def test_observing_one_window_does_not_soften_another_windows_block():
     """Only listed windows are observed; the blocking rule is otherwise intact.
 
-    11:45 is inside NY Lunch (no) and London Close (conditional). Observing the
-    Asian range must not turn "a no window blocks" into "a no window blocks
-    unless we observe some other window entirely".
+    Observing the Asian range must not turn "a no window blocks" into "a no
+    window blocks unless we observe some other window entirely". The 11:00-13:00
+    gap is a second, weaker check: being awake for one window must never extend
+    the awake span into hours no window covers.
     """
-    assert wake_minute(hm(11, 45)) is None
-    assert wake_minute(hm(12, 0)) is None
+    assert wake_minute(hm(21, 0)) == "asian_range"   # observed, so awake
+    assert wake_minute(hm(12, 0)) is None            # a gap stays asleep
+    assert wake_minute(hm(0, 30)) is None
 
 
 @pytest.mark.parametrize("ny,active,reason,expected", [
@@ -536,6 +627,8 @@ def test_observing_one_window_does_not_soften_another_windows_block():
      "[SESSION] NY AM active — Strategy scanner ON"),
     (MON.replace(hour=14, minute=0), True, "ny_pm",
      "[SESSION] NY PM active — Strategy scanner ON"),
+    (MON.replace(hour=15, minute=30), True, "power_hour",
+     "[SESSION] Power Hour active — Strategy scanner ON"),
     # Awake on a window it only watches.
     (MON.replace(hour=21, minute=0), True, "asian_range",
      "[SESSION] Asian session active — Building liquidity"),
@@ -544,9 +637,9 @@ def test_observing_one_window_does_not_soften_another_windows_block():
      "[SESSION] Outside trading window — Scanner idle"),
     (MON.replace(hour=16, minute=30), False, OUTSIDE_SESSION_REASON,
      "[SESSION] Outside trading window — Scanner idle"),
-    # Asleep *inside* a window — named, so the block is not an unexplained gap.
+    # The midday gap: nothing is open, so the line names no window at all.
     (MON.replace(hour=12, minute=0), False, OUTSIDE_SESSION_REASON,
-     "[SESSION] NY Lunch — New signals blocked"),
+     "[SESSION] Outside trading window — Scanner idle"),
     (SAT, False, WEEKEND_REASON, "[SESSION] Saturday — Weekend mode"),
     (SUN, False, WEEKEND_REASON, "[SESSION] Sunday — Weekend mode"),
 ])
@@ -568,8 +661,8 @@ def test_each_session_state_renders_a_distinct_log_line():
         (0, "[SESSION] Outside trading window — Scanner idle"),
         (3, "[SESSION] London session active — Strategy scanner ON"),
         (10, "[SESSION] NY AM active — Strategy scanner ON"),
-        (12, "[SESSION] NY Lunch — New signals blocked"),
         (14, "[SESSION] NY PM active — Strategy scanner ON"),
+        (15, "[SESSION] Power Hour active — Strategy scanner ON"),
         (21, "[SESSION] Asian session active — Building liquidity"),
     ]
     rendered: dict[str, int] = {}

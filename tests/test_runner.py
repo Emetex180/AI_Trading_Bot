@@ -221,6 +221,12 @@ def _env(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'runner.db'}")
     monkeypatch.setenv("SESSION_GATE_ENABLED", "false")
+    # The live loop fails closed while the broker clock is unverified (see
+    # Runner._retry_broker_clock), so a session under test has to look like a
+    # verified one: publish the offset discovery would have produced. The
+    # blocked path is covered deliberately by
+    # `test_the_live_loop_holds_while_the_broker_clock_is_unverified`.
+    tu.set_server_utc_offset(2.0, "test")
     # Settings is a snapshot, so the patched env only takes effect on a rebuild —
     # a cached one would still point at the previous test's file and gate.
     settings = reload_settings()
@@ -1013,21 +1019,27 @@ def test_session_gate_reports_the_gap_between_windows(tmp_path, monkeypatch):
 def test_the_gate_respects_the_entry_allowlist(tmp_path, monkeypatch):
     """A session the operator excluded is not worth waking up for.
 
-    NY Premarket is conditional but tradeable, so 07:00 would normally be the
-    next open from 06:00. Excluded from ``VALID_ENTRY_SESSIONS`` it can never
-    enter anything, so the gate should sleep through it to NY AM.
+    At 06:00 the bot is asleep (the gap before NY AM). With NY AM allow-listed
+    the next open is 07:00; drop ``ny_am`` from the allow-list and the gate must
+    skip past the whole window to NY PM instead.
     """
     settings, maker = _env(tmp_path, monkeypatch)
     clock = _Clock(MON_0600)
     monkeypatch.setattr(tu, "now_ny", clock.now_ny)
     monkeypatch.setattr(tu, "now_utc", clock.now_utc)
     jobs, _ = _gated(settings, maker,
-                     sessions=["london_open", "ny_am", "london_close", "ny_pm"])
+                     sessions=["london_open", "ny_am", "ny_pm", "power_hour"])
 
     active, activity, next_open = jobs._session_gate()
 
     assert (active, activity) == (False, "outside_session")
-    assert tu.utc_to_ny(next_open) == datetime(2026, 9, 14, 9, 30)
+    assert tu.utc_to_ny(next_open) == datetime(2026, 9, 14, 7, 0)
+
+    # Same clock, an allow-list without NY AM: 07:00-11:00 is skipped entirely.
+    jobs, _ = _gated(settings, maker, sessions=["london_open", "ny_pm"])
+    active, activity, next_open = jobs._session_gate()
+    assert (active, activity) == (False, "outside_session")
+    assert tu.utc_to_ny(next_open) == datetime(2026, 9, 14, 13, 0)
 
 
 def test_the_gate_can_be_switched_off(tmp_path, monkeypatch):
@@ -1197,4 +1209,63 @@ def test_a_repeated_session_state_is_logged_once(tmp_path, monkeypatch):
 
     weekend_lines = [s for s in seen if s == "[SESSION] Saturday — Weekend mode"]
     assert len(weekend_lines) == 1, seen
+
+
+# --------------------------------------------------------------------------- #
+# Broker-clock gate
+#
+# Every ICT session window is derived from the broker->UTC conversion, so the
+# scanner refuses to work at all until that offset is *established* — measured
+# from a live terminal or pinned by the operator. ``_env`` publishes one so the
+# polling tests above are not blocked by this; these two exercise the gate.
+# --------------------------------------------------------------------------- #
+def test_the_live_loop_holds_while_the_broker_clock_is_unverified(tmp_path, monkeypatch):
+    """Fail closed: no verified offset, no scanning.
+
+    An unverified offset mis-dates every session window at once, and a
+    confident signal from a mis-dated window is not recoverable the way a
+    missed one is. ``_FakeClient`` exposes no discovery hook, which is exactly
+    the terminal that cannot resolve its clock.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(tu, "_discovered_offset", None)     # un-verify it
+    assert tu.broker_offset_verified() is False
+
+    seen: list[str] = []
+    market = _FakeMarket()
+    # The session-hours gate stays off (``_env``), so the loop reaches the clock
+    # gate on every pass instead of sleeping through the weekend.
+    jobs = _jobs(settings, maker, market_factory=lambda c, s: market,
+                 on_event=seen.append)
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    assert _wait_for(lambda: any("NOT verified" in m for m in seen)), seen
+
+    # The refusal is the whole point: MT5 was never asked for a candle.
+    assert market.polls == 0
+    jobs.stop_live(timeout=5)
+
+
+def test_the_broker_clock_block_is_announced_once_not_every_poll(tmp_path, monkeypatch):
+    """A standing condition is reported once, not re-reported every few seconds.
+
+    ``announce=False`` is the steady state of a still-closed gate; repeating the
+    line would bury the log it exists to protect.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(tu, "_discovered_offset", None)
+    seen: list[str] = []
+    jobs = _jobs(settings, maker, on_event=seen.append)
+    repo = _read(maker)
+
+    assert jobs._retry_broker_clock(_FakeClient(), repo, announce=True) is False
+    assert jobs._retry_broker_clock(_FakeClient(), repo, announce=False) is False
+
+    blocks = [m for m in seen if "NOT verified" in m]
+    assert len(blocks) == 1, seen
+    assert "scanner held" in blocks[0]
+
+    errors = [e for e in repo.recent_events(limit=50) if e.level == "ERROR"]
+    assert len(errors) == 1, [e.message for e in errors]
 

@@ -22,6 +22,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from . import sessions as sess
 from . import time_utils as tu
 from .risk_manager import RiskDecision, RiskManager, compute_rr
 
@@ -170,7 +171,13 @@ def validate_candidate(cand: SetupCandidate, min_rr: float,
     if not cand.session_keys:
         problems.append("no_session")
     if reject_non_target_sessions:
-        allowed = set(valid_entry_sessions)
+        # The allow-list is normalised through the session module so a legacy
+        # key (``ny_premarket``) resolves to the window that replaced it. A raw
+        # set intersection here would see no overlap at all and reject every
+        # setup, which is exactly the failure the alias exists to prevent — and
+        # it would do so on a *second* gate, after entry_permission had already
+        # resolved the same list correctly.
+        allowed = set(sess.normalize_session_keys(valid_entry_sessions))
         if not allowed.intersection(set(cand.session_keys)):
             problems.append("session_not_tradable")
     if not cand.cisd_tf:

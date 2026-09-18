@@ -11,9 +11,12 @@ used as-is — nothing about the package is patched or replaced.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from config import Settings
+
+from . import time_utils as tu
 
 try:  # pragma: no cover - importable only where the package is installed
     import MetaTrader5 as _mt5  # type: ignore
@@ -23,6 +26,23 @@ except Exception:  # pragma: no cover - defensive
 
 class MT5Error(RuntimeError):
     """Raised when an MT5 operation cannot be performed."""
+
+
+#: Brokers put their server clock on quarter-hour boundaries, so a discovered
+#: offset is snapped to this grid — that is what makes agreement between two
+#: independent symbols meaningful.
+OFFSET_QUANTUM_SECONDS = 900
+
+#: How far a broker clock may plausibly sit from UTC (UTC-12 .. UTC+14).
+MAX_SANE_OFFSET_HOURS = 14.0
+
+#: A clock reading this far off the snap grid is stale rather than offset.
+OFFSET_TOLERANCE_SECONDS = 120
+
+#: The newest M1 bar must have opened within this long for the market to count
+#: as live — the check that stops a weekend-close clock reading from being
+#: mistaken for a broker offset.
+MAX_BAR_AGE_SECONDS = 600
 
 
 @dataclass
@@ -218,6 +238,129 @@ class MT5Client:
         return bool(_mt5.symbol_select(symbol, True))
 
     # ------------------------------------------------------------------ #
+    # Broker clock discovery
+    # ------------------------------------------------------------------ #
+    def _tick_time_epoch(self, symbol: str) -> int | None:
+        """The broker-clock epoch of ``symbol``'s last tick, or ``None``."""
+        tick = _mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return None
+        stamp = int(getattr(tick, "time", 0) or 0)
+        return stamp or None
+
+    def _newest_m1_open_epoch(self, symbol: str) -> int | None:
+        """The broker-clock epoch of the newest M1 bar's open, or ``None``."""
+        rows = self._copy_rates_from_pos_raw(symbol, "M1", 0, 1)
+        return int(rows[0][0]) if rows else None
+
+    def _probe_symbols(self, preferred: list[str] | None, limit: int) -> list[str]:
+        """Symbols to read the broker clock from, best first.
+
+        Prefers the caller's own traded symbols (they are selected in Market
+        Watch, and 24/5 instruments are the ones most likely to be quoting), then
+        falls back to a few continuously-quoted majors.
+        """
+        out: list[str] = [s for s in (preferred or []) if s]
+        available = set(self.symbol_names())
+        for candidate in ("EURUSD", "USDCAD", "XAUUSD", "US100", "GBPUSD"):
+            if candidate in available and candidate not in out:
+                out.append(candidate)
+        return out[:limit]
+
+    def discover_server_utc_offset_hours(
+            self, preferred_symbols: list[str] | None = None,
+            limit: int = 5) -> tuple[float | None, str]:
+        """Derive the broker's offset ahead of UTC from the terminal itself.
+
+        Returns ``(offset_hours, detail)``; ``offset_hours`` is ``None`` when the
+        offset could not be *verified*, and ``detail`` says why — callers must
+        treat that as "unknown", never as zero.
+
+        How it works: ``symbol_info_tick().time`` is the broker's own wall clock
+        at the last quote, and the host knows real UTC, so the difference **is**
+        the offset — no table of broker names, and no assumption that any given
+        broker is UTC+2 or UTC+3. Observations are snapped to the quarter-hour
+        grid brokers actually use, and only accepted when two or more symbols
+        agree exactly.
+
+        There is one trap, and it is the reason for the second half of this
+        method: when the market is **closed** the last tick is not "now", it is
+        the *close* instant, so the difference is the offset minus however long
+        the market has been shut and looks like a plausible offset in its own
+        right. The candidate is therefore confirmed against the newest M1 bar:
+        if applying it does not place that bar within the last few minutes, the
+        reading is stale and is rejected rather than guessed at.
+        """
+        if not self.is_connected():
+            return None, "terminal not connected"
+
+        real_now = tu.now_utc()
+        votes: dict[float, int] = {}
+        for symbol in self._probe_symbols(preferred_symbols, limit):
+            epoch = self._tick_time_epoch(symbol)
+            if epoch is None:
+                continue
+            broker_now = tu.utc_epoch_to_naive(epoch)
+            raw = (broker_now - real_now).total_seconds()
+            snapped = round(raw / OFFSET_QUANTUM_SECONDS) * OFFSET_QUANTUM_SECONDS
+            if abs(snapped) > MAX_SANE_OFFSET_HOURS * 3600:
+                continue
+            # Only accept a reading that was already within the quantum grid;
+            # a large residual means the clock is stale, not merely offset.
+            if abs(raw - snapped) > OFFSET_TOLERANCE_SECONDS:
+                continue
+            hours = snapped / 3600.0
+            votes[hours] = votes.get(hours, 0) + 1
+
+        if not votes:
+            return None, "no live tick from any probe symbol"
+
+        offset_hours, agree = max(votes.items(), key=lambda kv: kv[1])
+        if agree < 2:
+            return None, (f"only one symbol reported the broker clock "
+                          f"(UTC{offset_hours:+.2f}); need agreement to trust it")
+
+        # Confirm against the newest bar, which cannot corroborate a stale read.
+        confirmed, why = self._confirm_offset(offset_hours, preferred_symbols)
+        if not confirmed:
+            return None, why
+        return offset_hours, f"discovered from {agree} symbol(s) via {why}"
+
+    def _confirm_offset(self, offset_hours: float,
+                        preferred_symbols: list[str] | None) -> tuple[bool, str]:
+        """Is ``offset_hours`` consistent with a bar that opened *just now*?"""
+        for symbol in self._probe_symbols(preferred_symbols, 3):
+            epoch = self._newest_m1_open_epoch(symbol)
+            if epoch is None:
+                continue
+            broker_open = tu.utc_epoch_to_naive(epoch)
+            age = (tu.now_utc() - (broker_open - timedelta(hours=offset_hours))
+                   ).total_seconds()
+            if 0 <= age <= MAX_BAR_AGE_SECONDS:
+                return True, f"newest {symbol} M1 bar opened {age:.0f}s ago"
+        return False, ("broker clock reading is stale (the market looks closed), "
+                       "so the offset cannot be verified right now")
+
+    def discover_and_publish_server_offset(
+            self, preferred_symbols: list[str] | None = None) -> tuple[float | None, str]:
+        """Discover the broker offset and publish it process-wide.
+
+        The single entry point the runner calls once per terminal session, so
+        every later :func:`trading.time_utils.broker_to_utc` reads the verified
+        number without needing a handle on this client. An explicit
+        ``MT5_SERVER_UTC_OFFSET`` still wins, and a mismatch is reported loudly
+        rather than obeyed in silence.
+        """
+        offset, detail = self.discover_server_utc_offset_hours(preferred_symbols)
+        configured = tu.configured_server_utc_offset()
+        if offset is not None:
+            tu.set_server_utc_offset(offset, "discovered")
+        if configured is not None and offset is not None and abs(configured - offset) > 1e-9:
+            return offset, (f"{detail} — WARNING: disagrees with the pinned "
+                            f"MT5_SERVER_UTC_OFFSET={configured:+.2f}, which wins")
+        return offset, detail
+
+    # ------------------------------------------------------------------ #
     # Market data (server-clock times; conversion happens in market_data)
     # ------------------------------------------------------------------ #
     def _timeframe_code(self, timeframe: str) -> int:
@@ -304,7 +447,13 @@ class MT5Client:
 
 
 def row_time_to_server_naive(row_time_epoch: int) -> Any:
-    """Convert an MT5 row timestamp to a naive server-clock datetime."""
-    from datetime import datetime
+    """Convert an MT5 row timestamp to a naive server-clock datetime.
 
-    return datetime.fromtimestamp(int(row_time_epoch))
+    Delegates to :func:`trading.time_utils.utc_epoch_to_naive`, which is the one
+    place that knows MT5 epochs are the broker's wall clock. Reading them with a
+    bare ``datetime.fromtimestamp`` here would interpret them in the *host
+    machine's* timezone instead — see that function's docstring.
+    """
+    from . import time_utils as tu
+
+    return tu.utc_epoch_to_naive(row_time_epoch)

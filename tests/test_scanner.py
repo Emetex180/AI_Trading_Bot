@@ -78,7 +78,7 @@ def test_warmup_ignores_stale_signals_and_live_step_alerts_once():
     scanner.warm(warm)              # state advanced, no downstream action
     assert repo.count_signals() == 0
 
-    handled = scanner.step(feed)    # 09:00 H1 close -> premise -> entry at 09:10
+    handled = scanner.step(feed)    # 09:00 H1 close -> premise -> entry at 09:34
     assert handled == 1
     assert repo.count_signals() == 1
     row = repo.recent_signals()[0]
@@ -205,10 +205,11 @@ def test_setup_states_report_the_machine_that_produced_the_signal():
     warm, feed = build_scenario()
     scanner.warm(warm)
 
-    # Held one minute short of the entry: the buy side is waiting on its retrace.
+    # Held one minute short of the entry: the gap has been traded into, so the
+    # buy side is sitting on a confirmed retracement waiting for its fill.
     scanner.step(feed[:-1])
     states = scanner.setup_states()
-    assert states["buy"] == "WAITING_FOR_FVG_RETRACE"
+    assert states["buy"] == "RETRACE_CONFIRMED"
 
     scanner.step(feed[-1:])
     assert scanner.setup_states()["buy"] == "TRADE_CONFIRMED"

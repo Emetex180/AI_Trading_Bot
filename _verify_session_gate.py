@@ -14,7 +14,7 @@ from trading import time_utils as tu
 
 # Every session the spec marks tradeable, pinned so the result does not depend
 # on this machine's .env.
-ALLOW = ["london_open", "ny_premarket", "ny_am", "london_close", "ny_pm"]
+ALLOW = ["london_open", "ny_am", "ny_pm", "power_hour"]
 
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -58,9 +58,10 @@ def fmt(spans: list[tuple[int, int]]) -> str:
                      for s, e in spans) or "asleep all day"
 
 
-EXPECTED_WEEKDAY = [(120, 300), (420, 690), (810, 960), (1200, 1440)]
-# 02:00-05:00 London, 07:00-11:30 Premarket+NY AM, 13:30-16:00 NY PM, and
-# 20:00-24:00 Asian — awake to build the range, though nothing can be entered.
+EXPECTED_WEEKDAY = [(120, 300), (420, 660), (780, 960), (1140, 1440)]
+# 02:00-05:00 London, 07:00-11:00 NY AM, and 13:00-16:00 NY PM + Power Hour (the
+# two abut, so they merge into one span), plus 19:00-24:00 Asian — awake to build
+# the range, though nothing can be entered.
 
 print("Walking a simulated week of NY minutes per season...\n")
 spans_by_season = {}
@@ -79,8 +80,8 @@ for label, spans in spans_by_season.items():
           f"{label}: the weekend is silent")
     for day in ("Mon", "Tue", "Wed", "Thu", "Fri"):
         check(spans[day] == EXPECTED_WEEKDAY,
-              f"{label}: {day} awake exactly 02:00-05:00, 07:00-11:30, "
-              "13:30-16:00, 20:00-24:00")
+              f"{label}: {day} awake exactly 02:00-05:00, 07:00-11:00, "
+              "13:00-16:00, 19:00-24:00")
 
     # The gate is defined on the NY wall clock, so the spans must not move with
     # the season. This is what would break if a fixed UTC-4 were hard-coded.

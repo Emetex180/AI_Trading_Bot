@@ -4,12 +4,26 @@ The model
 ---------
     1H liquidity purge  (previous-day, session, Asian/London, previous-hour,
                          equal-high/low and swing liquidity)
-        └─ 5M CISD confirmed *after* the purge
+        └─ 5M CISD confirmed *after the purge candle has closed*
             └─ the FIRST qualifying 1M FVG formed after that CISD
                 └─ wait for price to trade back into that FVG
-                    └─ SL = the 5M candle that took the liquidity
+                    └─ a candle closes within the FVG → entry
+                       SL = the 5M candle that took the liquidity
                        TP = nearest valid liquidity pull in the trade direction
                           → RR + efficiency → deterministic + risk approval → Signal
+
+Each stage is a separate state and a later one cannot be reached without the
+one before it (see the state table below). Two consequences are deliberate and
+worth stating, because both were bugs:
+
+* **The purge must be complete.** The sweep still happens inside the 1H candle,
+  but the CISD search opens only once that candle has *closed*. A 5M reclaim
+  printed while the hour was still forming is not a CISD for this premise, and
+  it is never revisited later.
+* **A retracement is not an entry.** Price wicking into the gap confirms the
+  retracement (``RETRACE_CONFIRMED``); the entry needs a closed candle whose
+  *close* sits within the gap. A close beyond the far boundary therefore cannot
+  produce a signal whose entry price is outside the FVG.
 
 Zero lookahead: every decision is taken on *closed* candles. The 5M series only
 ever contains finalized buckets, an FVG is only reported for a fully-formed
@@ -25,7 +39,8 @@ State machine
 Two independent episodes per asset, one per direction, each advancing through
 
     NO_SETUP → LIQUIDITY_PURGED → CISD_CONFIRMED → FVG_FOUND
-             → WAITING_FOR_FVG_RETRACE → TRADE_CONFIRMED
+             → WAITING_FOR_FVG_RETRACE → RETRACE_CONFIRMED
+             → TRADE_CONFIRMED
              ↘ INVALIDATED (any point; resets cleanly)
 
 Exactly one transition happens per closed M1 candle. In particular the tick
@@ -50,7 +65,7 @@ from . import cisd as cisd_mod
 from . import sessions as sess
 from . import time_utils as tu
 from .asset_manager import Asset
-from .fvg import FVG, classify, fvg_on_tail
+from .fvg import FVG, classify, closes_inside, fvg_on_tail
 from .indicators import atr
 from .liquidity import (Level, build_level_snapshot, detect_sweeps, grade_at_least,
                         select_tp_target, strongest_purge)
@@ -62,21 +77,57 @@ from .stream import BarsStream
 
 # --------------------------------------------------------------------------- #
 # Setup states
+#
+# One direction's setup advances strictly in this order, and no stage may be
+# reached without the one before it:
+#
+#     NO_SETUP
+#        ↓  1H purge candle CLOSED  (a sweep inside a still-forming hour is not
+#        │                           a premise yet)
+#     LIQUIDITY_PURGED
+#        ↓  5M CISD confirmed *after* that close
+#     CISD_CONFIRMED
+#        ↓  first qualifying 1M FVG
+#     FVG_FOUND
+#        ↓  price trades back into the gap
+#     RETRACE_CONFIRMED
+#        ↓  a candle closes within the gap
+#     TRADE_CONFIRMED
+#        ↘  INVALIDATED (any point; resets cleanly)
 # --------------------------------------------------------------------------- #
 NO_SETUP = "NO_SETUP"
 LIQUIDITY_PURGED = "LIQUIDITY_PURGED"
 CISD_CONFIRMED = "CISD_CONFIRMED"
 FVG_FOUND = "FVG_FOUND"
 WAITING_FOR_FVG_RETRACE = "WAITING_FOR_FVG_RETRACE"
+#: The gap has been traded into. Distinct from TRADE_CONFIRMED on purpose: a
+#: wick into the FVG is a *retracement*, not an entry — the entry needs a close
+#: back inside the zone, and this state is genuinely reachable on its own.
+RETRACE_CONFIRMED = "RETRACE_CONFIRMED"
 TRADE_CONFIRMED = "TRADE_CONFIRMED"
 INVALIDATED = "INVALIDATED"
+
+# --------------------------------------------------------------------------- #
+# Entry models (``FVG_ENTRY_MODEL``)
+# --------------------------------------------------------------------------- #
+#: Default: the entry candle must close *within* the gap, so the entry price is
+#: always a price inside the FVG. A close beyond the far boundary is refused.
+ENTRY_MODEL_INSIDE_FVG = "inside_fvg"
+#: Opt-in legacy rule: a close back beyond the gap that reclaims it counts,
+#: allowing an entry price outside the FVG. Never selected automatically.
+ENTRY_MODEL_REACTION_CLOSE = "reaction_close"
+ENTRY_MODELS = (ENTRY_MODEL_INSIDE_FVG, ENTRY_MODEL_REACTION_CLOSE)
 
 #: States in which the setup's FVG exists. That is exactly what §3 fixes in
 #: place: "the first qualifying FVG is not replaced unless invalidated", so a
 #: newer 1H purge must not supersede one of these. Deliberately excludes
 #: CISD_CONFIRMED — no gap has formed yet, so a fresh purge there is a better
 #: premise rather than a setup being destroyed.
-_FVG_ESTABLISHED = frozenset({FVG_FOUND, WAITING_FOR_FVG_RETRACE})
+#:
+#: RETRACE_CONFIRMED belongs here for the same reason FVG_FOUND does: the gap
+#: has been traded into, so the setup is mid-sequence and only an invalidation
+#: rule may clear it.
+_FVG_ESTABLISHED = frozenset({FVG_FOUND, WAITING_FOR_FVG_RETRACE, RETRACE_CONFIRMED})
 
 # --------------------------------------------------------------------------- #
 # Defaults for the few knobs that are not configuration settings
@@ -129,20 +180,29 @@ class _Episode:
     purge_time_utc: datetime | None = None
     purge_time_ny: datetime | None = None
     purge_close_utc: datetime | None = None
+    #: Deepest excursion of the purge candle beyond the swept level.
+    purge_sweep_price: float = 0.0
+    purge_h1_close: float = 0.0
 
     # --- step 2: 5M CISD ------------------------------------------------ #
     cisd_tf: str = "M5"
     cisd_time_utc: datetime | None = None
     cisd_time_ny: datetime | None = None
     cisd_close_utc: datetime | None = None
+    cisd_close_price: float = 0.0
     sl_anchor_price: float = 0.0            # the 5M liquidity-taking candle
     sl_anchor_time_ny: datetime | None = None
     cisd_waited: int = 0                    # 5M bars since the purge closed
 
     # --- step 3: 1M FVG -------------------------------------------------- #
     fvg: FVG | None = None
+    fvg_min_depth: float = 0.0              # ATR-derived floor in force
     fvg_waited: int = 0                     # M1 bars since the CISD confirmed
+
+    # --- step 4: retracement -------------------------------------------- #
     retrace_waited: int = 0                 # M1 bars since the FVG was found
+    retrace_time_ny: datetime | None = None
+    retrace_extreme: float = 0.0            # the wick that reached into the gap
     signal_id: str = ""
 
 
@@ -213,6 +273,14 @@ class ICTStrategy:
             "retrace_wait_m1", cfg.retrace_wait_m1))
         self.fvg_min_atr_frac: float = float(asset_setting(
             "fvg_min_atr_frac", cfg.fvg_min_atr_frac))
+        # Which price the entry may be taken at. An unrecognised value falls back
+        # to the strict model rather than to the permissive one: a typo in
+        # `.env` must never quietly widen the entry rule.
+        model = str(asset_setting(
+            "fvg_entry_model", getattr(cfg, "fvg_entry_model", ENTRY_MODEL_INSIDE_FVG))
+        ).strip().lower()
+        self.fvg_entry_model: str = (model if model in ENTRY_MODELS
+                                     else ENTRY_MODEL_INSIDE_FVG)
         self.max_signals_per_session: int = int(asset_setting(
             "max_signals_per_session", cfg.max_signals_per_session))
         self.invalidate_on_no_trade_session: bool = bool(asset_setting(
@@ -310,11 +378,26 @@ class ICTStrategy:
             return
 
         if bullish:
-            self._start_episode("buy", bullish.level, h1_candle)
+            self._start_episode("buy", bullish.level, h1_candle,
+                                sweep_price=self._sweep_extreme(bullish))
         elif bearish:
-            self._start_episode("sell", bearish.level, h1_candle)
+            self._start_episode("sell", bearish.level, h1_candle,
+                                sweep_price=self._sweep_extreme(bearish))
 
-    def _start_episode(self, direction: str, level: Level, h1_candle) -> None:
+    @staticmethod
+    def _sweep_extreme(event) -> float:
+        """Where price actually went, beyond the swept level.
+
+        ``detect_sweeps`` records the overshoot as a distance from the level, so
+        the excursion is that distance measured away from it in the sweep's
+        direction — the same number the stop-loss anchor is later built from.
+        """
+        if event.direction == "bullish":
+            return event.level.price - event.distance
+        return event.level.price + event.distance
+
+    def _start_episode(self, direction: str, level: Level, h1_candle,
+                       sweep_price: float | None = None) -> None:
         current = self._episodes.get(direction)
         if current is not None and current.state in _FVG_ESTABLISHED:
             # The setup already has its qualifying FVG, so that gap is the one
@@ -328,6 +411,11 @@ class ICTStrategy:
                       f"{current.purge_time_ny:%H:%M} NY already has its FVG "
                       "and has not been invalidated")
             return
+        # The purge candle is only ever offered to this method once it has
+        # *closed* (`_on_h1_closed` runs off the finalized H1 bucket), so the
+        # sweep inside it is complete and the premise is confirmed on entry.
+        if sweep_price is None:
+            sweep_price = h1_candle.low if direction == "buy" else h1_candle.high
         episode = _Episode(
             direction=direction,
             state=LIQUIDITY_PURGED,
@@ -337,14 +425,18 @@ class ICTStrategy:
             purge_time_utc=h1_candle.t_utc,
             purge_time_ny=h1_candle.t_ny,
             purge_close_utc=h1_candle.t_utc + timedelta(hours=1),
+            purge_sweep_price=float(sweep_price),
+            purge_h1_close=h1_candle.close,
             cisd_tf=cisd_mod.resolve_timeframe(h1_candle.t_ny, self.cisd_timeframe,
                                                self.cisd_threshold_hour),
         )
         self._episodes[direction] = episode
         self._last_state[direction] = LIQUIDITY_PURGED
+        self._log_purge_block(episode, h1_candle)
         self._log(f"1H {_side_label(direction)} liquidity purged "
-                  f"({level.label} @ {level.price}) — waiting for "
-                  f"{episode.cisd_tf} {_direction_label(direction)} CISD")
+                  f"({level.label} @ {level.price}) — the purge candle has "
+                  f"closed ({tu.utc_to_ny(episode.purge_close_utc):%H:%M} NY), "
+                  f"so the {episode.cisd_tf} CISD search now begins")
 
     # ------------------------------------------------------------------ #
     # Per-minute advance — one transition per direction per candle
@@ -358,12 +450,25 @@ class ICTStrategy:
             if episode is None:
                 continue
 
-            # A pending setup may not survive a no-trade session (the Asian
-            # range and NY lunch are range-building/dead time, not entry time).
-            if self.enforce_sessions and self.invalidate_on_no_trade_session and \
-                    sess.session_trade_mode(minute) == sess.TRADE_NO:
-                self._invalidate(direction, "no-trade session")
-                continue
+            # A pending setup may not survive dead time. The Asian range is a
+            # range-building block, and the hours outside every window are a
+            # closed market; both are non-entry time, so a setup that reaches
+            # either is dropped rather than carried forward.
+            #
+            # Treating the closed hours the same as a defined NO-trade window
+            # preserves the rule's original effect under the five-session table.
+            # The old table had an explicit NY Lunch (11:30-13:30) here; its
+            # successor is the 11:00-13:00 gap, and without this the very same
+            # setup would survive the gap and could enter on an FVG that is by
+            # then ~90 minutes stale. The rule only ever *cancels* setups, so
+            # widening it cannot manufacture an entry.
+            if self.enforce_sessions and self.invalidate_on_no_trade_session:
+                mode = sess.session_trade_mode(minute)
+                if mode in (sess.TRADE_NO, sess.TRADE_CLOSED):
+                    self._invalidate(direction,
+                                     "no-trade session" if mode == sess.TRADE_NO
+                                     else "outside session")
+                    continue
 
             state = episode.state
             if state == LIQUIDITY_PURGED:
@@ -374,7 +479,9 @@ class ICTStrategy:
                 episode.state = WAITING_FOR_FVG_RETRACE
                 self._last_state[direction] = WAITING_FOR_FVG_RETRACE
                 self._log("Waiting for FVG retracement")
-            elif state == WAITING_FOR_FVG_RETRACE:
+            elif state in (WAITING_FOR_FVG_RETRACE, RETRACE_CONFIRMED):
+                # Both stages run the same per-candle check; which one the setup
+                # is in is what decides whether an entry may be taken at all.
                 signals += self._step_retrace(direction, episode, candle)
         return signals
 
@@ -384,19 +491,28 @@ class ICTStrategy:
     def _step_cisd(self, direction: str, episode: _Episode) -> None:
         series = self.stream.tf(episode.cisd_tf)
 
-        # The purge candle's own 5M sub-candles may confirm the CISD (that is
-        # where the liquidity was taken); the timeout counts only the bars that
-        # opened after the purge hour closed.
+        # The CISD search opens when the purge candle *closes*, not when it
+        # opens. The sweep itself stays inside the 1H candle — that is where the
+        # liquidity was taken — but a 5M reclaim that printed while the hour was
+        # still forming happened before the premise existed, so it is not a CISD
+        # for this setup and is never revisited later.
+        #
+        # ``purge_close_utc`` is the open of the first 5M bucket after the purge
+        # hour, so a bucket that merely straddles the hour boundary is excluded
+        # too: the confirmation must occur entirely after the hour is complete.
+        # `after_time_utc` is inclusive, which is what puts that first
+        # post-purge bucket in scope and every earlier one out of it.
         after_purge = [c for c in series if c.t_utc >= episode.purge_close_utc]
         episode.cisd_waited = len(after_purge)
         if episode.cisd_waited > self.max_cisd_candles:
             self._invalidate(direction, f"no {episode.cisd_tf} CISD within "
-                                        f"{self.max_cisd_candles} candles")
+                                        f"{self.max_cisd_candles} candles of the "
+                                        "completed purge")
             return
 
         confirm_candle = cisd_mod.confirm(
             series, episode.purge_price, direction,
-            after_time_utc=episode.purge_time_utc,
+            after_time_utc=episode.purge_close_utc,
             params=cisd_mod.CISDParams(max_candles=self.max_cisd_candles),
         )
         if confirm_candle is None:
@@ -406,9 +522,11 @@ class ICTStrategy:
         episode.cisd_time_utc = confirm_candle.t_utc
         episode.cisd_time_ny = confirm_candle.t_ny
         episode.cisd_close_utc = confirm_candle.t_utc + timedelta(minutes=period_min)
+        episode.cisd_close_price = confirm_candle.close
         self._set_sl_anchor(episode, confirm_candle)
         episode.state = CISD_CONFIRMED
         self._last_state[direction] = CISD_CONFIRMED
+        self._log_cisd_block(episode, confirm_candle)
         self._log(f"{_direction_label(direction).title()} CISD confirmed on "
                   f"{episode.cisd_tf} — SL anchored to the {episode.cisd_tf} "
                   f"liquidity-taking candle @ {episode.sl_anchor_price}")
@@ -455,18 +573,26 @@ class ICTStrategy:
         if formed is None:
             return
 
-        # A qualifying FVG must clear the optional minimum depth; a smaller gap
-        # is not "the first qualifying FVG", so keep looking.
-        if self.fvg_min_atr_frac > 0:
-            min_depth = self._atr_m5() * self.fvg_min_atr_frac
-            if formed.depth() < min_depth:
-                return
+        # A qualifying FVG must clear the minimum depth, expressed as a fraction
+        # of 5M ATR. Without it a one-tick gap is a "gap" and the first one the
+        # scanner happens to see becomes the setup. A gap that is too thin is
+        # not the first qualifying FVG, so keep looking.
+        min_depth = self._fvg_min_depth()
+        episode.fvg_min_depth = min_depth
+        if min_depth > 0 and formed.depth() < min_depth:
+            self._log_fvg_block(formed, min_depth, valid=False)
+            return
 
         episode.fvg = formed
         episode.state = FVG_FOUND
         self._last_state[direction] = FVG_FOUND
-        self._log(f"First {_direction_label(direction)} 1M FVG detected "
-                  f"[{formed.lower}, {formed.upper}]")
+        self._log_fvg_block(formed, min_depth, valid=True)
+
+    def _fvg_min_depth(self) -> float:
+        """The minimum FVG height in price terms; 0.0 disables the filter."""
+        if self.fvg_min_atr_frac <= 0:
+            return 0.0
+        return self._atr_m5() * self.fvg_min_atr_frac
 
     # ------------------------------------------------------------------ #
     # Step 4 — trade back into the FVG
@@ -490,33 +616,110 @@ class ICTStrategy:
         if state == "invalidated":
             self._invalidate(direction, "FVG invalidated")
             return []
-        if state != "retraced":
+
+        # ---- stage 4: RETRACEMENT ------------------------------------- #
+        # Recorded once, on the first candle whose range reaches the gap. This
+        # is a state in its own right — the setup now has its retracement but
+        # has *not* been entered — so a wick into the zone can never be
+        # converted straight into a fill at some unrelated later close.
+        if state == "retraced" and episode.state != RETRACE_CONFIRMED:
+            episode.retrace_time_ny = candle.t_ny
+            episode.retrace_extreme = (candle.low if direction == "buy"
+                                       else candle.high)
+            episode.state = RETRACE_CONFIRMED
+            self._last_state[direction] = RETRACE_CONFIRMED
+            self._log_retrace_block(episode, candle, entered=True)
+
+        # ---- stage 5: ENTRY TRIGGER ----------------------------------- #
+        # Unreachable without the retracement above: NO_RETRACE → NO_ENTRY.
+        if episode.state != RETRACE_CONFIRMED:
             return []
-        if not self._is_entry_candle(candle, episode):
+        if not self._entry_trigger(candle, episode):
+            self._log_overshot_entry(candle, episode)
             return []
 
         signal = self._build_entry_signal(candle, episode)
         if signal is not None:
-            self._log("FVG traded into")
             self._last_state[direction] = TRADE_CONFIRMED
             self._episodes.pop(direction, None)
             return [signal]
         return []
 
-    def _is_entry_candle(self, candle, episode: _Episode) -> bool:
+    def _entry_trigger(self, candle, episode: _Episode) -> bool:
+        """May this closed candle be filled? The retracement must already exist.
+
+        Two requirements, both necessary:
+
+        1. the candle closes in the trade's direction (a bullish close for a
+           buy), so the entry is a reaction and not a continuation into the gap;
+        2. under the default ``inside_fvg`` model, that close sits *within*
+           ``[fvg.lower, fvg.upper]`` — the fill is a price inside the gap.
+
+        (2) is what makes an entry outside the gap impossible: a close beyond
+        the far boundary is refused here, not merely discouraged elsewhere. Only
+        the explicitly opted-in ``reaction_close`` model relaxes it, and that is
+        never selected by default.
+        """
         fvg = episode.fvg
+        bullish = candle.close > candle.open
         if episode.direction == "buy":
-            return candle.close > candle.open and candle.close > fvg.midpoint \
-                and candle.close > fvg.lower
-        return candle.close < candle.open and candle.close < fvg.midpoint \
-            and candle.close < fvg.upper
+            if not bullish:
+                return False
+        elif candle.close >= candle.open:
+            return False
+
+        if self.fvg_entry_model == ENTRY_MODEL_REACTION_CLOSE:
+            # Opt-in legacy rule: a close that reclaims the swept level counts
+            # even when it lands outside the gap. Permits an entry price beyond
+            # the FVG — the operator asked for it explicitly.
+            if episode.direction == "buy":
+                return candle.close > fvg.midpoint and candle.close > fvg.lower
+            return candle.close < fvg.midpoint and candle.close < fvg.upper
+
+        return closes_inside(candle, fvg)
+
+    def _log_overshot_entry(self, candle, episode: _Episode) -> None:
+        """Say so when a candle closes clean *through* the gap and is refused.
+
+        This is the shape of the reported USDCHF defect — entry 0.82359 against
+        a gap topping out at 0.82353 — so it is worth a line rather than a
+        silence: the operator needs to see that the setup reacted in the right
+        direction and was still not filled.
+
+        Deliberately narrow. A close that is short of the gap is an ordinary
+        waiting minute, and logging those would bury this. Under the opted-in
+        ``reaction_close`` model such a close *is* the entry, so nothing is
+        logged here either.
+        """
+        if self.fvg_entry_model == ENTRY_MODEL_REACTION_CLOSE:
+            return
+        fvg = episode.fvg
+        overshot = (candle.close > fvg.upper if episode.direction == "buy"
+                    else candle.close < fvg.lower)
+        if not overshot:
+            return
+        self._log_entry_block(episode, candle, candle.close, entry_inside=False)
+        self._reject(f"entry {self._fmt(candle.close)} is outside the FVG "
+                     f"[{self._fmt(fvg.lower)}, {self._fmt(fvg.upper)}] — the "
+                     "retracement into the gap is required first")
 
     # ------------------------------------------------------------------ #
     # Entry construction
     # ------------------------------------------------------------------ #
     def _build_entry_signal(self, candle, episode: _Episode) -> Signal | None:
         direction = episode.direction
+        fvg = episode.fvg
+        # The fill is the confirming close, and under the default model the
+        # trigger has already proven that close sits inside the gap. The guard
+        # below re-states it rather than trusting the call path: an entry price
+        # outside its own FVG is the exact defect this rule exists to prevent,
+        # so it is refused here even if a future edit loosens the trigger.
         entry = candle.close
+        if self.fvg_entry_model == ENTRY_MODEL_INSIDE_FVG and not fvg.contains(entry):
+            self._reject(f"entry {entry} is outside the FVG "
+                         f"[{fvg.lower}, {fvg.upper}]")
+            return None
+
         atr_m5 = self._atr_m5()
         tick = self._tick_size()
 
@@ -636,6 +839,7 @@ class ICTStrategy:
             return None
 
         self._mark_triggered(setup_id, session_key, ny)
+        self._log_entry_block(episode, candle, entry, entry_inside=fvg.contains(entry))
         self._log("TRADE CONFIRMED")
         return signal
 
@@ -680,6 +884,74 @@ class ICTStrategy:
 
     def _reject(self, reason: str) -> None:
         self._log(f"Setup rejected: {reason}")
+
+    # ------------------------------------------------------------------ #
+    # Decision blocks
+    #
+    # One block per confirmed stage, in the model's own vocabulary, so a reader
+    # (or a Telegram digest of the event log) can follow a setup from the sweep
+    # to the fill without reconstructing it from the candle data. Every line is
+    # prefixed with its stage, which keeps the blocks greppable in a long log.
+    # ------------------------------------------------------------------ #
+    def _fmt(self, value: float) -> str:
+        """Format a price to the symbol's own precision."""
+        digits = int(getattr(self.asset, "digits", 0) or 0)
+        return f"{value:.{digits}f}" if digits > 0 else f"{value:g}"
+
+    @staticmethod
+    def _yn(flag: bool) -> str:
+        return "YES" if flag else "NO"
+
+    def _log_purge_block(self, episode: _Episode, h1_candle) -> None:
+        self._log("PURGE:\n"
+                  f"  1H time: {h1_candle.t_ny:%Y-%m-%d %H:%M} NY\n"
+                  f"  Liquidity level: {episode.purge_kind} "
+                  f"({episode.purge_grade}) @ {self._fmt(episode.purge_price)}\n"
+                  f"  Sweep price: {self._fmt(episode.purge_sweep_price)}\n"
+                  f"  1H close: {self._fmt(episode.purge_h1_close)}\n"
+                  f"  Purge confirmed: {self._yn(True)} (the 1H candle has closed)")
+
+    def _log_cisd_block(self, episode: _Episode, confirm_candle) -> None:
+        # The confirmation is only reachable through `_step_cisd`, which filters
+        # the series to candles opening at/after the purge close — so "after the
+        # completed purge" is structurally true here, not an assumption.
+        self._log("CISD:\n"
+                  f"  {episode.cisd_tf} time: {confirm_candle.t_ny:%H:%M} NY\n"
+                  f"  CISD level: {self._fmt(episode.purge_price)}\n"
+                  f"  CISD close: {self._fmt(confirm_candle.close)}\n"
+                  f"  CISD after completed purge: {self._yn(True)}\n"
+                  f"  Purge candle closed: "
+                  f"{tu.utc_to_ny(episode.purge_close_utc):%H:%M} NY")
+
+    def _log_fvg_block(self, formed: FVG, min_depth: float, *, valid: bool) -> None:
+        self._log("FVG:\n"
+                  f"  1M formation time: {formed.formation_time_ny:%H:%M} NY\n"
+                  f"  FVG low: {self._fmt(formed.lower)}\n"
+                  f"  FVG high: {self._fmt(formed.upper)}\n"
+                  f"  FVG size: {self._fmt(formed.depth())}\n"
+                  f"  Minimum required: {self._fmt(min_depth)} "
+                  f"({self.fvg_min_atr_frac:g} × 5M ATR)\n"
+                  f"  Valid: {self._yn(valid)}")
+
+    def _log_retrace_block(self, episode: _Episode, candle, *, entered: bool) -> None:
+        self._log("RETRACEMENT:\n"
+                  f"  Retracement candle: {candle.t_ny:%H:%M} NY\n"
+                  f"  Retracement "
+                  f"{'low' if episode.direction == 'buy' else 'high'}: "
+                  f"{self._fmt(episode.retrace_extreme)}\n"
+                  f"  FVG zone: [{self._fmt(episode.fvg.lower)}, "
+                  f"{self._fmt(episode.fvg.upper)}]\n"
+                  f"  Entered FVG: {self._yn(entered)}")
+
+    def _log_entry_block(self, episode: _Episode, candle, entry: float,
+                         *, entry_inside: bool) -> None:
+        self._log("ENTRY:\n"
+                  f"  Entry time: {candle.t_ny:%H:%M} NY\n"
+                  f"  Entry price: {self._fmt(entry)}\n"
+                  f"  FVG zone: [{self._fmt(episode.fvg.lower)}, "
+                  f"{self._fmt(episode.fvg.upper)}]\n"
+                  f"  Entry model: {self.fvg_entry_model}\n"
+                  f"  Inside FVG: {self._yn(entry_inside)}")
 
     def _atr_m5(self) -> float:
         return atr(self.stream.m5(), period=14)

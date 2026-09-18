@@ -94,7 +94,7 @@ def _breakdown_matrix(ranked: list[dict], field: str) -> list[dict]:
 # Template helpers
 # --------------------------------------------------------------------------- #
 def _ny_str(naive_utc):
-    """Render a naive-UTC datetime on the NY (UTC-4) clock."""
+    """Render a naive-UTC datetime on the New York clock (DST-aware)."""
     if naive_utc is None:
         return ""
     return tu.utc_to_ny(naive_utc).strftime("%Y-%m-%d %H:%M")

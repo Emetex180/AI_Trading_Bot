@@ -1,7 +1,8 @@
 """Candle model + deterministic OHLC aggregation (no lookahead).
 
 A :class:`Candle` stores both the real-UTC instant (``t_utc``) and the project
-NY-clock instant (``t_ny``, UTC-4). Higher timeframes are aggregated from closed
+NY-clock instant (``t_ny``, America/New_York — DST-aware, never a fixed UTC-4).
+Higher timeframes are aggregated from closed
 M1 candles only; a partially formed top bucket is never returned, which prevents
 lookahead bias.
 
@@ -32,7 +33,7 @@ def epoch_minute(dt: datetime) -> int:
 @dataclass(slots=True)
 class Candle:
     t_utc: datetime          # candle open time, real UTC (naive)
-    t_ny: datetime           # candle open time on the NY clock (UTC-4)
+    t_ny: datetime            # candle open time on the NY clock (DST-aware)
     open: float
     high: float
     low: float
@@ -162,7 +163,7 @@ class BarSet:
         """
         converted = []
         for row in rows:
-            server_naive = datetime.fromtimestamp(int(row[0]))
+            server_naive = tu.utc_epoch_to_naive(row[0])
             t_utc = tu.broker_to_utc(server_naive, self._offset)
             c = Candle(t_utc=t_utc, t_ny=tu.utc_to_ny(t_utc),
                        open=float(row[1]), high=float(row[2]),
