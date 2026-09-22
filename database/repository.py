@@ -197,10 +197,32 @@ def _batch_entry(batch_id: str, rows: list) -> dict:
 class Repository:
     """Persistence facade used by the scanner, backtester and Flask app."""
 
-    def __init__(self, settings: Settings | None = None, session: Session | None = None):
+    def __init__(self, settings: Settings | None = None, session: Session | None = None,
+                 engine=None):
+        """``engine`` shares one pool while keeping the session *owned*.
+
+        The distinction matters because :meth:`close` only closes a session this
+        object created. A caller that passes ``session=`` is saying it manages
+        that session's lifetime, so ``close`` deliberately leaves it alone —
+        which is right for a request-scoped session dropped at teardown, and
+        wrong for a short-lived read, where the connection would be held until
+        the garbage collector happened to run. A bounded pool (SQLite's default
+        is 15 connections) then runs dry and every later request waits out the
+        full 30-second pool timeout.
+
+        ``engine`` is for that second case: build me a session from this shared
+        engine and I will close it, returning the connection to the pool the
+        moment the read is done.
+        """
         self.settings = settings or get_settings()
         self._own_session = session is None
-        self.session = session or get_session(settings)
+        if session is not None:
+            self.session = session
+        elif engine is not None:
+            self.session = sessionmaker(bind=engine, expire_on_commit=False,
+                                        future=True)()
+        else:
+            self.session = get_session(settings)
 
     def close(self) -> None:
         if self._own_session:
@@ -685,6 +707,40 @@ class Repository:
         self.session.add(row)
         self.session.commit()
         return row
+
+    # ------------------------------------------------------------------ #
+    # Live engine state (the scanner process -> dashboard bridge)
+    # ------------------------------------------------------------------ #
+    def save_engine_state(self, **fields) -> m.EngineState:
+        """Publish the running engine's state to the singleton row.
+
+        Written by the scanner process on every poll, read by the web process
+        through :meth:`load_engine_state`. A singleton rather than a row per
+        session because this answers "what is the engine doing *now*" — the
+        history of what it did lives in ``signals`` and ``system_events``, which
+        are already append-only and already cross the process boundary.
+
+        Committing per poll is deliberate: the row is what makes the dashboard
+        live, so a value sitting uncommitted in a session is a value the
+        dashboard cannot see.
+        """
+        row = self.session.get(m.EngineState, 1)
+        if row is None:
+            row = m.EngineState(id=1)
+            self.session.add(row)
+        for key, value in fields.items():
+            setattr(row, key, value)
+        self.session.commit()
+        return row
+
+    def load_engine_state(self) -> m.EngineState | None:
+        """The last published engine state, or ``None`` if none was ever written.
+
+        ``None`` is the honest answer for a database the scanner has never run
+        against, and is why the dashboard distinguishes "no engine" from "an
+        engine with nothing to report" instead of rendering both as one thing.
+        """
+        return self.session.get(m.EngineState, 1)
 
 
 def iter_session(settings: Settings | None = None) -> Iterator[Session]:

@@ -292,6 +292,23 @@ class Settings:
     min_password_length: int = 12
     #: Waitress worker threads for ``run.py serve``.
     serve_threads: int = 8
+    #: Whether starting the web application also starts the trading engine.
+    #:
+    #: True by default, because a dashboard whose scanner has to be started by a
+    #: second command is the configuration that produces "Scanner: STOPPED" on a
+    #: machine where nothing is actually wrong. ``run.py web`` and ``run.py
+    #: serve`` both honour it; the engine runs on a background thread inside the
+    #: web process, which is exactly what the console's Start button has always
+    #: done.
+    #:
+    #: The start is never *forced*: ``runner.JobManager.start_live`` refuses when
+    #: another process already holds the engine lease, so a deployment that runs
+    #: the scanner as its own task (see ``deploy/install-service.ps1``) keeps
+    #: exactly one engine and this quietly becomes a no-op.
+    #:
+    #: Set false for a dashboard that owns no engine — watching a scanner started
+    #: elsewhere, or any process that must not touch MT5.
+    engine_autostart: bool = True
 
     @property
     def effective_auto_trading(self) -> bool:
@@ -402,6 +419,7 @@ def _build_settings() -> Settings:
         login_lockout_minutes=_env_int("LOGIN_LOCKOUT_MINUTES", 15),
         min_password_length=_env_int("MIN_PASSWORD_LENGTH", 12),
         serve_threads=_env_int("SERVE_THREADS", 8),
+        engine_autostart=_env_bool("ENGINE_AUTOSTART", default=True),
     )
 
 

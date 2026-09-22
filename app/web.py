@@ -50,7 +50,7 @@ from .admin import register_admin
 from .api import asset_choices, register_api
 from .auth import (admin_required, bootstrap_admin, current_user,
                    register_auth)
-from .client import register_client
+from .client import live_view, register_client
 # Shared presentation helpers. These used to live here; they moved to
 # ``app/display.py`` when the client platform needed the same price precision
 # and New York rendering, so both surfaces format a value identically. Aliased
@@ -180,6 +180,7 @@ def create_app(settings: Settings | None = None,
     tests so no test can ever reach MT5.
     """
     cfg = settings or get_settings()
+    engine = None
 
     if repository is None:
         engine = get_engine(cfg)
@@ -197,12 +198,36 @@ def create_app(settings: Settings | None = None,
     if jobs is None:
         from runner import JobManager
 
-        jobs = JobManager(settings=cfg)
+        # The manager's engine-state reads share the one engine this process
+        # already opened for requests, rather than letting JobManager's default
+        # ``Repository(settings=...)`` reach ``get_engine`` — which builds a
+        # *new* engine and a new connection pool on every call, and disposes of
+        # neither. With ``engine=`` the session is still owned, so ``close()``
+        # returns its connection to the shared pool immediately. Passing
+        # ``session=`` here instead would look equivalent and is not: it makes
+        # ``close()`` a no-op, and the leaked checkouts exhaust that pool.
+        #
+        # ``on_event=print`` because this process may now own the engine: the
+        # web app starts it at launch (see ``run.py``), and its narrative —
+        # terminal connected, broker clock verified, each asset warmed, the
+        # session line — is the operator's evidence that the startup actually
+        # completed. ``JobManager._emit`` drops every line when no sink is
+        # attached, so leaving it unset would mean a dashboard that owns a
+        # scanner and never says a word about it on its own console.
+        if factory is None:
+            jobs = JobManager(settings=cfg, on_event=print)
+        else:
+            jobs = JobManager(settings=cfg, on_event=print,
+                              repo_factory=lambda: Repository(
+                                  settings=cfg, engine=engine))
 
     app = Flask(__name__, template_folder=_TEMPLATES,
                 static_folder="static", static_url_path="/static")
     app.config["CFG"] = cfg
     app.config["SESSION_FACTORY"] = factory
+    #: ``None`` when the caller injected its own repository, which is exactly
+    #: when ``_repo_scope`` will use the injected one and need no engine.
+    app.config["ENGINE"] = engine
     app.config["FIXED_REPO"] = repository
     app.config["JOBS"] = jobs
 
@@ -245,9 +270,26 @@ def create_app(settings: Settings | None = None,
 
     @app.teardown_request
     def _close_repo(exc=None):
+        """Release the request's connection *now*, not at the next GC.
+
+        ``Repository.close`` only closes a session this object created, and the
+        request path hands one in — so this used to leave the connection to the
+        garbage collector. That is normally invisible, because ``g`` is dropped
+        as soon as the request ends. Under a burst it is not fast enough: the
+        pool holds fifteen connections, checkouts outrun collection, and every
+        later request stalls for the full thirty-second pool timeout while
+        ``/health``, which opens no repository, keeps answering. Closing the
+        session here is what makes the return prompt.
+
+        ``owns_repo`` is the existing statement of exactly this: false when the
+        repository was injected (tests) and its lifetime is not ours to end.
+        """
         repo = getattr(g, "repo", None)
         if repo is not None and getattr(g, "owns_repo", False):
-            repo.close()
+            try:
+                repo.session.close()
+            finally:
+                repo.close()
 
     # ------------------------------------------------------------------ #
     # Authentication
@@ -266,7 +308,7 @@ def create_app(settings: Settings | None = None,
         """The domain root, resolved by who is asking.
 
         A logged-out visitor gets the login page; a client gets the product; an
-        admin gets the console. Deliberately a redirect rather than a rendered
+        admin gets the admin dashboard. Deliberately a redirect rather than a rendered
         page so there is exactly one canonical URL per surface — a client can
         bookmark ``/dashboard`` and never see a second copy of it at ``/``.
         """
@@ -274,7 +316,7 @@ def create_app(settings: Settings | None = None,
         if user is None:
             return redirect(url_for("auth.login"))
         if user.is_admin:
-            return redirect(url_for("index"))
+            return redirect(url_for("admin.index"))
         return redirect(url_for("client.overview"))
 
     # ------------------------------------------------------------------ #
@@ -474,8 +516,20 @@ def create_app(settings: Settings | None = None,
         process serving? It reports no counts and no account state, because
         those are operator data and this route has no way to check who is
         asking.
+
+        ``live_running`` is read through :func:`app.client.live_view`, not
+        through this process' ``JobManager``: the scanner is normally a
+        *different* process (``run.py scan``), and answering from local memory
+        reported a working engine as stopped to whatever was watching. The view
+        reads the persisted engine lease, which is the same answer the dashboard
+        gives.
+
+        That read is best-effort by construction — an unreachable database
+        reports "no engine" rather than raising — so a database problem still
+        leaves this probe answering, which is what makes it useful.
         """
-        return jsonify({"status": "ok", "live_running": jobs.is_live_running()})
+        return jsonify({"status": "ok",
+                        "live_running": bool(live_view(jobs).get("alive"))})
 
     # Control endpoints (start/stop live, run backtest, poll status).
     register_api(app)
@@ -508,11 +562,17 @@ class _repo_scope:
     def __init__(self, app, cfg, injected):
         self._injected = injected
         self._cfg = cfg
-        self._factory = app.config["SESSION_FACTORY"]
+        self._engine = app.config["ENGINE"]
 
     def __enter__(self) -> Repository:
+        # ``engine=`` rather than ``session=``, for the reason spelled out at the
+        # JobManager wiring above: a session built from ``session=`` is *not*
+        # owned, so ``close`` below would be a no-op and the startup task's
+        # connection would stay checked out for the life of the process —
+        # permanently shrinking the pool every request draws from.
         self._repo = (self._injected if self._injected is not None
-                      else Repository(settings=self._cfg, session=self._factory()))
+                      else Repository(settings=self._cfg,
+                                      engine=self._engine))
         return self._repo
 
     def __exit__(self, *exc):

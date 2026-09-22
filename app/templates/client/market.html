@@ -20,16 +20,195 @@
 
 {% if not status.scanner_running %}
 <div class="notice mb-3">
-  <span><strong>The scanner is not running.</strong> Prices are blank and every
-  setup model is shown as watching, because there is no engine to report from.</span>
+  <span><strong>The trading engine is not running.</strong> Prices are blank and
+  every setup model is shown as watching, because there is no engine to report
+  from.
+  {% if status.engine_source == 'none' %}
+  The web app starts the engine at launch, so this normally means it could not
+  start — the log above the dashboard, and <em>Recent activity</em> on the
+  console, record why.
+  {% endif %}</span>
 </div>
 {% elif not status.scanner_active %}
 <div class="notice mb-3">
-  <span><strong>Outside a tradeable session.</strong> The scanner is up but not
+  <span><strong>Outside a tradeable session.</strong> The engine is up but not
   polling{% if status.next_open_ny %}; the next window opens at
-  {{ status.next_open_ny }} NY{% endif %}.</span>
+  {{ status.next_open_ny }} NY{% endif %}. It stays alive and wakes by itself —
+  this is not a stopped scanner. The figures below are the last ones it read,
+  with their time, rather than a live quote.</span>
 </div>
 {% endif %}
+
+{# What the reader actually wants to know before trusting any number below:
+   whether an engine is running, whether it is attached to a terminal, and when
+   it last saw the market. Three separate facts, so they are shown separately —
+   the web server answering this page says nothing about any of them.
+
+   Every row below is read back out of the engine's own state, except "Web app",
+   which is true by construction: this page is being served. The words come from
+   app/client.py, so the poller cannot relabel anything. #}
+<div class="card mb-3">
+  <div class="card-header">
+    <span>Engine status</span>
+    <span class="card-header-note">
+      read {{ status.ny_time }} {{ status.ny_zone }}
+    </span>
+  </div>
+  <div class="card-body">
+    <div class="conditions">
+      <div class="condition met">
+        <span class="condition-mark">·</span>
+        <span>
+          <strong>Web app: <span id="mk-web">RUNNING</span></strong>
+          <span class="setup-meta">this page is being served by it</span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.backend_running else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.backend_running else '×' }}</span>
+        <span>
+          <strong>Backend: <span id="mk-engine">{{ 'RUNNING' if status.backend_running else 'OFFLINE' }}</span></strong>
+          <span class="setup-meta">
+            {%- if status.engine_alive and status.engine_source == 'this process' -%}
+              running in this web process
+            {%- elif status.engine_alive -%}
+              running in the scanner process{% if status.engine_pid %}
+              (pid {{ status.engine_pid }}){% endif %}
+            {%- else -%}
+              no engine is publishing state
+            {%- endif -%}
+          </span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.mt5_connected else ('unmet' if status.mt5_connected is false else '') }}">
+        <span class="condition-mark">{{ '·' if status.mt5_connected else '×' }}</span>
+        <span>
+          <strong>MT5: <span id="mk-mt5">{{ 'CONNECTED' if status.mt5_connected
+                else ('DISCONNECTED' if status.mt5_connected is false else 'UNKNOWN') }}</span></strong>
+          <span class="setup-meta">
+            {%- if status.mt5_connected -%}
+              the engine holds a terminal session
+            {%- else -%}
+              nothing is holding the terminal
+            {%- endif -%}
+          </span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.market_data_live else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.market_data_live else '×' }}</span>
+        <span>
+          <strong>Market data: <span id="mk-data">{{ 'LIVE' if status.market_data_live
+                else ('NONE' if not status.backend_running else 'WAITING') }}</span></strong>
+          <span class="setup-meta">
+            {%- if status.market_data_live -%}
+              candles are arriving from the terminal
+            {%- elif status.backend_running -%}
+              connected, but no candle has been read yet
+            {%- else -%}
+              the terminal is not being read at all
+            {%- endif -%}
+          </span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.scanner_active else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.scanner_active else '×' }}</span>
+        <span>
+          <strong>Scanner: <span id="mk-scanner">{{ status.scanner_status }}</span></strong>
+          <span class="setup-meta">
+            {{- status.scanner_activity or status.session_label -}}
+          </span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.scanner_active else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.scanner_active else '×' }}</span>
+        <span>
+          <strong>Setup scanner: <span id="mk-setups">{{ status.setup_scanner_status }}</span></strong>
+          <span class="setup-meta">
+            {%- if status.scanner_active -%}
+              the setup model runs inside the scanner loop, once per poll
+            {%- elif status.backend_running -%}
+              up, and idle until the next session opens
+            {%- else -%}
+              no engine, so no setup detection
+            {%- endif -%}
+          </span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.session_open else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.session_open else '×' }}</span>
+        <span>
+          <strong>Session: <span id="mk-session">{{ status.session_label if status.session_open else '—' }}</span></strong>
+          <span class="setup-meta">
+            {%- if status.session_window -%}
+              {{ status.session_window }} NY{{
+                ' · entries allowed' if status.session_accepts_entries
+                else ' · no entries in this window' }}
+            {%- else -%}
+              outside every configured window
+            {%- endif -%}
+          </span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.session_open else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.session_open else '×' }}</span>
+        <span>
+          <strong>Session status: <span id="mk-session-status">{{ status.session_status }}</span></strong>
+          <span class="setup-meta">
+            {%- if status.session_open -%}
+              a configured window covers right now
+            {%- else -%}
+              the engine stays up and waits for the next window
+            {%- endif -%}
+          </span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.scanner_active else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.scanner_active else '×' }}</span>
+        <span>
+          <strong>Assets: <span id="mk-assets">{{ status.assets_status }}</span></strong>
+          <span class="setup-meta">
+            {{ status.assets_count }} in the running session · {{
+            status.monitored_assets | length }} reporting
+          </span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.last_scan_ny else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.last_scan_ny else '×' }}</span>
+        <span>
+          <strong>Last scan</strong>
+          <span class="setup-meta"><span id="mk-last-scan">{{ status.last_scan_ny or 'never' }}</span> NY</span>
+        </span>
+      </div>
+      <div class="condition {{ 'met' if status.engine_heartbeat_ny else 'unmet' }}">
+        <span class="condition-mark">{{ '·' if status.engine_heartbeat_ny else '×' }}</span>
+        <span>
+          <strong>Last heartbeat</strong>
+          <span class="setup-meta">
+            {%- if status.engine_heartbeat_ny -%}
+              <span id="mk-heartbeat">{{ status.engine_heartbeat_ny }}</span> NY
+            {%- elif status.engine_last_error -%}
+              <span id="mk-heartbeat">{{ status.engine_last_error }}</span>
+            {%- else -%}
+              <span id="mk-heartbeat">none</span>
+            {%- endif -%}
+          </span>
+        </span>
+      </div>
+    </div>
+    <p class="setup-meta mt-3 mb-0">
+      <strong>Scanner</strong>, <strong>Setup scanner</strong> and
+      <strong>Assets</strong> report one engine, because they are one engine: the
+      setup model runs inside the scanner loop and every registered asset is
+      polled on each pass. <strong>WAITING</strong> means the engine is alive and
+      correctly asleep until the next session — it is not a stopped process.
+    </p>
+    <p class="setup-meta mt-3 mb-0">
+      Bid, ask and spread are read from the terminal session the scanner already
+      holds, on each poll. <strong>Engine close</strong> is a different number:
+      the last closed 1-minute close, which is the price the strategy itself
+      acted on.
+    </p>
+  </div>
+</div>
 
 {# The legend is built from the states actually on the page rather than from the
    full vocabulary, so it explains what the reader is looking at and nothing
@@ -53,8 +232,11 @@
         <tr>
           <th>Asset</th>
           <th>Symbol</th>
-          <th class="text-end">Price</th>
-          <th>Updated (NY)</th>
+          <th class="text-end">Bid</th>
+          <th class="text-end">Ask</th>
+          <th class="text-end">Spread</th>
+          <th class="text-end">Engine close</th>
+          <th>Quote time (NY)</th>
           <th>Buy model</th>
           <th>Sell model</th>
         </tr>
@@ -71,17 +253,30 @@
             {% if r.monitored %}<span class="setup-meta">· monitored</span>{% endif %}
           </td>
           <td class="mono setup-meta">{{ r.symbol or '—' }}</td>
-          {# An unread price is an em dash. It is never rendered as 0.0000, which
-             would read as a real quote of zero. #}
+          {# An unread figure is an em dash. It is never rendered as 0.00000,
+             which would read as a real quote of zero. #}
+          <td class="text-end mono" data-role="bid">
+            {{ (r.bid | price(r.name)) if r.bid is not none else '—' }}
+          </td>
+          <td class="text-end mono" data-role="ask">
+            {{ (r.ask | price(r.name)) if r.ask is not none else '—' }}
+          </td>
+          <td class="text-end mono setup-meta" data-role="spread">
+            {%- if r.spread is not none -%}
+              {{ r.spread | price(r.name) }}
+              {%- if r.spread_points is not none %}
+              <span class="setup-meta">({{ r.spread_points }} pt)</span>{% endif -%}
+            {%- else -%}—{%- endif -%}
+          </td>
           <td class="text-end mono" data-role="price">
             {{ (r.price | price(r.name)) or '—' }}
           </td>
-          <td class="setup-meta mono" data-role="price-time">{{ r.price_time_ny or '—' }}</td>
+          <td class="setup-meta mono" data-role="price-time">{{ r.quote_time_ny or '—' }}</td>
           <td data-role="buy">{{ state_chip(r.buy) }}</td>
           <td data-role="sell">{{ state_chip(r.sell) }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="empty-state">
+        <tr><td colspan="9" class="empty-state">
           No assets are registered. Add one from the operator console.
         </td></tr>
         {% endfor %}

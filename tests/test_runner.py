@@ -6,6 +6,7 @@ queueing logic in ``runner.py`` without a terminal, network or clock dependency.
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -37,6 +38,7 @@ class _FakeClient:
     def __init__(self):
         self.connected = False
         self.range_calls: list[tuple] = []
+        self.tick_calls: list[str] = []
 
     def connect(self):
         self.connected = True
@@ -47,6 +49,19 @@ class _FakeClient:
 
     def account_info(self):
         return None
+
+    def symbol_tick(self, symbol):
+        """A deterministic quote, mirroring ``MT5Client.symbol_tick``.
+
+        The live loop reads this inside the terminal session it already holds
+        and publishes it for a dashboard in another process to read, so the fake
+        has to answer it for that path to be testable at all. Without it every
+        quote silently degrades to ``None`` and the round trip goes untested.
+        """
+        self.tick_calls.append(symbol)
+        return {"bid": 101.70, "ask": 101.74, "spread": 0.04,
+                "spread_points": 4, "digits": 2,
+                "time_utc": tu.now_utc()}
 
     def terminal_trade_allowed(self):
         """The terminal toolbar's Algo Trading switch.
@@ -306,6 +321,144 @@ def test_stop_when_idle_reports_not_running(tmp_path, monkeypatch):
     result = _jobs(settings, maker).stop_live(timeout=1)
     assert result["ok"] is False
     assert result["reason"] == "not_running"
+
+
+# --------------------------------------------------------------------------- #
+# The persisted lease (how a dashboard in another process sees this engine)
+# --------------------------------------------------------------------------- #
+def test_the_engine_publishes_state_another_process_can_read(tmp_path, monkeypatch):
+    """The whole bridge, end to end, without a second MT5 connection.
+
+    The live worker reads a quote inside the terminal session it already owns
+    and writes it to the singleton row; a *different* session — standing in for
+    the web process, which shares no memory with the worker — reads it back.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    assert _wait_for(lambda: jobs.engine_lease().get("quotes"))
+
+    # A separate Repository on this thread: nothing shared with the worker but
+    # the file, which is exactly the web process's position.
+    with _read(maker) as repo:
+        row = repo.load_engine_state()
+
+    assert row is not None
+    assert row.instance_id == jobs._instance_id
+    assert row.pid == os.getpid()
+    assert row.state == LIVE_RUNNING
+    assert row.assets == ["TEST"]
+    quote = row.quotes["TEST"]
+    assert quote["bid"] == 101.70 and quote["ask"] == 101.74
+    assert quote["time_utc"] is not None
+
+    jobs.stop_live(timeout=5)
+
+
+def test_the_lease_is_what_answers_is_the_engine_alive(tmp_path, monkeypatch):
+    """A heartbeat inside its own sleep budget is alive; a lapsed one is not.
+
+    The loop legitimately sleeps for up to ``SESSION_SLEEP_CAP_SECONDS`` while
+    correctly idle outside a session, so this cannot be a fixed freshness
+    threshold — a stale heartbeat must expire only once the writer's own
+    recorded budget (plus slack) has passed.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+
+    assert jobs.engine_lease()["alive"] is False       # nothing published yet
+
+    with _read(maker) as repo:
+        repo.save_engine_state(instance_id="other", pid=1, state=LIVE_RUNNING,
+                               heartbeat_utc=tu.now_utc(), lease_seconds=300.0)
+    lease = jobs.engine_lease()
+    assert lease["alive"] is True
+    assert lease["mine"] is False
+    assert lease["state"] == LIVE_RUNNING
+
+    # Same row, a heartbeat older than the budget it declared: the engine said
+    # it would write again within 300s and did not, so it is gone.
+    with _read(maker) as repo:
+        repo.save_engine_state(
+            heartbeat_utc=tu.now_utc() - timedelta(
+                seconds=300 + runner_mod.JobManager.LEASE_SLACK_SECONDS + 1))
+    assert jobs.engine_lease()["alive"] is False
+
+
+def test_a_stopped_engine_is_not_alive_even_inside_its_lease(tmp_path, monkeypatch):
+    """An orderly stop is immediate; it does not wait out the slack window."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+
+    with _read(maker) as repo:
+        repo.save_engine_state(instance_id="other", pid=1, state=LIVE_STOPPED,
+                               heartbeat_utc=tu.now_utc(), lease_seconds=300.0)
+
+    assert jobs.engine_lease()["alive"] is False
+
+
+def test_a_second_engine_is_refused_while_a_lease_is_live(tmp_path, monkeypatch):
+    """Duplicate engines mean duplicate Telegram alerts for every setup."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+
+    with _read(maker) as repo:
+        repo.save_engine_state(instance_id="other", pid=4242,
+                               state=LIVE_RUNNING, heartbeat_utc=tu.now_utc(),
+                               lease_seconds=300.0,
+                               started_at_utc=tu.now_utc())
+
+    refused = jobs.start_live()
+    assert refused["ok"] is False
+    assert refused["reason"] == "engine_elsewhere"
+    assert "4242" in refused["message"]
+    assert jobs.is_live_running() is False
+    assert "TEST" not in str(jobs.live_state()["assets"])
+
+    # The escape hatch for a lease left behind by a hard crash.
+    assert jobs.start_live(force=True)["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    jobs.stop_live(timeout=5)
+
+
+def test_a_lapsed_lease_does_not_block_a_start(tmp_path, monkeypatch):
+    """A crashed engine is not a reason to refuse running the bot again."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+
+    with _read(maker) as repo:
+        repo.save_engine_state(instance_id="other", pid=4242,
+                               state=LIVE_RUNNING,
+                               heartbeat_utc=tu.now_utc() - timedelta(hours=2),
+                               lease_seconds=5.0)
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    jobs.stop_live(timeout=5)
+
+
+def test_an_unreadable_lease_degrades_to_allowing_a_start(tmp_path, monkeypatch):
+    """Best-effort by design: a database that cannot be read must not lock the
+    operator out of starting the bot.
+
+    Only the lease *read* fails here — the worker's own writes are untouched, so
+    what this exercises is the guard's degraded path rather than a dead engine.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    jobs = _jobs(settings, maker)
+
+    def unreadable(self):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(Repository, "load_engine_state", unreadable)
+
+    assert jobs.engine_lease()["alive"] is False
+    assert jobs.engine_lease()["readable"] is False
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    jobs.stop_live(timeout=5)
 
 
 def test_mt5_failure_is_reported_not_raised(tmp_path, monkeypatch):

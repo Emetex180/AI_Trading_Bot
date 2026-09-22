@@ -272,6 +272,32 @@ def test_health_endpoint():
     assert resp.get_json()["status"] == "ok"
 
 
+def test_health_reports_a_scanner_running_in_another_process():
+    """The scanner is normally not this process, so /health must read the lease.
+
+    Answering from this process' ``JobManager`` reported a working engine as
+    stopped — the probe said "nothing is running" while the engine scanned and
+    alerted perfectly well in its own process, which is exactly the wrong thing
+    for whatever is watching the service to conclude.
+    """
+    jobs = _FakeJobs()
+    jobs.lease = _lease()
+
+    payload = _api_client(_repo(), jobs).get("/health").get_json()
+
+    assert payload["live_running"] is True
+
+
+def test_health_reports_a_dead_engine_as_stopped():
+    """An expired lease is not "running", however recently it said so."""
+    jobs = _FakeJobs()
+    jobs.lease = _lease(alive=False, state="running", age_seconds=900.0)
+
+    payload = _api_client(_repo(), jobs).get("/health").get_json()
+
+    assert payload["live_running"] is False
+
+
 # --------------------------------------------------------------------------- #
 # Control API (start/stop live, run backtest, poll status)
 # --------------------------------------------------------------------------- #
@@ -294,6 +320,13 @@ class _FakeJobs:
         self.scan_result = {"ok": True, "message": "Reading the broker's symbol list…"}
         self.account_result = {"ok": True, "message": "Reading the account…"}
         self.start_result = {"ok": True, "message": "Live session starting."}
+        self.start_forces = []
+        #: What `engine_lease()` reports. Not alive by default: this stand-in
+        #: owns no engine, and the whole point of the lease is that "the web
+        #: server answered" is not evidence of one. Tests that need a scanner
+        #: running *elsewhere* replace this with an alive lease.
+        self.lease = {"alive": False, "readable": True, "row": None,
+                      "mine": False, "age_seconds": None}
         self.requests = []
         self.probe_requests = []
         self.scan_requests = 0
@@ -328,7 +361,8 @@ class _FakeJobs:
             self.broker["n_symbols"] = len(self.symbols)
         return result
 
-    def start_live(self):
+    def start_live(self, *, force=False):
+        self.start_forces.append(force)
         result = dict(self.start_result)
         if result["ok"]:
             self.live["state"] = "running"
@@ -339,6 +373,9 @@ class _FakeJobs:
         self.live["state"] = "stopped"
         return {"ok": True, "message": "Live session stopped.",
                 "live": dict(self.live)}
+
+    def engine_lease(self):
+        return dict(self.lease)
 
     def request_backtest(self, **kw):
         self.requests.append(kw)
@@ -373,6 +410,40 @@ class _FakeJobs:
 
     def probe_state(self):
         return dict(self.probe)
+
+
+def _lease(**over):
+    """An engine-state lease as a scanner in *another* process publishes it.
+
+    Lives here beside ``_FakeJobs`` because it is the fake's ``lease``
+    attribute: the web process holds no engine of its own, so a test that needs
+    one running has to describe it the way ``runner.JobManager`` writes it.
+
+    Value types mirror ``JobManager.engine_lease()``, which mirrors the
+    ``engine_state`` row: the ``DateTime`` columns come back as naive UTC
+    datetimes, and only the ``JSON`` columns (``price_times``, each quote's
+    ``time_utc``) hold ISO-8601 strings — they are text on both SQLite and
+    Postgres. A fake that got this wrong would prove the page renders a value
+    no real lease can produce.
+    """
+    lease = {
+        "alive": True, "readable": True, "row": None, "mine": False,
+        "age_seconds": 1.5, "state": "running", "active": True,
+        "activity": "Scanning M5", "assets": ["USTEC"],
+        "setups": {"USTEC": {"buy": "WAITING_FOR_FVG_RETRACE",
+                             "sell": "NO_SETUP"}},
+        "prices": {"USTEC": 101.75},
+        "price_times": {"USTEC": "2026-01-06T18:32:00"},
+        "quotes": {"USTEC": {"bid": 101.70, "ask": 101.74, "spread": 0.04,
+                             "spread_points": 4,
+                             "time_utc": "2026-01-06T18:33:00"}},
+        "last_candle_utc": datetime(2026, 1, 6, 18, 32),
+        "next_open_utc": None, "signals_session": 0,
+        "last_error": "", "heartbeat_utc": datetime(2026, 1, 6, 18, 33),
+        "lease_seconds": 5.0, "pid": 4242, "instance_id": "abc123",
+    }
+    lease.update(over)
+    return lease
 
 
 def _api_client(repo, jobs=None, cfg=None):
@@ -454,6 +525,29 @@ def test_live_start_conflict_returns_409():
                                            headers=_same_origin())
     assert resp.status_code == 409
     assert resp.get_json()["reason"] == "already_running"
+
+
+def test_live_start_passes_force_through_to_the_engine():
+    """``force`` exists for a lease left behind by a hard crash, so the console
+    has to be able to send it — and must not send it by default."""
+    jobs = _FakeJobs()
+    client = _api_client(_repo(), jobs)
+
+    client.post("/api/live/start", headers=_same_origin())
+    assert jobs.start_forces == [False]
+
+    client.post("/api/live/start", headers=_same_origin(), data={"force": "true"})
+    assert jobs.start_forces == [False, True]
+
+
+def test_a_start_refused_for_another_engine_is_409_not_500():
+    jobs = _FakeJobs()
+    jobs.start_result = {"ok": False, "reason": "engine_elsewhere",
+                         "message": "Another process is already running the scanner."}
+    resp = _api_client(_repo(), jobs).post("/api/live/start",
+                                           headers=_same_origin())
+    assert resp.status_code == 409
+    assert resp.get_json()["reason"] == "engine_elsewhere"
 
 
 def test_backtest_run_passes_validated_parameters():
@@ -1028,3 +1122,28 @@ def test_signal_detail_renders_a_signal_with_no_ict_metadata():
                        state="", structure_time_ny=None)
     resp = _client(repo).get(f"/console/signals/{row.id}")
     assert resp.status_code == 200
+
+
+def test_a_request_returns_its_connection_before_the_next_one(tmp_path):
+    """Polling must not depend on the garbage collector to get connections back.
+
+    The request path builds ``g.repo`` around an injected session, and
+    ``Repository.close`` only closes a session it created itself — so the
+    connection used to come back whenever the collector next ran. A burst of
+    polls outran it, the fifteen-connection pool ran dry, and every later
+    request stalled for the full thirty-second pool timeout while ``/health``,
+    which opens no repository, went on answering normally. Measured: the market
+    endpoint stopped completing after roughly ninety requests.
+    """
+    from app.web import create_app
+
+    cfg = replace(get_settings(), db_url=f"sqlite:///{tmp_path / 'pool.db'}",
+                  flask_secret_key="test-secret", bootstrap_admin_username="",
+                  bootstrap_admin_password="")
+    app = create_app(settings=cfg)
+    pool = app.config["SESSION_FACTORY"].kw["bind"].pool
+
+    client = app.test_client()
+    for _ in range(40):
+        client.get("/login")
+        assert pool.checkedout() == 0

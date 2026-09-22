@@ -335,3 +335,62 @@ class BrokerAccountSnapshot(Base):
                                                      default=_utcnow)
 
     account: Mapped["BrokerAccount"] = relationship(back_populates="snapshots")
+
+
+class EngineState(Base):
+    """The live scanner's own state, published so another process can read it.
+
+    A singleton row (``id == 1``) that the process running the engine overwrites
+    on every poll. It exists because the dashboard and the engine are
+    deliberately separate processes (see ``deploy/install-service.ps1``: MT5's
+    Python API binds a whole process to one terminal), and ``runner.LiveState``
+    is in-memory only. Without this row the web process could never see a price,
+    a setup state or even whether an engine was running — every one of those
+    lived inside the scanner's address space.
+
+    ``heartbeat_utc`` and ``lease_seconds`` together answer "is the engine
+    alive?". The live loop legitimately sleeps — a poll interval while awake,
+    up to ``SESSION_SLEEP_CAP_SECONDS`` while correctly idle outside a session —
+    so a fixed freshness threshold would report the bot dead every time it did
+    the right thing. The writer therefore records the wait budget it is about to
+    sleep for, and a reader treats the engine as alive while
+    ``now - heartbeat_utc <= lease_seconds``.
+
+    Every other column mirrors a :class:`runner.LiveState` field, and is cleared
+    or marked stopped when the session ends, so a finished session can never
+    read as a live one.
+    """
+
+    __tablename__ = "engine_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    #: Random per-process token. Distinguishes "this engine" from "an engine
+    #: in another process" when deciding whether a start would be a duplicate.
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="idle")
+    #: Whether the loop is *awake* (inside a tradeable window). A running but
+    #: asleep engine is still alive — see the class docstring.
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    activity: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    assets: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    #: asset -> {"buy": state, "sell": state}: the setup state machine.
+    setups: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    #: asset -> last closed M1 close: the price the *strategy* last acted on.
+    prices: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    #: asset -> ISO-8601 UTC close time of the candle ``prices`` came from, so a
+    #: figure is never shown without its age.
+    price_times: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    #: asset -> {"bid", "ask", "spread", "spread_points", "time_utc"}: the live
+    #: quote read from the same terminal session the engine already holds.
+    quotes: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    last_candle_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_open_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    signals_session: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stopped_at_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    heartbeat_utc: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                    default=_utcnow)
+    #: Seconds the writer may legitimately sleep before its next heartbeat.
+    lease_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

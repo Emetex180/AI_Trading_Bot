@@ -23,7 +23,8 @@ from app.web import create_app
 from config import get_settings
 from database import models as m
 
-from test_web import _CSRF, _PASSWORD, _FakeJobs, _repo, _save_signal, _sign_in
+from test_web import (_CSRF, _PASSWORD, _FakeJobs, _lease, _repo, _save_signal,
+                      _sign_in)
 
 ADMIN_PAGES = ["/admin", "/admin/clients", "/admin/activity", "/admin/accounts"]
 
@@ -167,6 +168,55 @@ def test_the_activity_page_shows_the_engines_own_decision_log():
     body = _body(_admin(repo), "/admin/activity")
 
     assert "USTEC: CISD confirmed on M15" in body
+
+
+# --------------------------------------------------------------------------- #
+# The scanner running in its own process
+# --------------------------------------------------------------------------- #
+def test_the_console_shows_a_scanner_running_in_another_process():
+    """``run.py scan`` and ``run.py web`` are separate processes.
+
+    The web process owns no live thread, so reading its own ``JobManager``
+    reported a working engine as stopped. The console reads the persisted
+    engine-state lease instead — the same bridge the client dashboard reads —
+    and must be able to name the engine's process.
+    """
+    jobs = _FakeJobs()
+    jobs.lease = _lease()
+
+    body = _body(_admin(_repo(), jobs), "/admin")
+
+    assert "in the scanner process" in body
+    assert "4242" in body              # the engine's pid
+    assert "connected" in body         # MT5: a live engine holds the terminal
+    assert "Scanning M5" in body       # what it is doing
+
+
+def test_the_console_says_stopped_and_shows_no_pid_when_no_engine_runs():
+    """Nothing published -> stopped, and no pid claimed on its behalf."""
+    jobs = _FakeJobs()
+
+    body = _body(_admin(_repo(), jobs), "/admin")
+
+    assert "stopped" in body
+    assert "in the scanner process" not in body
+    assert "4242" not in body
+
+
+def test_the_console_does_not_show_a_dead_engines_state_as_running():
+    """A crash leaves ``running`` in the lease; the console must not repeat it.
+
+    The header would otherwise read "running" while the state line beside it
+    came from a row nothing has updated for fifteen minutes, which is the
+    contradiction the client dashboard was fixed for.
+    """
+    jobs = _FakeJobs()
+    jobs.lease = _lease(alive=False, state="running", age_seconds=900.0)
+
+    body = _body(_admin(_repo(), jobs), "/admin")
+
+    assert "stopped" in body
+    assert "running in the scanner process" not in body
 
 
 # --------------------------------------------------------------------------- #

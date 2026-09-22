@@ -126,7 +126,11 @@
 
   /* The scanner/session pill is two facts, and the wording distinguishes them:
    * the live thread runs around the clock, so "idle" and "stopped" are
-   * different states and must not be collapsed into one another. */
+   * different states and must not be collapsed into one another.
+   *
+   * `engine_alive` is what "the bot is up" actually means, and it is true when
+   * a scanner is running in *any* process — the engine publishes a heartbeat
+   * the server reads. A running web server is not part of this decision. */
   function applyStatus(status) {
     if (!status) { return; }
     if (status.scanner_active) {
@@ -145,6 +149,26 @@
     }
     setText("ov-scanner", status.scanner_running
       ? "Scanner " + (status.scanner_state || "running") : "Scanner stopped");
+
+    /* The engine status card on the market page. Rewritten from the same
+     * payload, so a polled card cannot disagree with a refreshed one: the words
+     * arrive already decided by app/client.py, and this only puts them in the
+     * DOM. "Web app" is deliberately not touched — it is true by construction
+     * for as long as this script is running to update anything. */
+    if (document.getElementById("mk-engine")) {
+      setText("mk-engine", status.backend_running ? "RUNNING" : "OFFLINE");
+      setText("mk-mt5", status.mt5_connected ? "CONNECTED"
+                    : (status.mt5_connected === false ? "DISCONNECTED" : "UNKNOWN"));
+      setText("mk-data", status.market_data_live ? "LIVE"
+                    : (status.backend_running ? "WAITING" : "NONE"));
+      setText("mk-scanner", status.scanner_status);
+      setText("mk-setups", status.setup_scanner_status);
+      setText("mk-session", status.session_open ? status.session_label : DASH);
+      setText("mk-session-status", status.session_status);
+      setText("mk-assets", status.assets_status);
+      setText("mk-last-scan", status.last_scan_ny || DASH);
+      setText("mk-heartbeat", status.engine_heartbeat_ny || DASH);
+    }
   }
 
   /* A confirmed setup that is not on the page yet. We surface it rather than
@@ -210,20 +234,33 @@
     return li;
   }
 
-  /* Market and analysis pages: rewrite each row's price and state chips in
+  /* Market and analysis pages: rewrite each row's quote and state chips in
    * place, keyed on data-asset. Rows are never added or removed — the registry
-   * is what decides which assets exist, and that only changes from the console. */
+   * is what decides which assets exist, and that only changes from the console.
+   *
+   * Every figure here comes from a `*_label` field the server already formatted
+   * at the asset's own precision, so the browser never decides how many digits
+   * a price has. An absent one arrives as "" and stays an em dash. */
   function applyRows(rows) {
     for (var i = 0; i < rows.length; i++) {
       var r = rows[i];
       var tr = document.querySelector('tr[data-asset="' + r.name + '"]');
       if (!tr) { continue; }
 
-      var priceCell = tr.querySelector('[data-role="price"]');
-      if (priceCell) { priceCell.textContent = r.price_label || DASH; }
+      var cells = {
+        bid: r.bid_label,
+        ask: r.ask_label,
+        spread: r.spread_label,
+        price: r.price_label
+      };
+      for (var role in cells) {
+        if (!Object.prototype.hasOwnProperty.call(cells, role)) { continue; }
+        var cell = tr.querySelector('[data-role="' + role + '"]');
+        if (cell) { cell.textContent = cells[role] || DASH; }
+      }
 
       var timeCell = tr.querySelector('[data-role="price-time"]');
-      if (timeCell) { timeCell.textContent = r.price_time_ny || DASH; }
+      if (timeCell) { timeCell.textContent = r.quote_time_ny || DASH; }
 
       replaceChip(tr.querySelector('[data-role="buy"]'), r.buy);
       replaceChip(tr.querySelector('[data-role="sell"]'), r.sell);

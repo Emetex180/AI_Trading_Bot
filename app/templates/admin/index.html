@@ -44,12 +44,22 @@
         <span>Engine</span>
         <span class="card-header-note">
           {{ 'running' if jobs_status.live_running else 'stopped' }}
+          {%- if jobs_status.live_running and live.source == 'scanner process' %}
+          in the scanner process
+          {%- elif jobs_status.live_running %} in this process{% endif %}
         </span>
       </div>
       <div class="card-body">
         <div class="meta-grid">
           <div><span class="section-label">Live thread</span>
             <div class="mono">{{ jobs_status.live.state or '—' }}</div></div>
+          <div><span class="section-label">Engine PID</span>
+            <div class="mono">{{ live.pid if live.pid else '—' }}</div></div>
+          <div><span class="section-label">MT5</span>
+            {# The engine only heartbeats from inside its MT5 session, so a live
+               engine is a connected terminal. With no engine there is nothing
+               to ask, which is unknown — not "disconnected". #}
+            <div>{{ 'connected' if live.alive else '—' }}</div></div>
           <div><span class="section-label">Active session</span>
             <div>{{ 'yes' if live.active else 'no' }}</div></div>
           <div><span class="section-label">Monitored assets</span>

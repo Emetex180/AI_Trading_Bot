@@ -508,7 +508,7 @@ def test_the_root_sends_each_role_to_its_own_surface():
     assert client.get("/").headers["Location"].endswith("/dashboard")
 
     admin = _as(repo, m.ROLE_ADMIN, username="an-admin")
-    assert admin.get("/").headers["Location"].endswith("/console")
+    assert admin.get("/").headers["Location"].endswith("/admin/")
 
 
 def test_the_console_is_not_reachable_by_its_old_paths():

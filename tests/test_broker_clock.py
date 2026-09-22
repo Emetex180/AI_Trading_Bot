@@ -29,13 +29,21 @@ class _FakeMT5:
     """Just enough of the MetaTrader5 module to probe a broker clock."""
 
     def __init__(self, *, offset_hours: float, symbols, bar_age_minutes: float = 0.0,
-                 symbols_reporting: int | None = None, connected: bool = True):
+                 symbols_reporting: int | None = None, connected: bool = True,
+                 bid: float | None = None, ask: float | None = None,
+                 spread_points: int | None = None, digits: int = 5):
         self.offset_hours = offset_hours
         self.symbols = list(symbols)
         self.bar_age_minutes = bar_age_minutes
         self.symbols_reporting = symbols_reporting
         self.connected = connected
         self.selected: list[str] = []
+        # Quote fields. ``None`` means "the terminal did not report this", which
+        # is deliberately different from a reported zero.
+        self.bid = bid
+        self.ask = ask
+        self.spread_points = spread_points
+        self.digits = digits
 
     def _broker_now(self) -> datetime:
         return tu.now_utc() + timedelta(hours=self.offset_hours)
@@ -50,13 +58,17 @@ class _FakeMT5:
         self.selected.append(symbol)
         return True
 
+    def symbol_info(self, _symbol):
+        return SimpleNamespace(spread=self.spread_points, digits=self.digits)
+
     def symbol_info_tick(self, symbol):
         if self.symbols_reporting is not None:
             if self.symbols.index(symbol) >= self.symbols_reporting:
                 return None
         # A tick is stamped in broker time, so a symbol quoting right now
         # reports the broker's current wall clock.
-        return SimpleNamespace(time=broker_epoch(self._broker_now()))
+        return SimpleNamespace(time=broker_epoch(self._broker_now()),
+                               bid=self.bid, ask=self.ask)
 
     def copy_rates_from_pos(self, symbol, _timeframe, _pos, _count):
         # The newest M1 bar opened `bar_age_minutes` ago, in broker time.
@@ -260,3 +272,142 @@ def test_the_full_chain_matches_across_both_dst_regimes():
     broker = datetime(2026, 7, 15, 14, 0)      # broker UTC+2, summer
     assert tu.broker_to_utc(broker, 2) == datetime(2026, 7, 15, 12, 0)
     assert tu.broker_to_ny(broker, 2) == datetime(2026, 7, 15, 8, 0)   # EDT
+
+
+# --------------------------------------------------------------------------- #
+# The quote timestamp — the same chain, on the live tick
+#
+# ``symbol_info_tick().time`` is stamped on the broker's server clock, exactly
+# like a ``copy_rates`` row, so it has to take the same route to the dashboard:
+# broker wall clock -> real UTC -> New York. Treated as though the epoch were
+# already UTC, every quote the market table shows is out by the broker's whole
+# offset — three hours on a UTC+3 server, which is what the dashboard's
+# "Quote Time (NY)" was displaying.
+# --------------------------------------------------------------------------- #
+def _quoted(monkeypatch, *, offset, bid, ask, spread_points, digits=5,
+            when=datetime(2026, 7, 15, 12, 0)):
+    """A client quoting from a fake terminal whose clock is ``offset`` ahead."""
+    monkeypatch.setattr(tu, "now_utc", lambda: when)
+    fake = _FakeMT5(offset_hours=offset, symbols=["EURUSD"], bid=bid, ask=ask,
+                    spread_points=spread_points, digits=digits)
+    client = _install(monkeypatch, fake)
+    # What the runner does once per terminal session, from the same probe these
+    # tests exercise: the offset is measured, then published process-wide.
+    tu.set_server_utc_offset(offset, "discovered")
+    return client, fake
+
+
+def test_a_quote_time_is_real_utc_not_the_brokers_wall_clock(monkeypatch):
+    client, fake = _quoted(monkeypatch, offset=3.0, bid=1.09345, ask=1.09355,
+                           spread_points=10)
+
+    tick = client.symbol_tick("EURUSD")
+
+    broker_wall = tu.utc_epoch_to_naive(fake.symbol_info_tick("EURUSD").time)
+    assert broker_wall == datetime(2026, 7, 15, 15, 0)      # the server's clock
+    assert tick["time_utc"] == datetime(2026, 7, 15, 12, 0)  # ...is not UTC
+    # The regression itself: the timestamp is not the value the epoch encodes.
+    assert tick["time_utc"] != broker_wall
+    # ...and on the New York clock the dashboard renders, that is 08:00 EDT.
+    assert tu.utc_to_ny(tick["time_utc"]) == datetime(2026, 7, 15, 8, 0)
+
+
+def test_a_quote_time_matches_the_candle_pipeline_for_the_same_instant(monkeypatch):
+    """One conversion, so a quote and the candle beside it cannot disagree.
+
+    The market table shows both: the last closed M1 close the strategy acted on,
+    and the live quote. Rendering them through different conversions is how a
+    quote ends up dated hours away from the candle it sits next to.
+    """
+    client, fake = _quoted(monkeypatch, offset=2.0, bid=1.09345, ask=1.09355,
+                           spread_points=10)
+    epoch = fake.symbol_info_tick("EURUSD").time
+
+    tick = client.symbol_tick("EURUSD")
+
+    assert tick["time_utc"] == tu.broker_to_utc(tu.utc_epoch_to_naive(epoch))
+
+
+def test_a_quote_time_is_dst_aware_on_the_new_york_side(monkeypatch):
+    """Same broker clock, and New York is an hour apart across the switch."""
+    winter, _ = _quoted(monkeypatch, offset=3.0, bid=1.09, ask=1.10,
+                        spread_points=10, when=datetime(2026, 1, 15, 15, 0))
+    winter_tick = winter.symbol_tick("EURUSD")
+
+    summer, _ = _quoted(monkeypatch, offset=3.0, bid=1.09, ask=1.10,
+                        spread_points=10, when=datetime(2026, 7, 15, 15, 0))
+    summer_tick = summer.symbol_tick("EURUSD")
+
+    # Broker 18:00 -> UTC 15:00 -> 10:00 EST in January, 11:00 EDT in July.
+    assert winter_tick["time_utc"] == summer_tick["time_utc"].replace(month=1)
+    assert tu.utc_to_ny(winter_tick["time_utc"]) == datetime(2026, 1, 15, 10, 0)
+    assert tu.utc_to_ny(summer_tick["time_utc"]) == datetime(2026, 7, 15, 11, 0)
+
+
+def test_a_quote_with_no_offset_verified_is_not_shifted_by_a_guess(monkeypatch):
+    """Unverified means zero here, never an invented offset.
+
+    The dashboard is still read-only in this state, and the live scanner
+    refuses to scan at all on an unverified broker clock — so the honest
+    reading is the one the terminal gave, flagged as such by the offset source.
+    """
+    monkeypatch.setattr(tu, "now_utc", lambda: datetime(2026, 7, 15, 12, 0))
+    fake = _FakeMT5(offset_hours=0.0, symbols=["EURUSD"], bid=1.09345,
+                    ask=1.09355, spread_points=10)
+    client = _install(monkeypatch, fake)
+
+    tick = client.symbol_tick("EURUSD")
+
+    assert tick["time_utc"] == datetime(2026, 7, 15, 12, 0)
+    assert tu.server_offset_source() == "unresolved"
+
+
+# --------------------------------------------------------------------------- #
+# Zero is a reading, not a missing value
+# --------------------------------------------------------------------------- #
+def test_a_zero_spread_is_reported_as_zero(monkeypatch):
+    """``if points else None`` erased a genuine zero.
+
+    A zero-spread account quotes bid == ask and the broker reports ``spread:
+    0``. Rendering that as an em dash says "not read", which is a different and
+    false statement about the market — and it is the one figure a reader checks
+    before deciding a fill is cheap.
+    """
+    client, _ = _quoted(monkeypatch, offset=0.0, bid=1.10000, ask=1.10000,
+                        spread_points=0)
+
+    tick = client.symbol_tick("EURUSD")
+
+    assert tick["spread"] == 0.0
+    assert tick["spread_points"] == 0
+    assert tick["bid"] == 1.10000
+    assert tick["ask"] == 1.10000
+    # Every one of them is present, not ``None``: that is the whole point.
+    assert all(tick[k] is not None
+               for k in ("bid", "ask", "spread", "spread_points"))
+
+
+def test_a_crossed_quote_is_unknown_rather_than_a_negative_spread(monkeypatch):
+    """A negative difference is impossible, so it is not reported as a number.
+
+    The bid and ask themselves are still published — they were read, and a
+    reader can see the crossed print for what it is.
+    """
+    client, _ = _quoted(monkeypatch, offset=0.0, bid=1.10010, ask=1.10000,
+                        spread_points=0)
+
+    tick = client.symbol_tick("EURUSD")
+
+    assert tick["spread"] is None
+    assert tick["bid"] == 1.10010 and tick["ask"] == 1.10000
+
+
+def test_a_field_the_terminal_did_not_report_stays_unknown(monkeypatch):
+    """The other direction: absent is still absent, never a fabricated zero."""
+    client, _ = _quoted(monkeypatch, offset=0.0, bid=None, ask=None,
+                        spread_points=None)
+
+    tick = client.symbol_tick("EURUSD")
+
+    assert tick["bid"] is None and tick["ask"] is None
+    assert tick["spread"] is None and tick["spread_points"] is None

@@ -253,6 +253,69 @@ class MT5Client:
         rows = self._copy_rates_from_pos_raw(symbol, "M1", 0, 1)
         return int(rows[0][0]) if rows else None
 
+    def symbol_tick(self, symbol: str) -> dict[str, Any] | None:
+        """The last quote for ``symbol``, or ``None`` if there is not one.
+
+        Read-only and additive: this is the same ``symbol_info_tick`` call
+        :meth:`_tick_time_epoch` already makes for the broker-clock probe,
+        surfaced with the bid/ask so the dashboard can show a real quote rather
+        than only the last price the strategy acted on.
+
+        ``spread`` is the ask-minus-bid in *price* units, which is what a
+        reader compares against the digits they can see; ``spread_points`` is
+        the broker's own ``symbol_info().spread`` in points, kept alongside it
+        because that is the number a broker's own UI quotes.
+
+        ``time_utc`` is **real UTC**. A tick's ``time`` is stamped on the
+        broker's *server* clock, exactly like a ``copy_rates`` row, so it is
+        converted the same way the candle pipeline converts one — broker wall
+        clock, then off the discovered server offset. Reading the epoch as
+        though it were already UTC puts every displayed quote out by the
+        broker's own offset, which is hours.
+
+        Returns ``None`` rather than raising when the terminal is closed or the
+        symbol is not quoting, so a market table degrades to "no quote read"
+        instead of failing a poll.
+        """
+        if not self.is_connected():
+            return None
+        try:
+            tick = _mt5.symbol_info_tick(symbol)
+        except Exception:
+            return None
+        if tick is None:
+            return None
+
+        bid = getattr(tick, "bid", None)
+        ask = getattr(tick, "ask", None)
+        epoch = int(getattr(tick, "time", 0) or 0)
+        info = _mt5.symbol_info(symbol)
+        points = getattr(info, "spread", None) if info is not None else None
+        # Every numeric field is tested with ``is not None`` rather than for
+        # truth: a legitimate zero — a zero-spread instrument, or the 0 a
+        # broker reports in ``spread`` — is a real reading, and a truthiness
+        # test would silently turn it into "unknown".
+        return {
+            "bid": float(bid) if bid is not None else None,
+            "ask": float(ask) if ask is not None else None,
+            # Only a *negative* difference is impossible: it means the quote is
+            # crossed, so it is reported as unknown rather than as a real
+            # (and impossible) number. A zero is a real spread on a zero-spread
+            # account and is reported as one.
+            "spread": (round(float(ask) - float(bid), 8)
+                       if bid is not None and ask is not None and ask >= bid
+                       else None),
+            "spread_points": int(points) if points is not None else None,
+            "digits": getattr(info, "digits", None) if info is not None else None,
+            # The broker -> UTC step, using the offset the runner discovered
+            # from this terminal (``time_utils.server_utc_offset_hours``). The
+            # same conversion ``market_data.row_to_candle`` applies to a candle,
+            # so a quote and the candle it sits beside cannot disagree about
+            # what time it is.
+            "time_utc": (tu.broker_to_utc(tu.utc_epoch_to_naive(epoch))
+                         if epoch else None),
+        }
+
     def _probe_symbols(self, preferred: list[str] | None, limit: int) -> list[str]:
         """Symbols to read the broker clock from, best first.
 

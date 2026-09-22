@@ -30,6 +30,7 @@ can reach any other gate in the executor.
 """
 from __future__ import annotations
 
+import os
 import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -101,6 +102,30 @@ def _default_max_hold_m1() -> int:
 
 
 # --------------------------------------------------------------------------- #
+# JSON shaping for the persisted engine state
+#
+# The state row stores these maps as JSON, so every value has to survive a
+# round-trip. Datetimes do not, and the dashboard renders these without a
+# timezone of their own, so they travel as ISO-8601 strings and are parsed back
+# on read. Kept as module functions rather than inline lambdas so the writer and
+# any reader agree on exactly one format.
+# --------------------------------------------------------------------------- #
+def _iso_or_none(value) -> str | None:
+    """A datetime as an ISO-8601 string, or ``None``."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _jsonable_quote(quote: dict) -> dict:
+    """One asset's quote with its timestamp rendered for JSON."""
+    out = dict(quote or {})
+    stamp = out.get("time_utc")
+    out["time_utc"] = _iso_or_none(stamp)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Default collaborator factories (lazy so importing this module stays cheap and
 # so tests can inject fakes without MT5 anywhere in the import graph).
 # --------------------------------------------------------------------------- #
@@ -167,6 +192,17 @@ class LiveState:
     #: asset name -> UTC close time of the candle ``prices`` came from, so a
     #: figure is never shown without its age.
     price_times: dict[str, datetime] = field(default_factory=dict)
+    #: asset name -> the last quote read from the terminal, as
+    #: ``{"bid", "ask", "spread", "spread_points", "digits", "time_utc"}``.
+    #:
+    #: Distinct from ``prices``, and deliberately so: ``prices`` is the last
+    #: *closed* M1 close, which is the price the strategy itself acted on, while
+    #: this is the live bid/ask. A reader comparing the two is looking at the
+    #: difference between what the model decided on and what the market is doing
+    #: now, so collapsing them into one field would destroy the distinction.
+    #: Read from the same ``_mt5_session`` the engine already holds — never a
+    #: second terminal connection.
+    quotes: dict[str, dict] = field(default_factory=dict)
     #: Whether the session is *awake*. The live thread stays up around the clock
     #: but only polls inside a tradeable session on a trading day; this is False
     #: while it sleeps. A running-but-asleep session is still "running" for
@@ -180,6 +216,13 @@ class LiveState:
     #: UTC instant of the next window the loop will wake for. ``None`` while
     #: awake, and ``None`` if no window falls inside the search horizon.
     next_open_utc: datetime | None = None
+    #: UTC instant the live loop last completed a pass — its in-process
+    #: heartbeat. The persisted engine-state row carries its own copy for a
+    #: dashboard in another process; this one exists so a dashboard *in this
+    #: process* reports the same fact instead of having nothing to show. Left
+    #: ``None`` until the first pass, which is the honest answer while a session
+    #: is still warming up.
+    heartbeat_utc: datetime | None = None
     last_error: str = ""
 
 
@@ -295,6 +338,11 @@ class JobManager:
         self._state_lock = threading.RLock()
         # Serialises MT5-owning jobs (see the module docstring).
         self._mt5_lock = threading.Lock()
+        #: Identifies *this* manager against the persisted engine-state row, so
+        #: a start can tell "an engine I already run" from "an engine in another
+        #: process". Random per construction: a restart is a new instance, which
+        #: is exactly what the duplicate-engine guard needs to know.
+        self._instance_id = uuid4().hex
 
         self._stop_event = threading.Event()
         self._live_thread: threading.Thread | None = None
@@ -368,6 +416,131 @@ class JobManager:
             "live_running": self.is_live_running(),
         }
 
+    # ------------------------------------------------------------------ #
+    # Persisted engine state (the bridge to a dashboard in another process)
+    # ------------------------------------------------------------------ #
+    #: Slack added to a lease before it is treated as expired. Covers the time
+    #: between the writer deciding its wait budget and actually sleeping, plus
+    #: ordinary scheduler jitter. Generous rather than tight: reporting a live
+    #: engine as dead is the failure that would actually mislead an operator.
+    LEASE_SLACK_SECONDS = 20.0
+
+    def _publish_engine_state(self, repo, *, lease_seconds: float) -> None:
+        """Mirror the in-memory live state into the persisted singleton row.
+
+        Called from the live worker only, on every pass of its loop. This is what
+        lets a dashboard in a *different* process show a price, a setup state or
+        a scanner badge at all — ``LiveState`` is otherwise confined to the
+        scanner's own address space (see ``database.models.EngineState``).
+
+        ``lease_seconds`` is how long the worker is about to sleep, recorded so
+        the reader can tell a sleeping engine from a dead one without assuming a
+        fixed poll interval.
+
+        Best-effort by construction: a database problem must never take down a
+        scanning session, exactly like the ``_log``/``_emit`` sinks it sits
+        beside. The failure is surfaced once through ``_emit`` rather than
+        swallowed, because a dashboard that has silently stopped updating is
+        precisely the bug this method exists to fix.
+        """
+        try:
+            with self._state_lock:
+                live = asdict(self._live)
+            repo.save_engine_state(
+                instance_id=self._instance_id,
+                pid=os.getpid(),
+                state=live["state"],
+                active=bool(live["active"]),
+                activity=live["activity"] or "",
+                assets=list(live["assets"]),
+                setups=live["setups"],
+                prices=live["prices"],
+                price_times={k: _iso_or_none(v)
+                             for k, v in live["price_times"].items()},
+                quotes={k: _jsonable_quote(v) for k, v in live["quotes"].items()},
+                last_candle_utc=live["last_candle_utc"],
+                next_open_utc=live["next_open_utc"],
+                signals_session=live["signals_session"],
+                started_at_utc=live["started_at_utc"],
+                stopped_at_utc=live["stopped_at_utc"],
+                last_error=live["last_error"] or "",
+                heartbeat_utc=tu.now_utc(),
+                lease_seconds=float(lease_seconds),
+            )
+        except Exception as exc:  # a bridge failure must not stop the engine
+            self._emit(f"[scan] engine-state publish failed: "
+                       f"{type(exc).__name__}: {exc}")
+
+    def engine_lease(self) -> dict[str, Any]:
+        """The persisted engine state, with its lease already evaluated.
+
+        Answers "is an engine running, and is it this one?" without assuming the
+        caller shares a process with it. Never raises: a database that cannot be
+        read reports "no engine", which is the safe direction — the dashboard
+        then says it does not know rather than claiming a live feed it cannot see.
+
+        The engine is alive while ``now - heartbeat_utc <= lease_seconds``. The
+        lease is what the writer is *allowed* to sleep for, so a correctly idle
+        engine outside a trading session stays alive across its long sleep while
+        a crashed one expires.
+        """
+        try:
+            repo = self._repo_factory()
+        except Exception:
+            return {"alive": False, "readable": False, "row": None,
+                    "mine": False, "age_seconds": None}
+        try:
+            row = repo.load_engine_state()
+        except Exception:
+            return {"alive": False, "readable": False, "row": None,
+                    "mine": False, "age_seconds": None}
+        finally:
+            try:
+                repo.close()
+            except Exception:
+                pass
+
+        if row is None:
+            return {"alive": False, "readable": True, "row": None,
+                    "mine": False, "age_seconds": None}
+
+        heartbeat = row.heartbeat_utc
+        age = ((tu.now_utc() - heartbeat).total_seconds()
+               if heartbeat is not None else None)
+        lease = float(row.lease_seconds or 0.0) + self.LEASE_SLACK_SECONDS
+        # Two conditions, not one. The lease answers "has the heartbeat gone
+        # quiet for longer than the writer said it would", which catches a
+        # process that died without running its cleanup. The state answers "did
+        # the engine say it was finished", which catches an orderly stop
+        # immediately — otherwise a stopped session would keep reading as alive
+        # for the whole slack window.
+        alive = (age is not None and age <= lease
+                 and row.state in (LIVE_STARTING, LIVE_RUNNING, LIVE_STOPPING))
+        return {
+            "alive": alive,
+            "readable": True,
+            "mine": row.instance_id == self._instance_id,
+            "age_seconds": age,
+            "state": row.state,
+            "active": bool(row.active),
+            "activity": row.activity or "",
+            "assets": list(row.assets or []),
+            "setups": dict(row.setups or {}),
+            "prices": dict(row.prices or {}),
+            "price_times": dict(row.price_times or {}),
+            "quotes": dict(row.quotes or {}),
+            "last_candle_utc": row.last_candle_utc,
+            "next_open_utc": row.next_open_utc,
+            "signals_session": int(row.signals_session or 0),
+            "started_at_utc": row.started_at_utc,
+            "stopped_at_utc": row.stopped_at_utc,
+            "last_error": row.last_error or "",
+            "heartbeat_utc": heartbeat,
+            "lease_seconds": row.lease_seconds,
+            "pid": row.pid,
+            "instance_id": row.instance_id,
+        }
+
     def _remember_account(self, acc, *, trade_allowed: bool | None = None) -> None:
         """Publish an ``AccountSummary`` as the current snapshot.
 
@@ -398,8 +571,21 @@ class JobManager:
     # ------------------------------------------------------------------ #
     # Live session
     # ------------------------------------------------------------------ #
-    def start_live(self) -> dict[str, Any]:
-        """Spawn the live scanner thread. Returns ``{"ok": bool, ...}``."""
+    def start_live(self, *, force: bool = False) -> dict[str, Any]:
+        """Spawn the live scanner thread. Returns ``{"ok": bool, ...}``.
+
+        Refuses when a *different* process already holds a live engine lease.
+        Two engines scanning the same registry would each decide the same setups
+        independently and broadcast them, so the operator would get duplicate
+        Telegram alerts for every signal — the same failure the reloader warning
+        in ``run.py`` guards against, reached from the other direction.
+
+        ``force=True`` overrides, for the case the lease cannot distinguish: a
+        hard crash leaves a fresh-looking lease behind until it expires, so an
+        operator restarting immediately needs a way through. The lease row is
+        only ever read, never trusted blindly — an unreadable database reports
+        "no lease" and the start proceeds.
+        """
         with self._state_lock:
             if self.is_live_running():
                 return {"ok": False, "reason": "already_running",
@@ -410,6 +596,25 @@ class JobManager:
                         "message": "A backtest is running — wait for it to finish.",
                         "live": self.live_state()}
 
+        if not force:
+            lease = self.engine_lease()
+            if lease.get("alive") and not lease.get("mine"):
+                # Deliberately outside the lock above: reading the lease opens a
+                # database session, and holding the state lock across I/O would
+                # block every status poll for the duration.
+                return {
+                    "ok": False, "reason": "engine_elsewhere",
+                    "message": (
+                        "Another process is already running the scanner "
+                        f"(pid {lease.get('pid')}, started "
+                        f"{lease.get('started_at_utc')}). Starting a second one "
+                        "would duplicate every signal and Telegram alert. Stop "
+                        "it first, or force the start if you know it is gone."),
+                    "lease": lease,
+                    "live": self.live_state(),
+                }
+
+        with self._state_lock:
             self._stop_event = threading.Event()
             self._live = LiveState(state=LIVE_STARTING, started_at_utc=tu.now_utc())
             thread = threading.Thread(target=self._live_worker, name="live-scanner",
@@ -740,6 +945,32 @@ class JobManager:
                         self._live.active = active
                         self._live.activity = activity
                         self._live.next_open_utc = next_open
+                        # Stamped here rather than only into the persisted row:
+                        # a dashboard reading this state object in-process would
+                        # otherwise report "last heartbeat: none" for a loop that
+                        # is demonstrably beating. Same instant, same meaning —
+                        # the moment this pass began.
+                        self._live.heartbeat_utc = tu.now_utc()
+
+                    # How long this pass is allowed to sleep, resolved *before*
+                    # the heartbeat below so the lease the dashboard reads is the
+                    # sleep the loop is actually about to take. Awake it is the
+                    # poll interval; idle it is the wait to the next window,
+                    # capped so a clock jump cannot make us oversleep (see
+                    # SESSION_SLEEP_CAP_SECONDS).
+                    wait = poll
+                    if not active:
+                        wait = SESSION_SLEEP_CAP_SECONDS
+                        if next_open is not None:
+                            wait = min(wait, max(0.0,
+                                                 (next_open - tu.now_utc()).total_seconds()))
+
+                    # Published on every pass, including while correctly idle —
+                    # this is the beat that tells a dashboard in another process
+                    # the engine is alive rather than gone. Skipping it while
+                    # asleep would make a healthy engine look dead for the whole
+                    # of a weekend.
+                    self._publish_engine_state(repo, lease_seconds=wait)
 
                     line = sess.activity_log_line(now_ny, active, activity)
                     if line != prev_line:
@@ -758,12 +989,7 @@ class JobManager:
 
                     if not active:
                         # Nothing to poll for. Wait on the event so Stop is still
-                        # immediate, capped so a clock jump cannot make us
-                        # oversleep — see SESSION_SLEEP_CAP_SECONDS.
-                        wait = SESSION_SLEEP_CAP_SECONDS
-                        if next_open is not None:
-                            wait = min(wait,
-                                       max(0.0, (next_open - tu.now_utc()).total_seconds()))
+                        # immediate.
                         self._stop_event.wait(wait)
                         continue
 
@@ -789,6 +1015,9 @@ class JobManager:
                     # dashboard's balance tile frozen at whenever the last signal
                     # happened to appear.
                     account_snapshot()
+                    # Collected across this poll's asset loop, then published in
+                    # one pass below alongside the price and setup tables.
+                    quotes: dict[str, Any] = {}
                     for name, sc in scanners.items():
                         lookback, missing = self._backfill_plan(sc)
                         if missing and name not in warned_backfill:
@@ -806,6 +1035,17 @@ class JobManager:
                         candles = market.poll_closed_candles(sc.symbol,
                                                              lookback=lookback)
                         handled = sc.feed_new(candles)
+                        # The live quote, read in the terminal session this
+                        # worker already owns — never a second connection. Kept
+                        # beside the candle poll because both describe the same
+                        # asset at the same moment, and a failure to read a
+                        # quote must not disturb the candles the strategy needs.
+                        try:
+                            quote = client.symbol_tick(sc.symbol)
+                        except Exception:
+                            quote = None
+                        if quote is not None:
+                            quotes[name] = quote
                         last = sc.last_candle_time_utc()
                         with self._state_lock:
                             self._live.last_candle_utc = last
@@ -833,6 +1073,15 @@ class JobManager:
                             ((n, self._last_candle_time(sc))
                              for n, sc in scanners.items())
                             if when is not None}
+                        # An asset whose quote failed to read keeps its previous
+                        # one rather than vanishing: a blank cell and a stale
+                        # cell are different facts, and the row carries the
+                        # timestamp that tells them apart.
+                        self._live.quotes.update(quotes)
+                    # Republished after the scan so the row carries this poll's
+                    # data, not the previous one's. The pass already beat at the
+                    # top of the loop; this second write is the fresh payload.
+                    self._publish_engine_state(repo, lease_seconds=poll)
                     # Wait on the event so Stop takes effect immediately rather
                     # than after the full poll interval.
                     self._stop_event.wait(poll)
@@ -844,8 +1093,6 @@ class JobManager:
             if repo is not None:
                 self._log(repo, "ERROR", "scanner", error)
         finally:
-            if repo is not None:
-                repo.close()
             with self._state_lock:
                 self._live.stopped_at_utc = tu.now_utc()
                 self._live.last_error = error
@@ -854,10 +1101,19 @@ class JobManager:
                 # died with the session, and a frozen price would read as live.
                 self._live.prices = {}
                 self._live.price_times = {}
+                self._live.quotes = {}
                 self._live.active = False
                 self._live.activity = ""
                 self._live.next_open_utc = None
                 self._live.state = LIVE_ERROR if error else LIVE_STOPPED
+
+            # Published before the repository is closed, and with a lease of
+            # zero: the engine is gone, so the dashboard must stop reporting it
+            # as alive immediately rather than waiting out the last lease it
+            # held while it was running.
+            if repo is not None:
+                self._publish_engine_state(repo, lease_seconds=0.0)
+                repo.close()
 
     # ------------------------------------------------------------------ #
     # Backtest

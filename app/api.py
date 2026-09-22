@@ -208,7 +208,13 @@ def register_api(app) -> None:
     def api_live_start():
         if not _origin_allowed():
             abort(403)
-        result = jobs.start_live()
+        # ``force`` is the escape hatch for a lease left behind by a hard crash
+        # of a previous engine, which is indistinguishable from a live one until
+        # it expires. Presence carries it, so an ordinary Start click never
+        # forces.
+        force = str(_payload().get("force", "")).strip().lower() in {"1", "true",
+                                                                    "yes", "on"}
+        result = jobs.start_live(force=force)
         g.repo.log_event("INFO" if result["ok"] else "WARN", "dashboard",
                          f"live start: {result.get('reason') or 'started'}")
         return jsonify(result), (200 if result["ok"] else 409)

@@ -30,9 +30,11 @@ You need:
 | Certificate | a TLS certificate for that domain (see step 9) |
 
 The MT5 Python API is **single-owner per process**: it binds the whole process
-to one terminal. That is why the scanner and the web app are separate processes
-(below) and why the platform can never read a *client's* broker balance from the
-same terminal. See `trading/broker_accounts.py`.
+to one terminal. Inside a process only the engine's own worker thread holds the
+terminal, so a browser request never reaches MT5 — that contract is documented
+at the top of `runner.py`. It is also why the platform can never read a
+*client's* broker balance from the same terminal. See
+`trading/broker_accounts.py`.
 
 ---
 
@@ -177,7 +179,10 @@ Invoke-WebRequest http://127.0.0.1:5000/health -UseBasicParsing | Select-Object 
 ```
 
 `/health` is the only unauthenticated endpoint and returns
-`{"status": "ok", "live_running": false}`.
+`{"status": "ok", "live_running": false}`. `live_running` reports whether an
+engine is alive **anywhere** — it is read from the persisted engine state, so it
+stays `true` while `run.py scan` is running in its own process, and flips to
+`false` about 25 seconds after that process dies.
 
 Then open `http://127.0.0.1:5000/` **on the server** and sign in with the admin
 account from step 4. If `SESSION_COOKIE_SECURE=true` is already set, sign-in over
@@ -189,18 +194,38 @@ If Waitress is not installed, `serve` says so and points at
 
 ## 6. Run the scanner and the web app together
 
-These are two processes, and they must be. MT5's Python API binds the whole
-process to one terminal, so running the scanner *inside* the web process would
-mean a browser request could reach the terminal mid-poll.
+`python run.py serve` starts the engine as well as the dashboard. The scanner,
+the setup pipeline and the MT5 session come up on the same `runner.JobManager`
+the pages read — the web app does this before it begins serving, so there is no
+second command to remember and no separate state to reconcile.
 
 | Process | Command | Purpose |
 |---|---|---|
-| Scanner | `python run.py scan` | the live engine; writes setups and alerts |
-| Web | `python run.py serve` | the platform clients sign in to |
+| Web | `python run.py serve` | the dashboard clients sign in to, and the engine |
+| Scanner (optional) | `python run.py scan` | that same engine, as its own process |
 
-Both read the same `.env` and the same database. The web app does **not** scan;
-without `scan` running, the dashboard honestly reports the scanner as stopped and
-shows the last recorded setups rather than pretending to be live.
+### One engine, not two
+
+There is only ever one engine scanning the registry, whichever of these you run.
+`JobManager.start_live` refuses a second one while another process holds the
+engine lease, so the web task's start becomes a no-op — it says so in the log —
+whenever `AITradingBot-Scanner` is already running. The dashboard then reports
+*that* engine's state from the persisted lease, which is why `/health` and the
+status tiles are correct in both arrangements. Do not "fix" a refusal by forcing
+a start: two engines reach the same setups and send every alert twice.
+
+One case needs care. A lease outlives a hard kill (`taskkill /F`, a closed
+console window) by about 25 seconds, so a web app started in that window would
+otherwise refuse the start, never retry, and report an engine that is gone. So
+before deferring, `run.py` checks whether the pid in the lease still exists and
+takes the engine over only when it does not. A lease whose process is alive is
+never taken over.
+
+For a dashboard that owns no engine and must not touch the terminal — watching a
+scanner started elsewhere, or any process you keep away from MT5 — set
+`ENGINE_AUTOSTART=false` in `.env`, or pass `--no-engine`. With no engine
+anywhere, the dashboard honestly reports the scanner as stopped and shows the
+last recorded setups rather than pretending to be live.
 
 Start them from two PowerShell windows while you are testing. For a permanent
 install, use the Task Scheduler script (step 7).

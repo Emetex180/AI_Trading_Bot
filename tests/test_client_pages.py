@@ -26,7 +26,8 @@ from app.web import create_app
 from config import get_settings
 from database import models as m
 
-from test_web import (_PASSWORD, _FakeJobs, _repo, _save_signal, _sign_in)
+from test_web import (_PASSWORD, _FakeJobs, _lease, _repo, _save_signal,
+                      _sign_in)
 
 CLIENT_PAGES = ["/dashboard", "/market", "/setups", "/history", "/analysis"]
 
@@ -302,6 +303,261 @@ def test_the_market_page_never_claims_a_price_when_the_stream_is_empty():
     body = _body(_client(repo, jobs), "/market")
 
     assert "101.75" not in body
+
+
+# --------------------------------------------------------------------------- #
+# The engine running in another process
+# --------------------------------------------------------------------------- #
+def test_the_market_page_reads_the_engine_from_another_process():
+    """The reason the bridge exists: the scanner is a separate process.
+
+    Started by ``run.py scan``, its live state is in that process's memory, so
+    the persisted lease is the only way this page can know a quote at all.
+    """
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    jobs.lease = _lease()
+
+    body = _body(_client(repo, jobs), "/market")
+
+    assert "101.70" in body and "101.74" in body   # bid and ask
+    assert "101.75" in body                        # the closed M1 close
+    assert "ACTIVE" in body
+    assert "running in the scanner process" in body
+    assert "4242" in body                          # the engine's pid
+
+
+def test_an_expired_lease_is_offline_even_though_flask_answered():
+    """A web server that answers a request is not evidence of a running engine.
+
+    This is the state the page used to be stuck in: Flask up, header reading
+    "Scanner stopped", every price an em dash, while the engine scanned and
+    alerted perfectly well in its own process. The inverse must hold too — once
+    the lease lapses, the last quote is not re-served as though it were live.
+    """
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    jobs.lease = _lease(alive=False, state="stopped", age_seconds=None,
+                        last_error="Live session stopped.")
+
+    body = _body(_client(repo, jobs), "/market")
+
+    assert "OFFLINE" in body
+    assert "101.70" not in body
+    assert "101.75" not in body
+
+
+def test_a_dead_engine_does_not_report_itself_as_running():
+    """The state and the liveness flag must not contradict each other.
+
+    A crashed engine stops heartbeating without writing anything on its way out,
+    so its last published row still says ``running``. Reporting that next to
+    ``engine_alive: false`` is the contradiction this removes: a reader looking
+    at the state alone (the dashboard header, an API client, the admin console)
+    would be told the engine was up when nothing is publishing.
+    """
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    jobs.lease = _lease(alive=False, state="running", age_seconds=900.0,
+                        last_error="")
+
+    status = _client(repo, jobs).get("/api/client/market").get_json()["status"]
+
+    assert status["scanner_running"] is False
+    assert status["engine_alive"] is False
+    assert status["scanner_state"] == "stopped"
+    assert status["scanner_state"] != "running"
+
+
+def test_a_dead_engine_still_reports_the_error_it_died_with():
+    """Rewriting a stale "running" must not erase the reason it stopped.
+
+    ``stopped`` and ``error`` are not claims of liveness, so they are passed
+    through exactly as the engine wrote them — "it crashed with this error" is
+    the one thing an operator needs from a dead engine.
+    """
+    jobs = _FakeJobs()
+    jobs.lease = _lease(alive=False, state="error", age_seconds=900.0,
+                        last_error="MT5 terminal not running")
+
+    status = _client(_repo(), jobs).get("/api/client/market").get_json()["status"]
+
+    assert status["scanner_state"] == "error"
+    assert status["engine_last_error"] == "MT5 terminal not running"
+
+
+def test_the_market_api_formats_the_lease_quotes_for_the_poller():
+    """The polled payload carries the same labels the page was painted with."""
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    jobs.lease = _lease()
+
+    payload = _client(repo, jobs).get("/api/client/market").get_json()
+
+    assert payload["status"]["engine_alive"] is True
+    assert payload["status"]["engine_source"] == "scanner process"
+    # By name, not by position: the registry ships a full asset list and the
+    # poller keys its rows on data-asset for the same reason.
+    row = next(r for r in payload["rows"] if r["name"] == "USTEC")
+    assert row["bid_label"] == "101.70"
+    assert row["ask_label"] == "101.74"
+    assert row["spread_label"] == "0.04"
+    assert row["spread_points_label"] == "4"
+
+
+def test_the_api_says_no_engine_when_only_the_web_server_is_up():
+    """``engine_alive`` distinguishes the engine from the process serving it."""
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+
+    payload = _client(repo, jobs).get("/api/client/market").get_json()
+
+    assert payload["status"]["engine_alive"] is False
+    assert payload["status"]["engine_source"] == "none"
+    assert payload["status"]["mt5_connected"] is None   # unknown, not "no"
+
+
+# --------------------------------------------------------------------------- #
+# The named components on the engine card
+#
+# The card lists the backend, MT5, market data, the scanner, the setup pipeline
+# and the asset watch separately, because those are the questions an operator
+# actually asks. They are derived from the one engine state rather than read
+# independently, so a component can never be reported as up while the engine is
+# down — and, the whole point of the exercise, "up but asleep" is never
+# flattened into "stopped".
+# --------------------------------------------------------------------------- #
+def _status_of(client):
+    return client.get("/api/client/market").get_json()["status"]
+
+
+def test_no_engine_reports_every_component_as_stopped():
+    """Nothing on the card may claim to be working without an engine behind it.
+
+    ``web_app_running`` is the deliberate exception and is labelled as such: it
+    is true by construction, because this page is being served.
+    """
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+
+    status = _status_of(_client(repo, _FakeJobs()))
+
+    assert status["web_app_running"] is True
+    assert status["backend_running"] is False
+    assert status["market_data_live"] is False
+    assert status["scanner_status"] == "STOPPED"
+    assert status["setup_scanner_status"] == "STOPPED"
+    assert status["assets_status"] == "STOPPED"
+    assert status["assets_count"] == 0
+
+
+def test_an_asleep_engine_is_waiting_not_stopped():
+    """The distinction the whole page exists for.
+
+    Outside a session the live thread is up and correctly polling nothing. It
+    has not stopped, it will wake by itself at the next window, and calling that
+    "stopped" is what sends an operator to restart a perfectly healthy engine.
+    """
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    jobs.lease = _lease(active=False, activity="outside_session",
+                        age_seconds=2.0)
+
+    status = _status_of(_client(repo, jobs))
+
+    assert status["backend_running"] is True
+    assert status["scanner_status"] == "WAITING"
+    assert status["setup_scanner_status"] == "WAITING"
+    assert status["assets_status"] == "WAITING"
+    assert status["scanner_running"] is True     # alive...
+    assert status["scanner_active"] is False     # ...and awake? no. Both true.
+    # No candle is being read while it sleeps, so the feed is not live — the
+    # figures on the page stay the last ones it read, with their time.
+    assert status["market_data_live"] is False
+
+
+def test_an_awake_engine_reports_every_component_as_active():
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    jobs.lease = _lease(active=True, activity="london_open")
+
+    status = _status_of(_client(repo, jobs))
+
+    assert status["backend_running"] is True
+    assert status["mt5_connected"] is True
+    assert status["market_data_live"] is True
+    assert status["scanner_status"] == "ACTIVE"
+    assert status["setup_scanner_status"] == "ACTIVE"
+    assert status["assets_status"] == "ACTIVE"
+    assert status["assets_count"] == 1
+
+
+def test_an_engine_in_this_process_reports_its_own_heartbeat():
+    """The startup path puts the engine in the web process, so the card must be
+    able to describe that case — including the heartbeat, which used to be
+    blanked to ``None`` for an in-process engine and left the tile reading
+    "none" beside a scanner that was demonstrably beating."""
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    jobs.live = {**jobs.live, "state": "running", "active": True,
+                 "activity": "london_open", "assets": ["USTEC"],
+                 "last_candle_utc": datetime(2026, 1, 6, 18, 32),
+                 "heartbeat_utc": datetime(2026, 1, 6, 18, 33)}
+
+    status = _status_of(_client(repo, jobs))
+
+    assert status["engine_source"] == "this process"
+    assert status["engine_alive"] is True
+    assert status["engine_heartbeat_ny"] != ""
+    assert status["engine_age_seconds"] is not None
+    assert status["market_data_live"] is True
+
+
+def test_the_engine_card_renders_the_named_components():
+    """The words on the card come from the payload, so a reader sees the same
+    vocabulary the poller will keep writing into those cells."""
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    jobs.lease = _lease(active=True, activity="london_open")
+
+    body = _body(_client(repo, jobs), "/market")
+
+    for label in ("Web app:", "Backend:", "Market data:", "Setup scanner:",
+                  "Session status:", "Assets:"):
+        assert label in body, label
+    assert "Setup scanner: <span id=\"mk-setups\">ACTIVE</span>" in body
+    assert "Market data: <span id=\"mk-data\">LIVE</span>" in body
+
+
+def test_the_session_status_is_read_from_the_ny_clock(monkeypatch):
+    """Session status is a statement about the clock, not about the engine: a
+    window covers right now, or it does not. Read on the same DST-aware NY
+    clock the strategy uses, never a UTC offset."""
+    from trading import time_utils
+
+    # 2026-07-15 13:30 UTC = 09:30 NY, inside NY AM.
+    monkeypatch.setattr(time_utils, "now_ny", lambda: datetime(2026, 7, 15, 9, 30))
+    open_now = _status_of(_client(_seeded()))
+
+    assert open_now["session_open"] is True
+    assert open_now["session_status"] == "ACTIVE"
+    assert open_now["session_label"] == "NY AM"
+
+    # 2026-07-15 17:30 UTC = 13:30 NY: NY PM, the lunch gap is 12:00-13:00.
+    monkeypatch.setattr(time_utils, "now_ny", lambda: datetime(2026, 7, 15, 12, 30))
+    closed_now = _status_of(_client(_seeded()))
+
+    assert closed_now["session_open"] is False
+    assert closed_now["session_status"] == "CLOSED"
 
 
 # --------------------------------------------------------------------------- #

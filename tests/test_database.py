@@ -314,3 +314,86 @@ def test_the_dashboard_entry_point_migrates_an_existing_database(tmp_path):
     upgraded = _create(legacy_url, future=True)
     assert {"purge_grade", "target_kind", "setup_id", "state"} <= _columns(upgraded)
     upgraded.dispose()
+
+
+def test_engine_state_is_a_singleton_that_updates_in_place():
+    """The engine publishes into one row, so a reading is never stale-by-append.
+
+    The scanner overwrites this row on every poll; a table that grew a row per
+    tick would leave the dashboard reading whichever one it happened to pick.
+    """
+    r = _repo()
+    r.save_engine_state(instance_id="abc", pid=1, state="running",
+                        assets=["USTEC"], prices={"USTEC": 101.75},
+                        heartbeat_utc=datetime(2026, 1, 6, 18, 33),
+                        lease_seconds=5.0)
+
+    # A partial write, as the loop's per-poll publish is: keys it does not pass
+    # keep their previous value rather than being cleared.
+    r.save_engine_state(instance_id="abc", pid=1, state="running",
+                        activity="Scanning M5", active=True)
+
+    assert r.session.query(m.EngineState).count() == 1
+    row = r.load_engine_state()
+    assert row.assets == ["USTEC"]          # JSON re-read, not the same object
+    assert row.prices == {"USTEC": 101.75}
+    assert row.lease_seconds == 5.0
+    assert row.activity == "Scanning M5"
+    assert row.active is True
+
+
+def test_engine_state_json_survives_a_reopened_session():
+    """A fresh session proves the values are in the database, not in memory.
+
+    This is the property the dashboard depends on: the web process opens its own
+    session and must see what the scanner process wrote.
+    """
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    maker = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    Repository(session=maker()).save_engine_state(
+        instance_id="abc", pid=7, state="running", quotes={
+            "USTEC": {"bid": 101.70, "ask": 101.74, "spread": 0.04,
+                      "spread_points": 4, "digits": 2,
+                      "time_utc": "2026-01-06T18:33:00"}},
+        setups={"USTEC": {"buy": "WAITING_FOR_FVG_RETRACE", "sell": "NO_SETUP"}},
+        price_times={"USTEC": "2026-01-06T18:32:00"})
+
+    row = Repository(session=maker()).load_engine_state()
+    assert row.quotes["USTEC"]["bid"] == 101.70
+    assert row.quotes["USTEC"]["spread_points"] == 4
+    assert row.setups["USTEC"]["buy"] == "WAITING_FOR_FVG_RETRACE"
+    assert row.price_times["USTEC"] == "2026-01-06T18:32:00"
+
+
+def test_an_owned_session_is_closed_and_an_injected_one_is_left_alone(tmp_path):
+    """The distinction that a pooled engine makes load-bearing.
+
+    ``session=`` means the caller manages that session's lifetime, so ``close``
+    leaves it be. ``engine=`` shares a pool while keeping the session owned, so
+    ``close`` returns the connection immediately rather than whenever the
+    garbage collector happens to run. A short-lived read that relied on the
+    collector would hold its connection past the end of the request.
+
+    A file-backed database, not ``:memory:`` — in-memory SQLite is served by
+    ``SingletonThreadPool``, which exposes no ``checkedout()`` at all. The pool
+    that can actually run dry is ``QueuePool``, and a file URL is what selects
+    it, so this mirrors the deployed configuration as well as being testable.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'pool.db'}", future=True)
+    Base.metadata.create_all(engine)
+    pool = engine.pool
+
+    injected = Repository(session=sessionmaker(bind=engine, future=True)())
+    injected.load_engine_state()
+    injected.close()
+    assert pool.checkedout() == 1        # the caller still owns this one
+    injected.session.close()
+    assert pool.checkedout() == 0
+
+    owned = Repository(engine=engine)
+    owned.load_engine_state()
+    assert pool.checkedout() == 1
+    owned.close()
+    assert pool.checkedout() == 0        # returned on close, not on collection

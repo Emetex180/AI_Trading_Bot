@@ -33,6 +33,7 @@ from trading import time_utils as tu
 
 from .api import asset_choices
 from .auth import admin_required, current_user, password_problem, require_csrf
+from .client import live_view
 from .display import ny_str
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
@@ -44,6 +45,32 @@ def _cfg():
 
 def _jobs():
     return current_app.config["JOBS"]
+
+
+def _engine_view() -> tuple[dict, dict]:
+    """The engine's live state and job status, read across the process boundary.
+
+    The scanner runs as its own process (``run.py scan``) and owns the MT5
+    terminal while it does, so this process' ``JobManager`` has no live thread
+    of its own to report. Reading it directly answered "stopped" for a scanner
+    that was running perfectly well — the same defect the client dashboard was
+    fixed for.
+
+    ``live_view`` is that fix, and it is reused rather than reimplemented: one
+    cross-process bridge (``engine_state``), so the console and the client
+    dashboard can never disagree about whether the engine is up.
+
+    ``jobs_status`` keeps the rest of ``JobManager.status()`` — the backtest,
+    probe, broker and account slices, which are per-process by nature — but its
+    ``live`` slice and ``live_running`` flag are replaced with the leased view,
+    because those two are the ones that describe the scanner.
+    """
+    jobs, repo = _jobs(), g.repo
+    live = live_view(jobs, repo)
+    status = jobs.status()
+    status["live_running"] = bool(live.get("alive"))
+    status["live"] = live
+    return live, status
 
 
 # --------------------------------------------------------------------------- #
@@ -126,7 +153,7 @@ def index():
     repo = g.repo
     cfg = _cfg()
     jobs = _jobs()
-    live = jobs.live_state()
+    live, jobs_status = _engine_view()
     return render_template(
         "admin/index.html",
         nav="admin",
@@ -140,7 +167,7 @@ def index():
             "trades": repo.count_trades(),
             "backtests": repo.count_backtests(),
         },
-        jobs_status=jobs.status(),
+        jobs_status=jobs_status,
         live=live,
         recent_events=repo.recent_events(12),
         broker_links=[broker_row(a, repo)
@@ -198,16 +225,14 @@ def client_detail(user_id: int):
 def activity():
     repo = g.repo
     cfg = _cfg()
-    jobs = _jobs()
-    live = jobs.live_state()
-    state = jobs.status()
+    live, jobs_status = _engine_view()
     return render_template(
         "admin/activity.html",
         nav="admin-activity",
-        jobs_status=state,
+        jobs_status=jobs_status,
         live=live,
-        account=state.get("account") or {},
-        backtest=state.get("backtest") or {},
+        account=jobs_status.get("account") or {},
+        backtest=jobs_status.get("backtest") or {},
         monitored=live.get("assets") or [],
         setups=live.get("setups") or {},
         prices=live.get("prices") or {},
