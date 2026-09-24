@@ -164,6 +164,12 @@ class Settings:
     telegram_enabled: bool
     telegram_bot_token: str
     telegram_chat_id: str
+    #: A second destination for the *same* alert — a broadcast channel. Blank
+    #: (the default) sends to ``telegram_chat_id`` alone, so leaving this unset
+    #: reproduces the pre-channel behaviour exactly. Set it to the channel's
+    #: numeric id (``-100...``), which survives a rename; ``@username`` also
+    #: works for a public channel. The bot must be able to post there.
+    telegram_channel_id: str
 
     # --- AI ------------------------------------------------------------------
     ai_enabled: bool
@@ -369,6 +375,7 @@ def _build_settings() -> Settings:
         telegram_enabled=_env_bool("TELEGRAM_ENABLED"),
         telegram_bot_token=_env_str("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_env_str("TELEGRAM_CHAT_ID"),
+        telegram_channel_id=_env_str("TELEGRAM_CHANNEL_ID"),
         ai_enabled=_env_bool("AI_ENABLED"),
         llm_api_url=_env_str("LLM_API_URL", "https://api.openai.com/v1/chat/completions"),
         llm_api_key=_env_str("LLM_API_KEY"),

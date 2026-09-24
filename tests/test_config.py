@@ -54,3 +54,13 @@ def test_warmup_bars_are_a_setting_not_an_ad_hoc_read(monkeypatch):
 
     monkeypatch.delenv("WARMUP_M1_BARS")
     assert reload_settings().warmup_m1_bars == DEFAULT_WARMUP_M1_BARS
+
+
+def test_the_telegram_channel_is_configuration_not_a_constant(monkeypatch):
+    """The mirror destination lives in ``.env``, never in the notifier."""
+    monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "-1004431615105")
+    assert reload_settings().telegram_channel_id == "-1004431615105"
+
+    # Unset means "chat only" — the behaviour before the channel existed.
+    monkeypatch.delenv("TELEGRAM_CHANNEL_ID")
+    assert reload_settings().telegram_channel_id == ""

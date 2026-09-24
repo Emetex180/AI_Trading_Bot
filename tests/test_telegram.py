@@ -152,3 +152,140 @@ def test_alert_survives_missing_lineage_fields():
         fvg_formation_time_ny=None, session_keys=[], session_primary=""))
     assert "Symbol:" in text
     assert ALERT_ONLY_TAG in text
+
+
+# --------------------------------------------------------------------------- #
+# The second destination (broadcast channel)
+# --------------------------------------------------------------------------- #
+#: The "3rader" channel the operator mirrors every alert into.
+CHANNEL = "-1004431615105"
+
+
+def _settings_with_channel(channel_id, enabled=True):
+    """Settings that carry a channel — the shape a real ``.env`` produces."""
+    return SimpleNamespace(
+        telegram_enabled=enabled,
+        telegram_bot_token="token",
+        telegram_chat_id="chat",
+        telegram_channel_id=channel_id,
+        telegram_timeout_seconds=5,
+    )
+
+
+def _spy():
+    """A transport that records what it was handed and succeeds."""
+    sent = []
+
+    def transport(text):
+        sent.append(text)
+        return SendResult(ok=True)
+
+    return transport, sent
+
+
+def test_the_channel_receives_the_identical_message():
+    """One alert, two destinations, byte for byte the same body."""
+    chat, chat_seen = _spy()
+    channel, channel_seen = _spy()
+    n = TelegramNotifier(settings=_settings_with_channel(CHANNEL),
+                         transport=chat, channel_transport=channel)
+
+    res = n.send_signal(_signal())
+
+    assert res.ok
+    assert len(chat_seen) == 1 and len(channel_seen) == 1
+    assert chat_seen[0] == channel_seen[0]
+    assert ALERT_ONLY_TAG in channel_seen[0]
+
+
+def test_a_status_message_mirrors_too():
+    chat, chat_seen = _spy()
+    channel, channel_seen = _spy()
+    n = TelegramNotifier(settings=_settings_with_channel(CHANNEL),
+                         transport=chat, channel_transport=channel)
+
+    assert n.send_text("scanner restarted").ok
+    assert chat_seen == channel_seen
+    assert ALERT_ONLY_TAG in channel_seen[0]
+
+
+def test_without_a_channel_id_only_the_chat_is_sent():
+    """The pre-channel behaviour, unchanged: blank means chat only."""
+    chat, chat_seen = _spy()
+    channel, channel_seen = _spy()
+    n = TelegramNotifier(settings=_settings_with_channel(""),
+                         transport=chat, channel_transport=channel)
+
+    assert n.send_signal(_signal()).ok
+    assert len(chat_seen) == 1
+    assert channel_seen == []
+
+
+def test_settings_predating_the_channel_still_work():
+    """A settings object with no ``telegram_channel_id`` at all is chat-only.
+
+    Older callers build a ``SimpleNamespace`` of the fields that existed when
+    they were written; reading the new one must not raise ``AttributeError``.
+    """
+    chat, chat_seen = _spy()
+    n = TelegramNotifier(settings=_settings(enabled=True), transport=chat)
+
+    assert n.channel_id == ""
+    assert n.send_signal(_signal()).ok
+    assert len(chat_seen) == 1
+
+
+def test_a_channel_naming_the_chat_is_not_posted_twice():
+    """The same destination twice is a duplicate alert, not a mirror."""
+    chat, chat_seen = _spy()
+    n = TelegramNotifier(settings=_settings_with_channel("chat"), transport=chat)
+
+    assert n.channel_id == ""
+    assert n.send_signal(_signal()).ok
+    assert len(chat_seen) == 1
+
+
+def test_an_injected_transport_serves_both_destinations():
+    """Injecting a transport means "no network" — on the mirror as well.
+
+    Without this, a test that injects a fake would still post to the real
+    channel the moment one is configured in ``.env``.
+    """
+    fake, seen = _spy()
+    n = TelegramNotifier(settings=_settings_with_channel(CHANNEL), transport=fake)
+
+    assert n.send_signal(_signal()).ok
+    assert len(seen) == 2
+
+
+def test_a_failing_mirror_does_not_turn_the_alert_into_a_failure():
+    """The chat was reached; a channel error must not read as a dropped alert."""
+    n = TelegramNotifier(
+        settings=_settings_with_channel(CHANNEL),
+        transport=lambda text: SendResult(ok=True),
+        channel_transport=lambda text: SendResult(
+            ok=False, http_status=400, error="telegram_api:chat not found"))
+
+    assert n.send_signal(_signal()).ok
+
+
+def test_disabled_reaches_neither_destination():
+    chat, chat_seen = _spy()
+    channel, channel_seen = _spy()
+    n = TelegramNotifier(settings=_settings_with_channel(CHANNEL, enabled=False),
+                         transport=chat, channel_transport=channel)
+
+    assert n.send_signal(_signal()).error == "telegram_disabled"
+    assert chat_seen == [] and channel_seen == []
+
+
+def test_a_failing_chat_still_mirrors_to_the_channel():
+    """The destinations are independent: one failing does not mute the other."""
+    channel, channel_seen = _spy()
+    n = TelegramNotifier(
+        settings=_settings_with_channel(CHANNEL),
+        transport=lambda text: SendResult(ok=False, error="transport_error:boom"),
+        channel_transport=channel)
+
+    assert not n.send_signal(_signal()).ok
+    assert len(channel_seen) == 1

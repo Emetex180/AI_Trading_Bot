@@ -10,9 +10,19 @@ tests never call the network.
 The strategy may emit signals whose AI overlay is unavailable
 (``ai_status == AI_UNAVAILABLE``); those are still alertable but flagged so a
 reader never mistakes them for fully vetted trades.
+
+Destination
+-----------
+One alert, posted twice when a channel is configured. ``TELEGRAM_CHAT_ID`` is
+the primary destination and is what :meth:`TelegramNotifier.send_signal`
+reports on; ``TELEGRAM_CHANNEL_ID`` — normally a broadcast channel — receives
+the *identical* body, built once and handed to both transports, so the two
+destinations cannot drift apart. With no channel id set nothing changes: the
+message goes to the primary chat and nowhere else.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -23,6 +33,8 @@ from trading.liquidity import LEVEL_LABELS
 from trading.risk_manager import risk_reward_points
 from trading.sessions import SESSION_INDEX
 from trading.signal_engine import Signal
+
+log = logging.getLogger(__name__)
 
 # Hard-coded safety suffix appended to every alert body.
 ALERT_ONLY_TAG = "⚠️ ALERT ONLY — not an execution request. AUTO_TRADING gating applies."
@@ -186,15 +198,31 @@ def format_signal_alert(signal: Signal) -> str:
 
 
 class TelegramNotifier:
-    """Send ALERT-ONLY signals to a Telegram chat."""
+    """Send ALERT-ONLY signals to a Telegram chat, and to a channel.
+
+    The configured chat is the primary destination. When
+    ``TELEGRAM_CHANNEL_ID`` is set, the identical message is also posted there.
+    """
 
     def __init__(self, settings: Settings | None = None,
-                 transport: Callable[..., SendResult] | None = None):
+                 transport: Callable[..., SendResult] | None = None,
+                 channel_transport: Callable[..., SendResult] | None = None):
         cfg = settings or get_settings()
         self.settings = cfg
         self.transport = transport or (
             lambda text: _transport_telegram(cfg.telegram_bot_token,
                                              cfg.telegram_chat_id, text,
+                                             cfg.telegram_timeout_seconds))
+        # A channel id that names the primary chat would only double-post into
+        # the same place, so it is not treated as a second destination.
+        channel_id = (getattr(cfg, "telegram_channel_id", "") or "").strip()
+        self.channel_id = "" if channel_id == cfg.telegram_chat_id else channel_id
+        # An injected transport means "deliver this yourself" — the guarantee the
+        # module docstring makes to tests. The mirror inherits that transport so
+        # a caller who injects one cannot reach the network through the channel.
+        self.channel_transport = channel_transport or transport or (
+            lambda text: _transport_telegram(cfg.telegram_bot_token,
+                                             self.channel_id, text,
                                              cfg.telegram_timeout_seconds))
 
     @property
@@ -206,10 +234,26 @@ class TelegramNotifier:
         if not self.enabled:
             return SendResult(ok=False, error="telegram_disabled")
         text = format_signal_alert(signal)
-        return self.transport(text)
+        return self._deliver(text)
 
     def send_text(self, text: str) -> SendResult:
         """Send a generic ALERT-ONLY status message."""
         if not self.enabled:
             return SendResult(ok=False, error="telegram_disabled")
-        return self.transport(text + f"\n\n{ALERT_ONLY_TAG}")
+        return self._deliver(text + f"\n\n{ALERT_ONLY_TAG}")
+
+    def _deliver(self, text: str) -> SendResult:
+        """Post ``text`` to the primary chat, then mirror it to the channel.
+
+        Both destinations receive the same string — built once by the caller, so
+        they cannot disagree. The two sends are independent: a failing mirror is
+        logged rather than returned, because the alert did reach the chat it was
+        addressed to, and a failing chat does not suppress the channel.
+        """
+        result = self.transport(text)
+        if self.channel_id:
+            mirror = self.channel_transport(text)
+            if not mirror.ok:
+                log.warning("Telegram channel %s did not receive the alert: %s",
+                            self.channel_id, mirror.error or mirror.http_status)
+        return result

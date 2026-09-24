@@ -40,7 +40,7 @@ def _settings(**kw):
     """
     base = replace(get_settings(), auto_trading=False, ai_enabled=False,
                    telegram_enabled=False, telegram_bot_token="",
-                   telegram_chat_id="")
+                   telegram_chat_id="", telegram_channel_id="")
     return replace(base, **kw)
 
 
