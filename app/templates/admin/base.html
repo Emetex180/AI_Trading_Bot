@@ -18,6 +18,14 @@
        href="{{ url_for('admin.clients') }}">
       <span class="sidebar-glyph">C</span> Clients
     </a>
+    <a class="sidebar-link {{ 'active' if nav == 'admin-subscriptions' }}"
+       href="{{ url_for('admin.subscriptions') }}">
+      <span class="sidebar-glyph">S</span> Subscriptions
+    </a>
+    <a class="sidebar-link {{ 'active' if nav == 'admin-payments' }}"
+       href="{{ url_for('admin.payments') }}">
+      <span class="sidebar-glyph">&#8353;</span> Payments
+    </a>
     <a class="sidebar-link {{ 'active' if nav == 'admin-activity' }}"
        href="{{ url_for('admin.activity') }}">
       <span class="sidebar-glyph">T</span> Trading activity

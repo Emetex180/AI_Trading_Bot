@@ -45,8 +45,11 @@ from trading.strategy import (CISD_CONFIRMED, FVG_FOUND, INVALIDATED,
                               LIQUIDITY_PURGED, NO_SETUP, RETRACE_CONFIRMED,
                               TRADE_CONFIRMED, WAITING_FOR_FVG_RETRACE)
 
+from .access import (FEATURE_ANALYSIS, FEATURE_DASHBOARD, FEATURE_HISTORY,
+                     FEATURE_MARKET, FEATURE_SETUPS, has_feature,
+                     require_feature)
 from .api import asset_choices
-from .auth import login_required
+from .auth import current_user, login_required
 from .display import digits_for, ny_str, price, ratio
 
 client_bp = Blueprint("client", __name__)
@@ -676,9 +679,17 @@ def _ny_date_bound(raw, *, end_of_day: bool):
 
 # --------------------------------------------------------------------------- #
 # Pages
+#
+# Each page carries two guards, and the order matters: ``@login_required`` runs
+# first and answers an anonymous caller with a sign-in redirect, then
+# ``@require_feature`` decides whether the *signed-in* account's plan reaches the
+# page. The feature guard is the control; the navigation in ``client/base.html``
+# only decides what to draw, so a client who edits the markup still gets a 403
+# from the route itself.
 # --------------------------------------------------------------------------- #
 @client_bp.get("/dashboard")
 @login_required
+@require_feature(FEATURE_DASHBOARD)
 def overview():
     repo, cfg, jobs = g.repo, _cfg(), _jobs()
     status = platform_status(cfg, jobs, g.repo)
@@ -701,6 +712,7 @@ def overview():
 
 @client_bp.get("/market")
 @login_required
+@require_feature(FEATURE_MARKET)
 def market():
     cfg, jobs = _cfg(), _jobs()
     return render_template(
@@ -713,6 +725,7 @@ def market():
 
 @client_bp.get("/setups")
 @login_required
+@require_feature(FEATURE_SETUPS)
 def setups():
     cfg, jobs = _cfg(), _jobs()
     return render_template(
@@ -725,6 +738,7 @@ def setups():
 
 @client_bp.get("/setups/<int:signal_id>")
 @login_required
+@require_feature(FEATURE_SETUPS)
 def setup_detail(signal_id: int):
     row = g.repo.get_signal(signal_id)
     if row is None:
@@ -744,6 +758,7 @@ def setup_detail(signal_id: int):
 
 @client_bp.get("/history")
 @login_required
+@require_feature(FEATURE_HISTORY)
 def history():
     repo, cfg, jobs = g.repo, _cfg(), _jobs()
     filters = _history_filters()
@@ -768,6 +783,7 @@ def history():
 
 @client_bp.get("/analysis")
 @login_required
+@require_feature(FEATURE_ANALYSIS)
 def analysis():
     cfg, jobs = _cfg(), _jobs()
     return render_template(
@@ -793,6 +809,7 @@ def analysis():
 # --------------------------------------------------------------------------- #
 @client_bp.get("/api/client/overview")
 @login_required
+@require_feature(FEATURE_DASHBOARD)
 def api_overview():
     repo, cfg, jobs = g.repo, _cfg(), _jobs()
     status = platform_status(cfg, jobs, g.repo)
@@ -810,6 +827,7 @@ def api_overview():
 
 @client_bp.get("/api/client/market")
 @login_required
+@require_feature(FEATURE_MARKET)
 def api_market():
     cfg, jobs = _cfg(), _jobs()
     rows = market_rows(cfg, g.repo, jobs)
@@ -834,6 +852,7 @@ def api_market():
 
 @client_bp.get("/api/client/setups")
 @login_required
+@require_feature(FEATURE_SETUPS)
 def api_setups():
     repo, cfg, jobs = g.repo, _cfg(), _jobs()
     after = request.args.get("after_id", type=int)
@@ -856,12 +875,27 @@ def api_setups():
 
 @client_bp.get("/api/client/feed")
 @login_required
+@require_feature(FEATURE_DASHBOARD)
 def api_feed():
+    """The status pill's source, and the analysis page's feed.
+
+    Guarded at the *lowest* tier rather than at Analysis, because every client
+    page polls this route purely to keep the session pill fresh
+    (``app/static/js/client.js`` maps its ``status`` poller here). Requiring
+    Analysis would have blanked the live chrome on Market and History for a
+    Basic subscriber — a page they are entitled to.
+
+    The entitlement is enforced on the *data* instead: the ``feed`` key is
+    present only for an account whose plan actually includes the analysis
+    workspace. A Basic client calling this directly gets the status block and no
+    feed, which is the same thing they would get by loading the page they cannot
+    reach.
+    """
     jobs = _jobs()
-    return jsonify({
-        "status": platform_status(_cfg(), jobs, g.repo),
-        "feed": analysis_feed(g.repo, jobs, limit=40),
-    })
+    payload = {"status": platform_status(_cfg(), jobs, g.repo)}
+    if has_feature(current_user(), FEATURE_ANALYSIS):
+        payload["feed"] = analysis_feed(g.repo, jobs, limit=40)
+    return jsonify(payload)
 
 
 # --------------------------------------------------------------------------- #

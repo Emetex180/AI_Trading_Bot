@@ -1,0 +1,163 @@
+{% extends "admin/base.html" %}
+{% block title %}Payments{% endblock %}
+
+{# Every attempt, including the failed ones. A page that listed only successes
+   could not tell an operator whether a run of nothing means "no one is buying"
+   or "the integration is broken" — so failures are shown by default and a
+   failure_reason is printed for each, which is the difference between a declined
+   card and a misconfigured key.
+
+   Nothing on this page is editable. A payment is moved to successful by the
+   server verifying the charge with the provider (app/subscription.py) and by
+   nothing else, so there is no control here to press. #}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Payments</h1>
+    <p>Every charge attempt, with its outcome. Amounts are shown in the currency
+       they were charged in — they are never summed across currencies.</p>
+  </div>
+</div>
+
+{% if not payments_configured %}
+<div class="flash-stack">
+  <div class="alert alert-warning" role="alert">
+    Card payments are not configured on this deployment: <code>FLUTTERWAVE_SECRET_KEY</code>
+    and <code>FLUTTERWAVE_PUBLIC_KEY</code> are not both set. The checkout is
+    disabled and no payment can be started. Any rows below predate that, or came
+    from a provider test.
+  </div>
+</div>
+{% endif %}
+
+{# ---------------------------------------------------------------- #
+   Totals. Per currency, because adding NGN to USD gives a number that is not
+   money in either one.
+   ---------------------------------------------------------------- #}
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card h-100">
+      <div class="card-body">
+        <div class="setup-meta">Successful</div>
+        <div class="h4 mb-0">{{ stats.payments_successful }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card h-100">
+      <div class="card-body">
+        <div class="setup-meta">Pending</div>
+        <div class="h4 mb-0">{{ stats.payments_pending }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card h-100">
+      <div class="card-body">
+        <div class="setup-meta">Failed</div>
+        <div class="h4 mb-0">{{ stats.payments_failed }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card h-100">
+      <div class="card-body">
+        <div class="setup-meta">Collected</div>
+        {% for code, minor in stats_by_currency.items() %}
+        <div class="h4 mb-0">{{ format_minor(minor, code) }}</div>
+        {% else %}
+        <div class="h4 mb-0">—</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span>{{ 'Filtered' if filter_status else 'All payments' }}</span>
+    <span class="card-header-note">{{ rows | length }} shown · {{ stats.payments_total }} total</span>
+  </div>
+  <div class="card-body pb-0">
+    <form method="get" action="{{ url_for('admin.payments') }}"
+          class="row g-2 align-items-end mb-3">
+      <div class="col-12 col-md-3">
+        <label class="form-label" for="p-status">Status</label>
+        <select class="form-select" id="p-status" name="status"
+                onchange="this.form.submit()">
+          <option value="">Any</option>
+          {% for s in statuses %}
+          <option value="{{ s }}" {{ 'selected' if filter_status == s }}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-12 col-md-3">
+        <button class="btn btn-primary" type="submit">Filter</button>
+        {% if filter_status %}
+        <a class="btn btn-outline-secondary"
+           href="{{ url_for('admin.payments') }}">Clear</a>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Account</th><th>Plan</th><th>Amount</th><th>Status</th>
+          <th>Reference</th><th>Provider id</th><th>Created (NY)</th><th>Paid (NY)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr class="row-highlight">
+          <td>
+            {% if r.user %}
+            <a class="row-link" href="{{ url_for('admin.client_detail', user_id=r.user.id) }}">{{ r.user.username }}</a>
+            {% else %}
+            <span class="setup-meta">account {{ r.payment.user_id }} (missing)</span>
+            {% endif %}
+          </td>
+          <td>{{ r.payment.plan_key }}</td>
+          <td class="mono">{{ format_minor(r.payment.amount_minor, r.payment.currency) }}</td>
+          <td>
+            <span class="badge tone-{{ 'success' if r.payment.status == 'successful' else ('danger' if r.payment.status == 'failed' else 'secondary') }}">
+              {{ r.payment.status }}
+            </span>
+            {# Verified means the server confirmed the charge with the provider.
+               A successful row that is not verified would be a bug worth seeing;
+               so would a failed one carrying a reason. #}
+            {% if r.payment.verified %}
+            <span class="setup-meta">verified</span>
+            {% endif %}
+            {% if r.payment.failure_reason %}
+            <div class="setup-meta">{{ r.payment.failure_reason }}</div>
+            {% endif %}
+          </td>
+          <td class="mono setup-meta">{{ r.payment.reference }}</td>
+          <td class="mono setup-meta">{{ r.payment.provider_tx_id or '—' }}</td>
+          <td class="mono">{{ r.payment.created_at | ny_date }}</td>
+          <td class="mono">{{ r.payment.paid_at | ny_date if r.payment.paid_at else '—' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="empty-state">
+          No payments{% if filter_status %} with that status{% endif %}.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card-body">
+    {# Stated rather than left implicit, because an operator who has just
+       installed this will wonder why nothing can be marked paid from here. #}
+    <p class="setup-meta mb-0">
+      A payment becomes <strong>successful</strong> only when the server verifies
+      the charge against Flutterwave — on the customer's return from checkout, or
+      on a signed webhook, whichever arrives first. There is deliberately no
+      control on this page to change a payment's status: a subscription must
+      never be activated by a click.
+    </p>
+  </div>
+</div>
+{% endblock %}

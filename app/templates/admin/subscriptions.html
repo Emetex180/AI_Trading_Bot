@@ -1,0 +1,114 @@
+{% extends "admin/base.html" %}
+{% block title %}Subscriptions{% endblock %}
+
+{# Read-only by design. A subscription is granted in exactly two ways — a
+   payment settling, or an admin editing the client's profile — and both already
+   have their own route. A third one that flipped a status directly would be a
+   way to hand out access with no payment behind it and no audit line.
+
+   What this page lists is the *first* of those two: rows in ``subscriptions``,
+   every one of which is written by ``Repository.activate_subscription`` and so
+   every one of which has a payment behind it. The second way is an edit to
+   ``client_profiles.subscription_plan``, which is not a row here at all — it is
+   shown as the account's effective plan on its detail page. The page says so
+   rather than implying it covers both, because an operator who read it as a
+   full account of who has access would miss every hand-granted account. #}
+
+{% block content %}
+<div class="client-hero">
+  <div>
+    <h1>Subscriptions</h1>
+    <p>Every subscription bought through checkout, newest first. Hand-granted
+       access is not a row here — it lives on the account's own page, under
+       <em>effective plan</em>.</p>
+  </div>
+</div>
+
+{% if not payments_configured %}
+{# An empty list means one of two very different things, and they look identical
+   in a table. This makes the difference visible. #}
+<div class="flash-stack">
+  <div class="alert alert-warning" role="alert">
+    Card payments are not configured on this deployment
+    (<code>FLUTTERWAVE_SECRET_KEY</code> is not set), so nothing can be bought
+    through the site and this list can only be empty. Accounts that have access
+    do so by a hand-granted plan, which shows on the account's own page.
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">
+    <span>{{ 'Filtered' if filter_status else 'All subscriptions' }}</span>
+    <span class="card-header-note">{{ rows | length }} shown</span>
+  </div>
+  <div class="card-body pb-0">
+    <form method="get" action="{{ url_for('admin.subscriptions') }}"
+          class="row g-2 align-items-end mb-3">
+      <div class="col-12 col-md-3">
+        <label class="form-label" for="s-status">Status</label>
+        <select class="form-select" id="s-status" name="status"
+                onchange="this.form.submit()">
+          <option value="">Any</option>
+          {% for s in statuses %}
+          <option value="{{ s }}" {{ 'selected' if filter_status == s }}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-12 col-md-3">
+        <button class="btn btn-primary" type="submit">Filter</button>
+        {% if filter_status %}
+        <a class="btn btn-outline-secondary"
+           href="{{ url_for('admin.subscriptions') }}">Clear</a>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Account</th><th>Plan</th><th>Status</th>
+          <th>Started (NY)</th><th>Expires (NY)</th><th>Paid by</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr class="row-highlight">
+          <td>
+            {% if r.user %}
+            <a class="row-link" href="{{ url_for('admin.client_detail', user_id=r.user.id) }}">{{ r.user.username }}</a>
+            {% else %}
+            <span class="setup-meta">account {{ r.sub.user_id }} (missing)</span>
+            {% endif %}
+          </td>
+          <td>{{ r.sub.plan_key }}</td>
+          <td>
+            <span class="badge tone-{{ 'success' if r.sub.status == 'active' else ('danger' if r.sub.status in ('expired', 'cancelled') else 'secondary') }}">
+              {{ r.sub.status }}
+            </span>
+          </td>
+          <td class="mono">{{ r.sub.started_at | ny_date if r.sub.started_at else '—' }}</td>
+          <td class="mono">{{ r.sub.expires_at | ny_date if r.sub.expires_at else 'no end date' }}</td>
+          {# A NULL payment_id is permitted by the schema but no route writes one,
+             so seeing this means a row was inserted outside the application.
+             That is worth flagging rather than dressing up: a subscription with
+             no payment behind it is access nobody can account for. #}
+          <td class="setup-meta">
+            {% if r.sub.payment_id %}
+            Payment #{{ r.sub.payment_id }}
+            {% else %}
+            <span class="badge tone-warning">no payment recorded</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty-state">
+          No subscriptions{% if filter_status %} with that status{% endif %}.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

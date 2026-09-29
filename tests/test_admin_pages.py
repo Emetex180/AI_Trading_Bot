@@ -23,8 +23,8 @@ from app.web import create_app
 from config import get_settings
 from database import models as m
 
-from test_web import (_CSRF, _PASSWORD, _FakeJobs, _lease, _repo, _save_signal,
-                      _sign_in)
+from test_web import (_CSRF, _PASSWORD, _FakeJobs, _grant, _lease, _repo,
+                      _save_signal, _sign_in)
 
 ADMIN_PAGES = ["/admin", "/admin/clients", "/admin/activity", "/admin/accounts"]
 
@@ -239,7 +239,13 @@ def test_creating_a_client_stores_a_hash_and_redirects_to_them():
 
 
 def test_a_created_client_can_actually_sign_in():
-    """The end-to-end property: a created account is a working account."""
+    """The end-to-end property: a created account is a working account.
+
+    Which surface it lands on depends on whether it has a plan, and both halves
+    are asserted here. An account is created with no plan, so it reaches the
+    plans page and is refused the dashboard — buying a plan is what opens the
+    dashboard, and an admin creating a login must not be a way around that.
+    """
     repo = _repo()
     _post(_admin(repo), "/admin/clients/create", username="newbie",
           password=_PASSWORD, role=m.ROLE_CLIENT)
@@ -252,6 +258,12 @@ def test_a_created_client_can_actually_sign_in():
                                       "password": _PASSWORD, "_csrf": _CSRF})
 
     assert resp.status_code == 302
+    # No plan yet: the plans page, not a 403 and not a dead end.
+    assert fresh.get("/subscription").status_code == 200
+    assert fresh.get("/dashboard").status_code == 403
+
+    # And once a plan exists, the same session reaches the dashboard.
+    _grant(repo, repo.get_user_by_username("newbie"), "basic")
     assert fresh.get("/dashboard").status_code == 200
 
 

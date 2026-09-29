@@ -1,0 +1,140 @@
+{% extends "public/base.html" %}
+{% block page_title %}Pricing · 3rader{% endblock %}
+{% block page_description %}Three plans: Basic, Premium and VIP. Monthly, no auto-renewal, cancel whenever you like.{% endblock %}
+
+{% block body %}
+<section class="mk-wrap" style="padding:3.5rem 1.25rem 1rem 1.25rem;">
+  <div class="mk-section-head">
+    <span class="mk-eyebrow">Pricing</span>
+    <h2 style="font-size:clamp(1.8rem,4vw,2.4rem);">Choose how much of the platform you need</h2>
+    <p>
+      Every plan is billed monthly and runs for 30 days. Nothing renews on its
+      own, so a plan lapses rather than charging you again — start a new one
+      whenever you want it.
+    </p>
+  </div>
+</section>
+
+{#
+  Rendered from app.plans.PLANS, the same tuple the checkout prices from. A card
+  on this page therefore cannot advertise a figure the customer will not be
+  charged; there is no second price list to fall out of step with this one.
+#}
+<section class="mk-wrap" style="padding:1.5rem 1.25rem 3rem 1.25rem;">
+  <div class="plan-grid">
+    {% for plan in plans %}
+    <div class="plan-card {{ 'is-featured' if plan.highlight }}">
+      {% if plan.highlight %}
+      <span class="badge text-bg-primary align-self-start mb-2">Most popular</span>
+      {% endif %}
+
+      <div class="plan-name">{{ plan.name }}</div>
+      <div class="plan-price">
+        {{ plan.price_display }}<span class="unit"> / month</span>
+      </div>
+      <p class="plan-desc">{{ plan.description }}</p>
+
+      <ul class="plan-features">
+        {% for feature in plan.features %}
+        <li>{{ feature }}</li>
+        {% endfor %}
+      </ul>
+
+      <a class="btn {{ 'btn-primary' if plan.highlight else 'btn-outline-secondary' }} mt-auto w-100"
+         href="{{ url_for('auth.register') }}">
+        Get {{ plan.name }}
+      </a>
+    </div>
+    {% endfor %}
+  </div>
+
+  <p class="mk-price-note">
+    Prices in US dollars. Card payments are processed by Flutterwave; 3rader
+    never receives or stores your card details. You can cancel at any time from
+    your subscription page, and your access runs to the end of the period you
+    have paid for.
+  </p>
+</section>
+
+<section class="mk-section">
+  <div class="mk-wrap">
+    <div class="mk-section-head">
+      <h2>What each plan unlocks</h2>
+      <p>
+        The plans differ by which parts of the platform you can reach, not by how
+        good the analysis is. Every plan sees the same engine output.
+      </p>
+    </div>
+
+    <div class="mk-grid">
+      <div class="mk-card">
+        <span class="mk-card-glyph">Basic</span>
+        <h3>Market coverage</h3>
+        <p>
+          The dashboard and the live market view: every monitored instrument and
+          the state each one has reached in the model.
+        </p>
+      </div>
+      <div class="mk-card">
+        <span class="mk-card-glyph">Premium</span>
+        <h3>The setups feed</h3>
+        <p>
+          Everything in Basic, plus the validated setup feed, the full condition
+          checklist behind each setup, and the filterable history.
+        </p>
+      </div>
+      <div class="mk-card">
+        <span class="mk-card-glyph">VIP</span>
+        <h3>The analysis workspace</h3>
+        <p>
+          Everything in Premium, plus the analysis workspace, performance and
+          backtest reporting, Telegram delivery and priority support.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="mk-section">
+  <div class="mk-wrap">
+    <div class="mk-section-head">
+      <h2>Before you pay</h2>
+    </div>
+    <div class="mk-faq">
+      <details open>
+        <summary>What happens when the 30 days end?</summary>
+        <p>
+          Your subscription lapses. You keep your account and your history, and
+          the pages your plan covered become locked again until you start a new
+          one. Nothing is charged automatically.
+        </p>
+      </details>
+      <details>
+        <summary>Can I change plans?</summary>
+        <p>
+          Yes — start the plan you want and it replaces the current one. Your
+          remaining time on the old plan does not transfer, so it is usually
+          worth changing at the end of a period rather than the start.
+        </p>
+      </details>
+      <details>
+        <summary>What if a payment fails?</summary>
+        <p>
+          Nothing is activated and nothing is charged for that attempt. You will
+          get an email saying so, and you can try again from the pricing page.
+        </p>
+      </details>
+      <details>
+        <summary>Do you offer refunds?</summary>
+        <p>
+          Statutory rights apply where they exist. Beyond those, refunds are
+          considered case by case — write to
+          <a href="mailto:{{ support_email }}">{{ support_email }}</a> with your
+          payment reference. The <a href="{{ url_for('public.terms') }}">terms</a>
+          set out the position in full.
+        </p>
+      </details>
+    </div>
+  </div>
+</section>
+{% endblock %}

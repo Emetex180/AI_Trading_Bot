@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Payment received{% endblock %}
+{% block preheader %}We have received your payment for {{ plan_name }}.{% endblock %}
+
+{% block content %}
+  {{ ui.heading("Payment received") }}
+
+  <p style="margin:0 0 14px 0;">
+    Hello {{ name }}, your payment has been confirmed by our payment provider and
+    recorded against your account.
+  </p>
+
+  {{ ui.details([("Plan", plan_name),
+                 ("Amount", amount),
+                 ("Reference", reference),
+                 ("Date", paid_at)]) }}
+
+  <p style="margin:0;">
+    Keep this reference — it is what to quote if you ever need to ask us about
+    this payment.
+  </p>
+
+  {{ ui.note("This message confirms a payment. It is not a tax invoice.") }}
+{% endblock %}

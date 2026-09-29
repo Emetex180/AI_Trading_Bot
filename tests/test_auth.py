@@ -28,7 +28,7 @@ from config import get_settings
 from database import models as m
 from trading import time_utils as tu
 
-from test_web import _CSRF, _PASSWORD, _FakeJobs, _repo, _sign_in
+from test_web import _CSRF, _PASSWORD, _FakeJobs, _grant, _repo, _sign_in
 
 #: Every operator surface, and the method each one is reached by. A client must
 #: be refused all of them; an admin must get through all of them.
@@ -190,6 +190,20 @@ def test_an_admin_lands_on_the_console():
     assert client.get("/console").status_code == 200
 
 
+def _client_with_plan(repo, username="c1"):
+    """A client account holding an active plan.
+
+    The landing surface for a client now depends on what their plan reaches, so
+    a test asserting "the login went to the product" has to say which product it
+    meant. A planless account lands on the subscription page instead, which is
+    covered separately in ``test_plans_access``.
+    """
+    user = repo.create_user(username=username, password_hash_or_plain=_PASSWORD,
+                            role=m.ROLE_CLIENT)
+    _grant(repo, user, "vip")
+    return user
+
+
 def test_the_wrong_password_is_refused():
     repo = _repo()
     repo.create_user(username="c1", password_hash_or_plain=_PASSWORD,
@@ -199,7 +213,9 @@ def test_the_wrong_password_is_refused():
     resp = _login(client, "c1", "wrong")
 
     assert resp.status_code == 401
-    assert "Invalid username or password" in resp.get_data(as_text=True)
+    # The sign-in field takes either an email address or a username, so the
+    # failure names neither — see app.auth.login_post.
+    assert "Invalid email or password" in resp.get_data(as_text=True)
 
 
 def test_an_unknown_username_gets_the_same_answer_as_a_wrong_password():
@@ -216,8 +232,8 @@ def test_an_unknown_username_gets_the_same_answer_as_a_wrong_password():
     # The *message* is what must not differ. The page does echo the submitted
     # username back into the field, which is the form being helpful rather than
     # a leak: the visitor typed it.
-    assert "Invalid username or password" in unknown.get_data(as_text=True)
-    assert "Invalid username or password" in known.get_data(as_text=True)
+    assert "Invalid email or password" in unknown.get_data(as_text=True)
+    assert "Invalid email or password" in known.get_data(as_text=True)
 
 
 def test_the_failure_message_does_not_name_the_reason():
@@ -276,8 +292,7 @@ def test_login_without_a_csrf_token_is_refused():
 def test_a_foreign_next_target_cannot_redirect_off_site(target):
     """``?next=`` must not turn the login form into an open redirect."""
     repo = _repo()
-    repo.create_user(username="c1", password_hash_or_plain=_PASSWORD,
-                     role=m.ROLE_CLIENT)
+    _client_with_plan(repo)
     resp = _login(_visiting_login(repo), "c1", _PASSWORD, next=target)
 
     assert resp.status_code == 302
@@ -287,8 +302,7 @@ def test_a_foreign_next_target_cannot_redirect_off_site(target):
 
 def test_a_same_site_next_target_is_honoured():
     repo = _repo()
-    repo.create_user(username="c1", password_hash_or_plain=_PASSWORD,
-                     role=m.ROLE_CLIENT)
+    _client_with_plan(repo)
     resp = _login(_visiting_login(repo), "c1", _PASSWORD, next="/history")
 
     assert resp.headers["Location"].endswith("/history")
@@ -337,8 +351,7 @@ def test_the_csrf_token_is_rotated_by_a_login():
     client: a request carrying a dead token must leave the session alone.
     """
     repo = _repo()
-    repo.create_user(username="c1", password_hash_or_plain=_PASSWORD,
-                     role=m.ROLE_CLIENT)
+    _client_with_plan(repo)
     client = _visiting_login(repo)
     with client.session_transaction() as sess:
         before = sess["csrf"]
@@ -500,8 +513,12 @@ def test_an_anonymous_api_call_is_answered_with_json_not_html(path):
 def test_the_root_sends_each_role_to_its_own_surface():
     repo = _repo()
 
+    # A visitor who is not signed in gets the public homepage, not a redirect to
+    # the login form. That is the deliberate change that came with having a
+    # public site: the domain root is now the page a stranger should land on.
     anon = _anonymous(repo).get("/")
-    assert anon.status_code == 302 and "/login" in anon.headers["Location"]
+    assert anon.status_code == 200
+    assert "Create an account" in anon.get_data(as_text=True)
 
     # Distinct usernames: both accounts live in the one repository here.
     client = _as(repo, m.ROLE_CLIENT, username="a-client")
@@ -509,6 +526,25 @@ def test_the_root_sends_each_role_to_its_own_surface():
 
     admin = _as(repo, m.ROLE_ADMIN, username="an-admin")
     assert admin.get("/").headers["Location"].endswith("/admin/")
+
+
+def test_the_root_sends_an_unsubscribed_client_to_the_plans_page():
+    """A brand-new account must not be answered with a 403 on its own root.
+
+    Landing on /dashboard without a plan renders the upgrade page, which reads
+    as a fault rather than as "choose a plan" — so an account that reaches
+    nothing goes to the page that sells it something.
+    """
+    repo = _repo()
+    repo.create_user(username="c1", password_hash_or_plain=_PASSWORD,
+                     role=m.ROLE_CLIENT)
+    client = _visiting_login(repo)
+    assert _login(client, "c1", _PASSWORD).status_code == 302
+
+    landing = client.get("/")
+    assert landing.status_code == 302
+    assert landing.headers["Location"].endswith("/subscription")
+    assert client.get("/subscription").status_code == 200
 
 
 def test_the_console_is_not_reachable_by_its_old_paths():

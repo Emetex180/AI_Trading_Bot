@@ -1,0 +1,193 @@
+{% extends "public/base.html" %}
+{% block page_title %}Terms of service · 3rader{% endblock %}
+{% block page_description %}The terms on which 3rader provides market analysis and trading signals.{% endblock %}
+
+{% block body %}
+<div class="mk-wrap">
+  <article class="mk-doc">
+    <h1>Terms of service</h1>
+    <p class="mk-doc-date">
+      Last updated {{ ny_year }}.
+      {# The operator's registered details are placeholders until the entity is
+         confirmed. They are marked, not invented: a fabricated company number or
+         address in a binding document is worse than an obvious gap. #}
+      Provided by <strong>[registered company name]</strong>,
+      <strong>[registered address]</strong>, company number
+      <strong>[company number]</strong>.
+    </p>
+
+    <div class="mk-callout is-warning">
+      <p>
+        <strong>Read this before you subscribe.</strong> By creating an account or
+        buying a plan you agree to these terms, the
+        <a href="{{ url_for('public.privacy') }}">privacy policy</a> and the
+        <a href="{{ url_for('public.risk') }}">risk disclaimer</a>. If you do not
+        agree with them, do not use the service.
+      </p>
+    </div>
+
+    <h2>1. What 3rader is</h2>
+    <p>
+      3rader is a software service that analyses market data and publishes the
+      output of a defined trading model: the state of each monitored instrument
+      within that model, and the setups that complete it. The service is
+      informational.
+    </p>
+
+    <h2>2. What 3rader is not</h2>
+    <p>3rader does not, and does not claim to:</p>
+    <ul>
+      <li>provide financial, investment, legal or tax advice;</li>
+      <li>make a personal recommendation to buy or sell any instrument;</li>
+      <li>manage money, hold funds, or operate any account on your behalf;</li>
+      <li>connect to your broker, or place, modify or close any order;</li>
+      <li>guarantee any result, return, win rate or outcome whatsoever.</li>
+    </ul>
+    <p>
+      Setups are the mechanical output of a model applied to market data. They
+      take no account of your capital, your existing positions, your risk
+      tolerance or your circumstances, and they are not a substitute for your own
+      judgement.
+    </p>
+
+    <h2>3. Your account</h2>
+    <p>
+      You must be at least 18 years old and legally able to enter into a contract
+      to hold an account. You are responsible for the accuracy of the information
+      on it, for keeping your password confidential, and for everything done
+      through your account. Passwords are stored only as irreversible hashes;
+      nobody at 3rader can read yours.
+    </p>
+    <p>
+      Notify us promptly if you believe your account has been accessed without
+      your permission. Changing your password ends every other session on the
+      account immediately.
+    </p>
+    <p>
+      We may suspend or close an account that breaches these terms, that is being
+      used unlawfully, or that presents a security or legal risk to us or to
+      another user.
+    </p>
+
+    <h2>4. Plans, payment and renewal</h2>
+    <p>
+      Plans are sold as a period of access — currently 30 days — at the price
+      shown on the <a href="{{ url_for('public.pricing') }}">pricing page</a> at
+      the time of purchase. Prices are in US dollars.
+    </p>
+    <ul>
+      <li>
+        <strong>Subscriptions do not renew automatically.</strong> A plan ends at
+        the expiry date and access to the pages it covered stops. You are not
+        charged again unless you start a new plan.
+      </li>
+      <li>
+        Card payments are processed by Flutterwave. 3rader does not receive or
+        store your card details. The provider's own terms also apply to the
+        transaction.
+      </li>
+      <li>
+        A subscription is only activated once the payment has been independently
+        verified with the payment provider. A claim of payment from a browser or
+        an email does not activate anything.
+      </li>
+      <li>
+        Starting a new plan while one is active replaces it. Remaining time on the
+        previous plan does not carry over or entitle you to a credit.
+      </li>
+    </ul>
+
+    <h2>5. Changing or cancelling</h2>
+    <p>
+      You can cancel at any time from your subscription page. Cancellation stops
+      the subscription continuing; it does not end access immediately, and it does
+      not by itself entitle you to a refund for the period already paid for.
+    </p>
+    <p>
+      We may change, add or retire a plan. If we materially reduce what a plan you
+      have paid for includes, we will tell you and offer a pro-rata refund of the
+      unused period.
+    </p>
+
+    <h2>6. Refunds</h2>
+    <p>
+      You have whatever refund rights your local consumer law gives you, and
+      nothing here removes them. Beyond those, refunds are considered case by
+      case: write to
+      <a href="mailto:{{ support_email }}">{{ support_email }}</a> with the payment
+      reference. Where a payment was taken in error, or the service was not
+      available for a material part of the period, a refund is the normal
+      outcome.
+    </p>
+
+    <h2>7. Availability</h2>
+    <p>
+      We aim to keep the service running continuously but do not promise
+      uninterrupted availability. Market data feeds, hosting and the payment
+      provider are outside our control, and the service may be unavailable during
+      maintenance or because of a fault. Analysis covers the periods the model is
+      built for and may produce nothing at all during others — an absence of
+      signals is not a fault.
+    </p>
+
+    <h2>8. Acceptable use</h2>
+    <p>You agree not to:</p>
+    <ul>
+      <li>share your account, or resell or redistribute the analysis;</li>
+      <li>scrape, bulk-export or systematically copy the service's output;</li>
+      <li>attempt to access an account, page or record that is not yours;</li>
+      <li>probe, scan or attempt to circumvent the service's security;</li>
+      <li>use the service unlawfully, or in a way that harms it or another user.</li>
+    </ul>
+
+    <h2>9. Our content</h2>
+    <p>
+      The platform, its analysis, its text and its design are ours or licensed to
+      us. You get a personal, non-transferable right to use the service for your
+      own trading decisions while your plan is active. Nothing here transfers
+      ownership of anything to you.
+    </p>
+
+    <h2>10. Liability</h2>
+    <p>
+      <strong>Nothing in these terms limits liability that cannot lawfully be
+      limited</strong>, including for death or personal injury caused by
+      negligence, or for fraud.
+    </p>
+    <p>
+      Subject to that: the service is provided "as is". We do not warrant that the
+      analysis is accurate, complete or suitable for any purpose, and we are not
+      liable for trading losses, lost profits, lost opportunity or any indirect or
+      consequential loss arising from your use of the service or from any decision
+      you take after reading it. Our total liability for any claim relating to the
+      service is limited to the amount you paid us in the twelve months before the
+      claim arose.
+    </p>
+    <p>
+      You are solely responsible for your trading decisions and their
+      consequences.
+    </p>
+
+    <h2>11. Changes to these terms</h2>
+    <p>
+      We may update these terms. If a change is material we will give reasonable
+      notice — by email, or in the platform before it takes effect. Continuing to
+      use the service after that date means you accept the updated terms.
+    </p>
+
+    <h2>12. Governing law</h2>
+    <p>
+      These terms are governed by the laws of <strong>[jurisdiction]</strong>, and
+      the courts of <strong>[jurisdiction]</strong> have exclusive jurisdiction
+      over any dispute — without affecting any right you have to bring a claim in
+      your own country of residence.
+    </p>
+
+    <h2>13. Contact</h2>
+    <p>
+      Questions about these terms:
+      <a href="mailto:{{ support_email }}">{{ support_email }}</a>.
+    </p>
+  </article>
+</div>
+{% endblock %}

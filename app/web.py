@@ -36,6 +36,8 @@ in-memory database with no terminal.
 """
 from __future__ import annotations
 
+import logging
+
 from flask import (Flask, abort, current_app, g, jsonify, redirect,
                    render_template, request, url_for)
 from sqlalchemy.orm import sessionmaker
@@ -51,6 +53,10 @@ from .api import asset_choices, register_api
 from .auth import (admin_required, bootstrap_admin, current_user,
                    register_auth)
 from .client import live_view, register_client
+from .plans import format_minor as _format_minor, price_of as _price_of, spec_rows
+from .public import home_context, register_public
+from .profile import register_profile
+from .subscription import register_subscription
 # Shared presentation helpers. These used to live here; they moved to
 # ``app/display.py`` when the client platform needed the same price precision
 # and New York rendering, so both surfaces format a value identically. Aliased
@@ -60,6 +66,7 @@ from .display import digits_for as _digits_for
 from .display import iso_dt as _iso_dt
 from .display import money as _money
 from .display import num as _num
+from .display import ny_date as _ny_date
 from .display import ny_str as _ny_str
 from .display import price as _price
 from .display import profit_factor as _profit_factor
@@ -232,11 +239,25 @@ def create_app(settings: Settings | None = None,
     app.config["JOBS"] = jobs
 
     app.jinja_env.filters["ny"] = _ny_str
+    # Date-only counterpart of ``ny``. Subscription and payment pages show
+    # calendar dates, where the minute is noise; both come from the same NY
+    # conversion, so a date can never disagree with the timestamp beside it.
+    app.jinja_env.filters["ny_date"] = _ny_date
     app.jinja_env.filters["num"] = _num
     app.jinja_env.filters["money"] = _money
     app.jinja_env.filters["price"] = _price
     app.jinja_env.filters["status"] = _status_label
     app.jinja_env.filters["pf"] = _profit_factor
+
+    # Money formatting, as a global rather than a filter. A price is an integer
+    # count of minor units plus its currency — ``format_minor(5000, "USD")`` —
+    # and a filter would put the amount first and the currency somewhere it is
+    # easy to forget. Making it global also means every shell (console, client,
+    # admin, public) formats an amount the same way without each view having to
+    # remember to pass it: a page that formatted money differently from the page
+    # the customer paid on is a bug nobody would notice until it mattered.
+    app.jinja_env.globals["format_minor"] = _format_minor
+    app.jinja_env.globals["price_of"] = _price_of
 
     @app.context_processor
     def _inject_settings():
@@ -254,7 +275,11 @@ def create_app(settings: Settings | None = None,
         offset, kept as the fallback for engines without a timezone database.
         """
         return {"cfg": cfg, "ny_zone": tu.NY_TZ_NAME,
-                "ny_offset_hours": tu.ny_offset_hours()}
+                "ny_offset_hours": tu.ny_offset_hours(),
+                # The product name. Injected rather than passed by each template
+                # so the existing ``platform_name | default(...)`` calls pick up
+                # the brand without any of them being edited.
+                "platform_name": getattr(cfg, "brand_name", "") or "3rader"}
 
     # ------------------------------------------------------------------ #
     # Repository per request
@@ -307,17 +332,28 @@ def create_app(settings: Settings | None = None,
     def root():
         """The domain root, resolved by who is asking.
 
-        A logged-out visitor gets the login page; a client gets the product; an
-        admin gets the admin dashboard. Deliberately a redirect rather than a rendered
-        page so there is exactly one canonical URL per surface — a client can
-        bookmark ``/dashboard`` and never see a second copy of it at ``/``.
+        A visitor who is not signed in gets the public homepage — that is the
+        whole point of having one, and it is the page a stranger arriving from a
+        search result should land on.
+
+        A signed-in user is redirected rather than served a rendered page, so
+        there is exactly one canonical URL per surface: a client can bookmark
+        ``/dashboard`` and never see a second copy of it at ``/``.
         """
         user = current_user()
         if user is None:
-            return redirect(url_for("auth.login"))
+            return render_template("public/home.html",
+                                   **home_context(g.repo, cfg))
         if user.is_admin:
             return redirect(url_for("admin.index"))
-        return redirect(url_for("client.overview"))
+        # A client goes where their plan actually reaches. Sending a
+        # brand-new account to /dashboard would answer every sign-up with a 403
+        # upgrade page, which reads as a fault rather than as "choose a plan".
+        from .access import FEATURE_DASHBOARD, has_feature
+
+        if has_feature(user, FEATURE_DASHBOARD, g.repo):
+            return redirect(url_for("client.overview"))
+        return redirect(url_for("subscription.index"))
 
     # ------------------------------------------------------------------ #
     # Operator console
@@ -533,21 +569,33 @@ def create_app(settings: Settings | None = None,
 
     # Control endpoints (start/stop live, run backtest, poll status).
     register_api(app)
-    # Client-facing product, and the admin area.
+    # The public marketing site, the client-facing product, the account settings
+    # page, subscriptions and the admin area. Subscription is registered
+    # alongside the client product because the two navigate into each other.
+    register_public(app)
     register_client(app)
+    register_profile(app)
+    register_subscription(app)
     register_admin(app)
 
-    # First-run admin, from ADMIN_USERNAME/ADMIN_PASSWORD. Only ever fires while
-    # the users table is empty, so it cannot touch a live installation's
-    # accounts. Wrapped because a database that is unreachable must not stop the
-    # app from starting — an operator can still fix it and restart.
+    # One startup task: seed the plan catalogue and create the first admin. Both
+    # run inside a single repository scope, and both are wrapped because an
+    # unreachable database must not stop the app from starting — an operator can
+    # still fix it and restart.
     try:
         with _repo_scope(app, cfg, repository) as repo:
+            # Inserts only plan keys that have never been stored, so an
+            # operator's price edit survives every restart and a new tier added
+            # to app.plans lands here. Runs before bootstrap so a fresh install
+            # has a catalogue by the time anyone can reach /pricing.
+            added = repo.sync_plans(spec_rows())
+            if added:
+                logging.getLogger(__name__).info(
+                    "Seeded %d plan(s) into an empty catalogue.", added)
             bootstrap_admin(repo, cfg)
     except Exception:  # pragma: no cover - startup best-effort
-        import logging
         logging.getLogger(__name__).exception(
-            "Could not bootstrap the admin account; continuing without it.")
+            "Could not complete startup seeding; continuing without it.")
 
     return app
 

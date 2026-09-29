@@ -1,0 +1,144 @@
+{% extends "public/base.html" %}
+{% block page_title %}Features · 3rader{% endblock %}
+{% block page_description %}Session state per instrument, a validated setups feed, the condition checklist behind every signal, and a filterable record.{% endblock %}
+
+{% block body %}
+<section class="mk-wrap" style="padding:3.5rem 1.25rem 1rem 1.25rem;">
+  <div class="mk-section-head">
+    <span class="mk-eyebrow">Features</span>
+    <h2 style="font-size:clamp(1.8rem,4vw,2.4rem);">What the platform does</h2>
+    <p>
+      Everything below reads from the same engine that produces the signals. The
+      platform is a view onto the strategy's state, not a second opinion about it.
+    </p>
+  </div>
+</section>
+
+<section class="mk-wrap" style="padding:1.5rem 1.25rem 3rem 1.25rem;">
+  <div class="mk-grid">
+    <div class="mk-card">
+      <span class="mk-card-glyph">Live market</span>
+      <h3>Every instrument, and where it has got to</h3>
+      <p>
+        {{ figures.monitored_assets }} instruments, each showing the step it has
+        reached in the model: watching, liquidity purged, CISD confirmed, FVG
+        formed, waiting on a retracement, retracement confirmed, or a setup
+        published. An instrument with no setup yet is shown as such — the state
+        is the information.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Setups</span>
+      <h3>Signals that reached the end of the sequence</h3>
+      <p>
+        A setup appears only once confirmation completes and the risk gate
+        approves it. Each one carries direction, entry, stop, target and the
+        ratio between them, so you can judge it rather than take it on faith.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Detail</span>
+      <h3>The reasoning, not just the outcome</h3>
+      <p>
+        Every setup opens into the checklist that produced it — each condition
+        marked met or unmet — alongside the liquidity level and the imbalance
+        zone the decision was made against.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">History</span>
+      <h3>A record you can filter</h3>
+      <p>
+        Every setup the engine has produced, filterable by instrument, by outcome
+        and by date range. Useful for reviewing how the model behaves in
+        conditions you care about.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Analysis</span>
+      <h3>A workspace for the wider picture</h3>
+      <p>
+        A consolidated view of engine output over time, with performance and
+        backtest reporting. Available on the VIP plan.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Time</span>
+      <h3>One clock across the whole platform</h3>
+      <p>
+        Every timestamp, session window and filter is New York local time,
+        daylight-saving aware. The platform and your charts read the same clock
+        without you converting anything.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Account</span>
+      <h3>Your account, under your control</h3>
+      <p>
+        Update your name, email, phone, country and photo from your profile. A
+        password change ends every other session on the account immediately.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Security</span>
+      <h3>Built to be held to account</h3>
+      <p>
+        Passwords are stored only as hashes. Every page checks what your account
+        is entitled to on the server, so hiding a button is never what keeps you
+        out of something. Card details never reach 3rader — Flutterwave handles
+        the payment.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="mk-section">
+  <div class="mk-wrap">
+    <div class="mk-section-head">
+      <h2>What 3rader is not</h2>
+      <p>
+        Worth being direct about, because the difference matters more than the
+        feature list.
+      </p>
+    </div>
+
+    <div class="mk-grid">
+      <div class="mk-card">
+        <h3>It does not trade for you</h3>
+        <p>
+          No broker connection, no order placement, no money management. You
+          decide what to do with a setup and you execute it yourself.
+        </p>
+      </div>
+      <div class="mk-card">
+        <h3>It does not give financial advice</h3>
+        <p>
+          Setups are the output of a mechanical model applied to market data.
+          They are not personal recommendations and they take no account of your
+          circumstances.
+        </p>
+      </div>
+      <div class="mk-card">
+        <h3>It does not promise a result</h3>
+        <p>
+          No win rate, no return figure and no guarantee appears anywhere on this
+          site or inside the platform. Trading carries risk of loss.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="mk-cta">
+  <h2>See it on live data</h2>
+  <p>Create an account and open the dashboard.</p>
+  <a class="btn btn-primary btn-lg" href="{{ url_for('auth.register') }}">Create an account</a>
+</section>
+{% endblock %}

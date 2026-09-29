@@ -1,0 +1,68 @@
+{% extends "client/base.html" %}
+{% block title %}{{ feature_label }} is not in your plan{% endblock %}
+
+{#
+  The 403 page for a gated feature, rendered by app.access.require_feature.
+
+  It has one job: turn "no" into a next step. It names the feature that was
+  refused, names the plan that includes it, and links to the page where a plan
+  can be bought — rather than leaving the reader to work out which tier they
+  need from a pricing table.
+#}
+{% block content %}
+<div class="card">
+  <div class="card-body">
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <span class="pill tone-danger"><span class="dot"></span>Not in your plan</span>
+      {% if entitlement.is_active %}
+      <span class="pill tone-secondary">{{ entitlement.plan_name }}</span>
+      {% endif %}
+    </div>
+
+    <h1 class="h5 mb-2">{{ feature_label }} is not included in your current plan</h1>
+
+    <p class="mb-3">
+      {% if entitlement.is_active %}
+        You are on <strong>{{ entitlement.plan_name }}</strong>, which does not
+        include {{ feature_label | lower }}.
+      {% elif entitlement.status == 'expired' %}
+        Your <strong>{{ entitlement.plan_name }}</strong> plan has ended, so
+        {{ feature_label | lower }} is locked.
+      {% else %}
+        Your account does not have a plan yet, so the analysis pages are locked.
+      {% endif %}
+    </p>
+
+    {% if minimum_plan %}
+    <p class="mb-3">
+      <strong>{{ minimum_plan.name }}</strong> includes it, along with everything
+      already in your plan's tier.
+      {% if minimum_plan.price_minor %}
+        It is
+        <strong>{{ minimum_plan.price_display }}</strong> for 30 days, and does
+        not renew automatically.
+      {% endif %}
+    </p>
+    {% endif %}
+
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-primary" href="{{ url_for('subscription.index') }}">
+        {% if entitlement.is_active %}Upgrade your plan{% else %}Choose a plan{% endif %}
+      </a>
+      <a class="btn btn-outline-secondary" href="{{ url_for('client.overview') }}">
+        Back to the dashboard
+      </a>
+    </div>
+
+    {# A client with no plan lands here from a bookmarked product URL, which is
+       the common way this page is reached. Saying so is friendlier than leaving
+       them to wonder whether the link is broken. #}
+    {% if not entitlement.is_active %}
+    <p class="setup-meta mt-3 mb-0">
+      If you followed a link from somewhere, it was not broken — the page is
+      there and opens as soon as a plan is active.
+    </p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

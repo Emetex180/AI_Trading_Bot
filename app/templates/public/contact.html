@@ -1,0 +1,69 @@
+{% extends "public/base.html" %}
+{% block page_title %}Contact · 3rader{% endblock %}
+{% block page_description %}How to reach 3rader about your account, a payment or the analysis.{% endblock %}
+
+{% block body %}
+<section class="mk-wrap" style="padding:3.5rem 1.25rem 4rem 1.25rem;">
+  <div class="mk-section-head">
+    <span class="mk-eyebrow">Contact</span>
+    <h2 style="font-size:clamp(1.8rem,4vw,2.4rem);">Get in touch</h2>
+    <p>
+      There is no contact form here on purpose: a form would collect your message
+      into a database that has to be maintained and monitored, and email reaches
+      us just as well.
+    </p>
+  </div>
+
+  <div class="mk-grid">
+    <div class="mk-card">
+      <span class="mk-card-glyph">General</span>
+      <h3>Anything at all</h3>
+      <p>
+        <a href="mailto:{{ support_email }}">{{ support_email }}</a>
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Payments</span>
+      <h3>Quoting a payment</h3>
+      <p>
+        Include the reference from your receipt — it looks like
+        <span class="mono">3R-…</span> — and we can find the transaction
+        immediately. Every payment and its status is listed on your
+        <a href="{{ url_for('subscription.payments') if current_user else url_for('auth.login') }}">payment
+        history</a> page.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Account</span>
+      <h3>Access problems</h3>
+      <p>
+        If you cannot sign in, use
+        <a href="{{ url_for('auth.forgot_password') }}">password recovery</a>
+        first — it is immediate and does not need us. If that fails, write to us
+        from the address on the account.
+      </p>
+    </div>
+
+    <div class="mk-card">
+      <span class="mk-card-glyph">Security</span>
+      <h3>Reporting a vulnerability</h3>
+      <p>
+        Please write to
+        <a href="mailto:{{ support_email }}">{{ support_email }}</a> with enough
+        detail to reproduce the issue. We would rather hear about it than not,
+        and we will not pursue anyone who reports in good faith.
+      </p>
+    </div>
+  </div>
+
+  <div class="mk-callout" style="margin-top:2rem;">
+    <p>
+      <strong>We will never ask for your password.</strong> Nobody at 3rader can
+      see it, and no legitimate message from us will request it, a card number or
+      a one-time code. Treat any message that does as fraudulent.
+    </p>
+  </div>
+</section>
+{% endblock %}

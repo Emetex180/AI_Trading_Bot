@@ -1,0 +1,145 @@
+{% extends "public/base.html" %}
+{% block page_title %}Privacy policy · 3rader{% endblock %}
+{% block page_description %}What 3rader collects, why, how long it is kept, and what you can ask us to do with it.{% endblock %}
+
+{% block body %}
+<div class="mk-wrap">
+  <article class="mk-doc">
+    <h1>Privacy policy</h1>
+    <p class="mk-doc-date">
+      Last updated {{ ny_year }}. This policy describes what the 3rader platform
+      collects and why. It should be read with the
+      <a href="{{ url_for('public.terms') }}">terms of service</a>.
+    </p>
+
+    <h2>1. Who is responsible</h2>
+    <p>
+      The data controller is <strong>[registered company name]</strong>,
+      <strong>[registered address]</strong>. Questions, and any request under
+      section 7 below, go to
+      <a href="mailto:{{ support_email }}">{{ support_email }}</a>.
+    </p>
+
+    <h2>2. What we collect</h2>
+    <h3>You give us</h3>
+    <ul>
+      <li><strong>Account details</strong> — your name, email address and password.
+        Your password is stored only as a salted hash and cannot be read back, by
+        us or by anyone else.</li>
+      <li><strong>Optional profile details</strong> — display name, phone number,
+        country, and a profile photo if you upload one.</li>
+      <li><strong>Payment information</strong> — what we receive is a transaction
+        reference, the amount, the currency and a status. Card numbers and
+        security codes go directly to our payment provider and never reach our
+        systems.</li>
+    </ul>
+
+    <h3>We record automatically</h3>
+    <ul>
+      <li><strong>Session data</strong> — a signed cookie that identifies your
+        session. It is required for signing in and cannot be turned off while you
+        remain signed in.</li>
+      <li><strong>Operational logs</strong> — sign-in attempts and administrative
+        actions, with the IP address they came from. Kept so an account compromise
+        or an abuse pattern can be investigated after the fact.</li>
+    </ul>
+
+    <p>
+      We do not use advertising cookies, third-party analytics, tracking pixels or
+      cross-site profiling. Nothing on this platform follows you elsewhere.
+    </p>
+
+    <h2>3. Why we hold it</h2>
+    <ul>
+      <li>to create and secure your account, and to sign you in;</li>
+      <li>to provide the analysis your plan covers;</li>
+      <li>to take payment and to keep an accurate record of it;</li>
+      <li>to send you service email — a receipt, a password reset, a change to
+        your subscription;</li>
+      <li>to detect and prevent abuse, fraud and unauthorised access;</li>
+      <li>to meet our legal and accounting obligations.</li>
+    </ul>
+
+    <h2>4. Who else is involved</h2>
+    <p>
+      Three processors handle data on our behalf, each only as far as its job
+      requires:
+    </p>
+    <ul>
+      <li><strong>Flutterwave</strong> — card payment processing. Your card
+        details go to them, not to us.</li>
+      <li><strong>Resend</strong> — delivery of transactional email. They receive
+        the recipient address and the message.</li>
+      <li><strong>Our hosting provider</strong> — the servers the platform and its
+        database run on.</li>
+    </ul>
+    <p>
+      We do not sell your personal data, and we do not share it for anyone else's
+      marketing.
+    </p>
+
+    <h2>5. How long we keep it</h2>
+    <ul>
+      <li><strong>Account records</strong> — while the account is open.</li>
+      <li><strong>Payment records</strong> — kept after an account is closed.
+        Financial records are evidence that a payment was taken and what it
+        bought, and deleting them would make a billing dispute unanswerable.
+        Account deletion therefore removes your personal details from the active
+        account while the transaction record itself is retained.</li>
+      <li><strong>Password reset links</strong> — single-use, and expire 30 minutes
+        after they are issued.</li>
+      <li><strong>Operational logs</strong> — retained for a limited period, then
+        discarded.</li>
+    </ul>
+
+    <h2>6. Security</h2>
+    <p>
+      Passwords are hashed, not encrypted. Session cookies are signed, HTTP-only,
+      and same-site. Access to a page is decided on the server for every request,
+      so hiding a link is never what protects a record. Payment records are
+      settled only after the provider has confirmed the transaction on a
+      server-to-server call, and webhooks are verified by signature.
+    </p>
+    <p>
+      No system is perfect. If a breach ever affects your data, we will tell you
+      and the relevant authority as the law requires.
+    </p>
+
+    <h2>7. Your rights</h2>
+    <p>
+      Depending on where you live, you may have the right to ask for a copy of
+      your data, to correct it, to have it deleted, to restrict or object to how
+      it is used, and to receive it in a portable form. Write to
+      <a href="mailto:{{ support_email }}">{{ support_email }}</a> and we will
+      respond within the period the law allows.
+    </p>
+    <p>
+      Some of it you can change yourself: your name, email, phone, country and
+      photo are all editable from your profile page.
+    </p>
+    <p>
+      If you are unhappy with our response you can complain to your local data
+      protection authority.
+    </p>
+
+    <h2>8. Transfers</h2>
+    <p>
+      Our processors may store data outside your country, including in the United
+      States. Where data moves internationally we rely on the safeguards those
+      providers put in place for it.
+    </p>
+
+    <h2>9. Children</h2>
+    <p>
+      The service is for adults. We do not knowingly hold data for anyone under
+      18, and will delete an account we find to be held by a minor.
+    </p>
+
+    <h2>10. Changes</h2>
+    <p>
+      If this policy changes in a way that affects you, we will give notice by
+      email or in the platform before the change takes effect.
+    </p>
+  </article>
+</div>
+{% endblock %}

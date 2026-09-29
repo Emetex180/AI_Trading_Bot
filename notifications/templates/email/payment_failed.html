@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Payment unsuccessful{% endblock %}
+{% block preheader %}Your {{ plan_name }} payment did not complete.{% endblock %}
+
+{% block content %}
+  {{ ui.heading("Your payment did not complete") }}
+
+  <p style="margin:0 0 14px 0;">
+    Hello {{ name }}, we tried to process your {{ plan_name }} payment and it was
+    not completed. Nothing has been charged for this attempt, and no subscription
+    has started.
+  </p>
+
+  {% if reason %}
+    {{ ui.details([("Plan", plan_name), ("What the provider reported", reason)]) }}
+  {% else %}
+    {{ ui.details([("Plan", plan_name)]) }}
+  {% endif %}
+
+  <p style="margin:0;">
+    The most common causes are a declined card, insufficient funds, or a
+    checkout that was closed before it finished. Starting again usually works.
+  </p>
+
+  {{ ui.button("Try again", app_url ~ retry_url) }}
+  {{ ui.fallback(app_url ~ retry_url) }}
+
+  {{ ui.note("If your statement shows a pending charge for a payment that
+  failed, it is an authorisation hold and your bank releases it automatically.
+  If it does not clear, write to us and we will look into it.") }}
+{% endblock %}

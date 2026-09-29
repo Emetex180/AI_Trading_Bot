@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Your {{ plan_name }} subscription is active{% endblock %}
+{% block preheader %}Everything on your plan is now unlocked.{% endblock %}
+
+{% block content %}
+  {{ ui.heading("Your " ~ plan_name ~ " subscription is active") }}
+
+  <p style="margin:0 0 14px 0;">
+    Hello {{ name }}, your subscription is now active and the features included
+    in {{ plan_name }} are unlocked on your account.
+  </p>
+
+  {{ ui.details([("Plan", plan_name), ("Active until", expires_at)]) }}
+
+  {{ ui.button("Open your dashboard", app_url ~ dashboard_url) }}
+  {{ ui.fallback(app_url ~ dashboard_url) }}
+
+  {{ ui.note("Your subscription does not renew on its own. When it reaches its
+  end date it simply lapses, and you can start a new one whenever you like.") }}
+{% endblock %}

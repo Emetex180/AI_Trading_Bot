@@ -24,6 +24,10 @@
   {# client.css wins ties on equal specificity — loaded last, like app.css is
      after Bootstrap in the console. #}
   <link href="{{ url_for('static', filename='css/client.css') }}" rel="stylesheet">
+  {# The brand layer, loaded last so its token block re-tones everything above
+     it. It restates the design tokens rather than editing any component, so
+     nothing here can break by being re-coloured. #}
+  <link href="{{ url_for('static', filename='css/3rader.css') }}" rel="stylesheet">
 </head>
 <body>
 {% set u = current_user %}
@@ -66,6 +70,20 @@
         <a class="sidebar-link {{ 'active' if nav == 'analysis' }}"
            href="{{ url_for('client.analysis') }}">
           <span class="sidebar-glyph">A</span> Market Analysis
+        </a>
+        {# Account-level rather than analysis, and reachable on every plan: a
+           customer with no active subscription needs somewhere to go to buy one,
+           and a locked-out client needs to be able to see why. #}
+        <a class="sidebar-link {{ 'active' if nav == 'subscription' }}"
+           href="{{ url_for('subscription.index') }}">
+          <span class="sidebar-glyph">P</span> Subscription
+        </a>
+        {# Also account-level rather than analysis, and reachable on every plan:
+           the picture, the contact details and the password belong to the person,
+           not to a tier. #}
+        <a class="sidebar-link {{ 'active' if nav == 'settings' }}"
+           href="{{ url_for('profile.settings') }}">
+          <span class="sidebar-glyph">&#9881;</span> Settings
         </a>
       </nav>
     </div>
@@ -143,10 +161,42 @@
         <span class="setup-meta">
           {% if status and status.session_window %}{{ status.session_window }} NY{% endif %}
         </span>
+
+        {# The account chip. Shows the uploaded picture when there is one and the
+           person's initial when there is not, so the same corner is filled either
+           way rather than collapsing. Links to settings, which is where the
+           picture and the password are changed. #}
+        {% if u %}
+        <a class="account-chip" href="{{ url_for('profile.settings') }}"
+           title="{{ u.full_name }} · account settings">
+          {% set avatar = avatar_url(u) %}
+          {% if avatar %}
+          <img class="account-chip-img" src="{{ avatar }}" alt="" width="28" height="28">
+          {% else %}
+          <span class="account-chip-img account-chip-initials" aria-hidden="true">{{ u.full_name[:1] | upper }}</span>
+          {% endif %}
+          <span class="account-chip-name">{{ u.full_name }}</span>
+        </a>
+        {% endif %}
       </div>
     </div>
 
     <main class="main-pad">
+      {# Flashed messages. The client shell had no region for these before the
+         subscription flow, which is the first thing inside it that flashes —
+         "payment received", "your plan does not include that". Placed at the top
+         of the content column, where the reader is already looking. #}
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="flash-stack">
+          {% for category, message in messages %}
+          <div class="alert alert-{{ 'danger' if category == 'danger' else ('warning' if category == 'warning' else ('success' if category == 'success' else 'secondary')) }}"
+               role="alert">{{ message }}</div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      {% endwith %}
+
       {% block content %}{% endblock %}
     </main>
   </div>

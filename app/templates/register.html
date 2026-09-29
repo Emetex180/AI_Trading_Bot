@@ -1,0 +1,74 @@
+{% extends "auth_base.html" %}
+{% block auth_title %}Create an account{% endblock %}
+{% block auth_sub %}Trading analysis for the New York sessions{% endblock %}
+
+{% block auth_body %}
+  <p class="auth-lead">
+    Create your account, then choose a plan. No card is needed to register.
+  </p>
+
+  <form method="post" action="{{ url_for('auth.register_post') }}" autocomplete="on">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+
+    <div class="mb-3">
+      <label class="form-label" for="full_name">Full name</label>
+      <input class="form-control" id="full_name" name="full_name" type="text"
+             value="{{ (form or {}).get('full_name', '') }}"
+             required autofocus autocomplete="name" maxlength="120">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label" for="email">Email address</label>
+      <input class="form-control" id="email" name="email" type="email"
+             value="{{ (form or {}).get('email', '') }}"
+             required autocomplete="email" maxlength="254" spellcheck="false">
+      <div class="form-text">Used to sign in, and for payment receipts.</div>
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label" for="password">Password</label>
+      <input class="form-control" id="password" name="password" type="password"
+             required autocomplete="new-password">
+      <div class="form-text">
+        At least {{ cfg.min_password_length }} characters. A passphrase of a few
+        unrelated words is stronger than a short complicated one.
+      </div>
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label" for="confirm_password">Confirm password</label>
+      <input class="form-control" id="confirm_password" name="confirm_password"
+             type="password" required autocomplete="new-password">
+    </div>
+
+    <div class="form-check mb-4">
+      <input class="form-check-input" id="terms" name="terms" type="checkbox"
+             value="yes" required>
+      <label class="form-check-label" for="terms">
+        I accept the
+        <a href="{{ url_for('public.terms') }}" target="_blank" rel="noopener">terms of service</a>,
+        the
+        <a href="{{ url_for('public.privacy') }}" target="_blank" rel="noopener">privacy policy</a>,
+        and I understand the
+        <a href="{{ url_for('public.risk') }}" target="_blank" rel="noopener">risk disclaimer</a>.
+      </label>
+    </div>
+
+    <button class="btn btn-primary w-100" type="submit">Create account</button>
+  </form>
+{% endblock %}
+
+{% block auth_foot %}
+  <div class="text-center">
+    Already have an account? <a href="{{ url_for('auth.login') }}">Sign in</a>
+  </div>
+{% endblock %}
+
+{% block auth_note %}
+  {# The honest version of a sign-up footer. No performance claim is made here
+     because none could be substantiated. #}
+  <p class="auth-note">
+    3rader provides market analysis and trading signals, not financial advice.
+    Trading involves risk, including the loss of your capital.
+  </p>
+{% endblock %}

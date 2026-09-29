@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Welcome to {{ brand_name }}{% endblock %}
+{% block preheader %}Your account is ready.{% endblock %}
+
+{% block content %}
+  {{ ui.heading("Welcome to " ~ brand_name ~ ", " ~ name ~ ".") }}
+
+  <p style="margin:0 0 14px 0;">
+    Your account has been created and your email address is confirmed. You can
+    sign in whenever you are ready.
+  </p>
+
+  <p style="margin:0;">
+    A subscription is what unlocks the dashboard, the live market view and the
+    rest of the platform. Until one is active, your account is set up and waiting.
+  </p>
+
+  {{ ui.button("Go to your account", app_url ~ dashboard_url) }}
+  {{ ui.fallback(app_url ~ dashboard_url) }}
+
+  {{ ui.note("3rader publishes market analysis and trading signals. It is not
+  financial advice, and no outcome is guaranteed.") }}
+{% endblock %}

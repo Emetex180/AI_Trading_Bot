@@ -197,8 +197,15 @@ class SystemEvent(Base):
 # existing production database simply gains four new (empty) tables.
 # --------------------------------------------------------------------------- #
 #: Roles. ``admin`` sees the whole platform; ``client`` sees only the analysis.
+#:
+#: ``ROLE_USER`` is an *alias*, not a fourth role: the 3rader sign-up flow talks
+#: about "users", but the column has stored ``"client"`` since the platform
+#: began and every existing row, query and test uses that spelling. Keeping one
+#: stored value under two readable names avoids a data migration that would buy
+#: nothing.
 ROLE_ADMIN = "admin"
 ROLE_CLIENT = "client"
+ROLE_USER = ROLE_CLIENT
 ROLES = (ROLE_ADMIN, ROLE_CLIENT)
 
 #: Account lifecycle. A suspended account keeps its history but cannot log in.
@@ -234,20 +241,64 @@ class User(Base):
                                         default=STATUS_ACTIVE)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: Profile fields a 3rader account holder maintains themselves. Empty string
+    #: rather than NULL throughout, matching ``email``/``display_name`` above, so
+    #: templates never have to distinguish "absent" from "blank".
+    phone: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    country: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    #: Filename only — never a path, and never a client-supplied one. The file
+    #: lives in the avatar directory (see ``app.profile``) and is served through
+    #: an authenticated route, so a crafted value cannot escape that directory.
+    avatar_path: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     #: Username of the admin who created the account ("" for the bootstrap admin).
     created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
                                                  default=_utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: When the password last changed. The signed-in session records this value,
+    #: and the loader drops any session whose recorded copy no longer matches —
+    #: so a password reset (or an admin resetting it) ends every other session
+    #: instead of leaving an attacker's cookie working after the victim has
+    #: changed their credentials. NULL for accounts that predate the column;
+    #: NULL compares equal to a session that recorded nothing, so existing
+    #: sessions are unaffected.
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime,
+                                                                 nullable=True)
+    #: Soft deletion. An admin "deleting" a user sets this instead of removing the
+    #: row, so the payments and subscriptions the account accrued — which are
+    #: financial records — are never orphaned or destroyed. Every user lookup that
+    #: authenticates filters on it (see ``Repository.get_user``).
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     profile: Mapped["ClientProfile | None"] = relationship(
         back_populates="user", cascade="all, delete-orphan", uselist=False)
     broker_accounts: Mapped[list["BrokerAccount"]] = relationship(
         back_populates="user", cascade="all, delete-orphan")
+    #: Payment history is *not* cascade-deleted with the account: these are
+    #: financial records, and an admin removing a user soft-deletes the row
+    #: (``deleted_at``) precisely so this history survives. The relationship is
+    #: therefore read-only and carries no delete-orphan.
+    payments: Mapped[list["Payment"]] = relationship(
+        back_populates="user", viewonly=True)
 
     @property
     def is_admin(self) -> bool:
         return self.role == ROLE_ADMIN
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None
+
+    @property
+    def full_name(self) -> str:
+        """The name to show a person, falling back to the login name.
+
+        ``display_name`` is optional at creation (the admin form has always
+        allowed it to be blank), so anything rendering a person must cope with
+        it being empty rather than printing an empty cell.
+        """
+        return self.display_name or self.username
 
     @property
     def is_active(self) -> bool:
@@ -394,3 +445,231 @@ class EngineState(Base):
                                                     default=_utcnow)
     #: Seconds the writer may legitimately sleep before its next heartbeat.
     lease_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+
+# --------------------------------------------------------------------------- #
+# 3rader: plans, subscriptions, payments and notifications
+#
+# Purely additive, like the block above: ``create_all`` builds these five tables
+# on the next start and an existing production database simply gains them empty.
+# The only change to an existing table is five new ``users`` columns, back-filled
+# by ``_ADDED_COLUMNS`` in ``repository``.
+#
+# Money is stored in **integer minor units** (cents for USD) and never as a
+# float. A payment amount is compared against the plan price to authorise a
+# subscription, and binary floating point cannot represent 0.1 exactly — a
+# comparison that is off by one ulp is the difference between honouring a
+# payment and rejecting a real customer.
+# --------------------------------------------------------------------------- #
+#: Payment lifecycle. ``SUCCESSFUL`` is only ever written by the server after a
+#: provider verification — never by a browser.
+PAY_PENDING = "pending"
+PAY_SUCCESSFUL = "successful"
+PAY_FAILED = "failed"
+PAY_CANCELLED = "cancelled"
+PAYMENT_STATES = (PAY_PENDING, PAY_SUCCESSFUL, PAY_FAILED, PAY_CANCELLED)
+
+#: Subscription lifecycle, distinct from the coarse ``SUB_*`` states the admin
+#: list has always shown on ``ClientProfile``. ``pending`` means a payment was
+#: started and not yet confirmed; the subscription is inactive until it clears.
+SUB_PENDING = "pending"
+SUB_CANCELLED = "cancelled"
+
+#: Notification kinds. Stored, not inferred, so the bell can group and the
+#: email layer can pick a template by name.
+NOTIFY_REGISTRATION = "registration"
+NOTIFY_PAYMENT_SUCCESS = "payment_successful"
+NOTIFY_PAYMENT_FAILED = "payment_failed"
+NOTIFY_SUBSCRIPTION_ACTIVATED = "subscription_activated"
+NOTIFY_SUBSCRIPTION_CHANGED = "subscription_changed"
+NOTIFICATION_KINDS = (
+    NOTIFY_REGISTRATION, NOTIFY_PAYMENT_SUCCESS, NOTIFY_PAYMENT_FAILED,
+    NOTIFY_SUBSCRIPTION_ACTIVATED, NOTIFY_SUBSCRIPTION_CHANGED,
+)
+
+
+class Plan(Base):
+    """A purchasable subscription tier.
+
+    Seeded from :mod:`app.plans`, which is the canonical definition, and then
+    *owned by the database*: ``sync_plans`` fills in only keys it has never seen
+    and never overwrites a row, so an operator who edits a price later is not
+    reverted on the next restart. Nothing outside :mod:`app.plans` and the admin
+    editor should read this table directly — routes ask the access layer.
+
+    ``level`` is the only field access decisions use. It orders the tiers, so
+    "at least Premium" is ``plan.level >= plans.get("premium").level`` rather
+    than a chain of string comparisons that would need editing whenever a tier
+    is inserted between two others.
+    """
+
+    __tablename__ = "plans"
+    __table_args__ = (UniqueConstraint("key", name="uq_plans_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: Stable identifier used in URLs, access checks and payment metadata:
+    #: ``basic`` / ``premium`` / ``vip``. Never shown to a customer.
+    key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Minor units (cents). See the module note above on why this is an integer.
+    price_minor: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False, default="USD")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    features: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    #: Ordering rank for "at least this tier" checks. Not a price comparison.
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Whether the plan may be bought right now. A retired plan keeps its
+    #: subscriptions and its history; it just stops appearing on /pricing.
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: Marks the tier the pricing page presents as the default choice.
+    highlight: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow, onupdate=_utcnow)
+
+
+class Payment(Base):
+    """One attempt to buy a subscription, and its outcome.
+
+    The row is created *before* the customer leaves for the provider, in
+    ``pending``, so the return leg and the webhook both have something to
+    reconcile against. Only a server-side provider verification moves it to
+    ``successful``.
+
+    Idempotency rests on two unique constraints rather than on application
+    logic: ``reference`` is ours and is presented to the provider, and
+    ``provider_tx_id`` is theirs. A webhook delivered twice — which providers
+    do, deliberately — collides on the second write and is recognised as a
+    replay instead of activating a second subscription.
+    """
+
+    __tablename__ = "payments"
+    __table_args__ = (
+        UniqueConstraint("reference", name="uq_payments_reference"),
+        UniqueConstraint("provider_tx_id", name="uq_payments_provider_tx_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False,
+                                         index=True)
+    plan_id: Mapped[int | None] = mapped_column(ForeignKey("plans.id"),
+                                                nullable=True, index=True)
+    #: Which plan was being bought, kept as the key as well as the FK so a
+    #: payment's intent survives even if the plan row is later retired.
+    plan_key: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    #: Merchant reference we generate and hand to the provider.
+    reference: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False,
+                                          default="flutterwave")
+    #: The provider's own transaction id, written only after verification.
+    provider_tx_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    amount_minor: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False, default="USD")
+    status: Mapped[str] = mapped_column(String(16), nullable=False,
+                                        default=PAY_PENDING, index=True)
+    #: True only when the server has confirmed the charge with the provider.
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: The provider's verification payload, kept for reconciliation and disputes.
+    #: Deliberately the *response body* — no card data and no secret key reaches
+    #: this column, and nothing here is rendered to a customer.
+    verification_json: Mapped[dict] = mapped_column(JSON, nullable=False,
+                                                    default=dict)
+    failure_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    checkout_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow, onupdate=_utcnow)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="payments")
+    plan: Mapped["Plan | None"] = relationship()
+
+
+class Subscription(Base):
+    """A user's entitlement to a plan over a period.
+
+    Rows accumulate: an upgrade writes a new subscription and expires the old
+    one rather than mutating it, so "what was this account entitled to in
+    March?" stays answerable. The single *current* row is the one whose status
+    is ``active`` and whose ``expires_at`` has not passed; :func:`Repository
+    .active_subscription` is the only place that rule is implemented.
+    """
+
+    __tablename__ = "subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False,
+                                         index=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id"), nullable=False,
+                                         index=True)
+    plan_key: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False,
+                                        default=SUB_PENDING, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: The payment that bought this period. Unique so one payment can never
+    #: activate two subscriptions, however many times a webhook arrives.
+    payment_id: Mapped[int | None] = mapped_column(ForeignKey("payments.id"),
+                                                   nullable=True, unique=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow, onupdate=_utcnow)
+
+    user: Mapped["User"] = relationship()
+    plan: Mapped["Plan"] = relationship()
+
+
+class Notification(Base):
+    """An in-app notification for one user.
+
+    Stored rather than derived so it can be marked read and so a delivery that
+    happened by email is still visible in the app. Email is sent through
+    :mod:`notifications.email`; this row is the in-app half of the same event.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False,
+                                         index=True)
+    kind: Mapped[str] = mapped_column(String(48), nullable=False, default="")
+    title: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: Optional in-app destination, e.g. ``/subscription``. A path we wrote, not
+    #: user input, so it cannot become an open redirect.
+    link: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow, index=True)
+
+    @property
+    def is_read(self) -> bool:
+        return self.read_at is not None
+
+
+class PasswordReset(Base):
+    """A single-use, expiring password-reset grant.
+
+    Only the SHA-256 of the token is stored, so a leaked database snapshot does
+    not hand over working reset links — the same reason only password *hashes*
+    are kept. ``used_at`` makes it single-use: the row is claimed with a
+    conditional UPDATE, so two simultaneous submissions of the same link cannot
+    both succeed.
+    """
+
+    __tablename__ = "password_resets"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_password_resets_token"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False,
+                                         index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow)

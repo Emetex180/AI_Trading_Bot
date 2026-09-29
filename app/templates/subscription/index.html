@@ -1,0 +1,228 @@
+{% extends "client/base.html" %}
+{% block title %}Subscription{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-start justify-content-between flex-wrap gap-3 mb-3">
+  <div>
+    <h1 class="h4 mb-1">Subscription</h1>
+    <p class="setup-meta mb-0">
+      What your account holds, and what it could hold.
+    </p>
+  </div>
+  <a class="btn btn-outline-secondary btn-sm"
+     href="{{ url_for('subscription.payments') }}">Payment history</a>
+</div>
+
+{# ---------------------------------------------------------------- #
+   Current state.
+   Reads from the same entitlement object the access layer decides with, so
+   this page cannot describe an account as having more or less than it does.
+   ---------------------------------------------------------------- #}
+<div class="card mb-4">
+  <div class="card-body">
+    {% if entitlement.is_active %}
+      <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
+        <span class="pill tone-success"><span class="dot"></span>Active</span>
+        <span class="pill tone-secondary">{{ entitlement.plan_name }}</span>
+      </div>
+      <p class="mb-1">
+        Your <strong>{{ entitlement.plan_name }}</strong> plan is active
+        {% if entitlement.expires_at %}
+          until {{ entitlement.expires_at | ny_date }}
+          <span class="setup-meta">({{ entitlement.days_left }} day{{ 's' if entitlement.days_left != 1 }} left)</span>
+        {% else %}
+          with no end date set
+        {% endif %}.
+      </p>
+      {% if entitlement.source == 'profile' %}
+      <p class="setup-meta mb-2">
+        This plan was granted to your account by an administrator. To move to a
+        different plan, buy one below — it replaces this one.
+      </p>
+      {% endif %}
+
+      <div class="d-flex flex-wrap gap-2 mt-3">
+        <a class="btn btn-primary btn-sm" href="{{ url_for('client.overview') }}">
+          Open the dashboard
+        </a>
+        <form method="post" action="{{ url_for('subscription.cancel') }}"
+              onsubmit="return confirm('Cancel your subscription? Your access stays open until the end of the period you have paid for.');">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="btn btn-outline-danger btn-sm" type="submit">
+            Cancel subscription
+          </button>
+        </form>
+      </div>
+
+    {% else %}
+      {% if entitlement.status == 'expired' %}
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <span class="pill tone-danger"><span class="dot"></span>Expired</span>
+          <span class="pill tone-secondary">{{ entitlement.plan_name }}</span>
+        </div>
+        <p class="mb-0">
+          Your {{ entitlement.plan_name }} plan ended
+          {% if entitlement.expires_at %} on {{ entitlement.expires_at | ny_date }}{% endif %}.
+          Your account and history are intact — choose a plan below to open the
+          pages it covered again.
+        </p>
+      {% else %}
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <span class="pill tone-secondary"><span class="dot"></span>No active plan</span>
+        </div>
+        <p class="mb-0">
+          Your account does not have a plan yet, so the analysis pages are
+          locked. Choose one below to unlock them.
+        </p>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+
+{# ---------------------------------------------------------------- #
+   Plans.
+   Priced from the database rows the seeder maintains, formatted with the same
+   helper the checkout uses, so the figure here is the figure that will be
+   charged.
+   ---------------------------------------------------------------- #}
+<h2 class="h6 mb-3">Plans</h2>
+
+{% if not available %}
+{# Said plainly. A customer who clicked "subscribe" deserves to know the
+   difference between their card failing and the deployment not being able to
+   take cards at all. #}
+<div class="alert alert-warning" role="alert">
+  <strong>Card payments are not configured on this deployment.</strong>
+  A payment cannot be started yet. Please contact
+  <a href="mailto:{{ cfg.support_email }}">{{ cfg.support_email }}</a> to
+  arrange access in the meantime.
+</div>
+{% endif %}
+
+<div class="plan-grid mb-2">
+  {% for plan in plans %}
+  {% set is_current = entitlement.is_active and entitlement.plan_key == plan.key %}
+  <div class="plan-card {{ 'is-current' if is_current }}{{ ' is-featured' if plan.highlight and not is_current }}">
+    <div class="d-flex align-items-center justify-content-between">
+      <div class="plan-name">{{ plan.name }}</div>
+      {% if is_current %}
+      <span class="badge text-bg-primary">Current</span>
+      {% elif plan.highlight %}
+      <span class="badge text-bg-secondary">Popular</span>
+      {% endif %}
+    </div>
+
+    <div class="plan-price">
+      {{ format_minor(plan.price_minor, plan.currency) }}<span class="unit"> / {{ period_days }} days</span>
+    </div>
+
+    <p class="plan-desc">{{ plan.description }}</p>
+
+    <ul class="plan-features">
+      {% for feature in plan.features %}
+      <li>{{ feature }}</li>
+      {% endfor %}
+    </ul>
+
+    <div class="mt-auto">
+      {% if is_current %}
+      <button class="btn btn-outline-secondary w-100" type="button" disabled>
+        Your current plan
+      </button>
+      {% elif available %}
+      <form method="post"
+            action="{{ url_for('subscription.checkout', plan_key=plan.key) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="btn {{ 'btn-primary' if plan.highlight else 'btn-outline-secondary' }} w-100"
+                type="submit">
+          {% if entitlement.is_active %}Switch to {{ plan.name }}
+          {% else %}Choose {{ plan.name }}{% endif %}
+        </button>
+      </form>
+      {% else %}
+      <button class="btn btn-outline-secondary w-100" type="button" disabled>
+        Unavailable
+      </button>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<p class="setup-meta">
+  You will be taken to Flutterwave to pay. 3rader never sees or stores your card
+  details. Subscriptions do not renew automatically — see the
+  <a href="{{ url_for('public.terms') }}" target="_blank" rel="noopener">terms</a>.
+</p>
+
+{# ---------------------------------------------------------------- #
+   Recent activity.
+   ---------------------------------------------------------------- #}
+{% if history or payments %}
+<div class="row g-3 mt-4">
+  {% if history %}
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h6 mb-3">Subscription history</h2>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
+            <thead>
+              <tr><th>Plan</th><th>Status</th><th>Started</th><th>Ends</th></tr>
+            </thead>
+            <tbody>
+              {% for row in history %}
+              <tr>
+                <td>{{ row.plan_key }}</td>
+                <td>
+                  <span class="pill {{ 'tone-success' if row.status == 'active' else 'tone-secondary' }}">
+                    <span class="dot"></span>{{ row.status }}
+                  </span>
+                </td>
+                <td class="setup-meta">{{ row.started_at | ny_date if row.started_at else '—' }}</td>
+                <td class="setup-meta">{{ row.expires_at | ny_date if row.expires_at else '—' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if payments %}
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h6 mb-3">Recent payments</h2>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
+            <thead>
+              <tr><th>Reference</th><th>Amount</th><th>Status</th><th>Date</th></tr>
+            </thead>
+            <tbody>
+              {% for row in payments %}
+              <tr>
+                <td class="mono" style="font-size:.75rem;">{{ row.reference }}</td>
+                <td>{{ format_minor(row.amount_minor, row.currency) }}</td>
+                <td>
+                  <span class="pill {{ 'tone-success' if row.status == 'successful' else ('tone-danger' if row.status == 'failed' else 'tone-secondary') }}">
+                    <span class="dot"></span>{{ row.status }}
+                  </span>
+                </td>
+                <td class="setup-meta">{{ (row.paid_at or row.created_at) | ny_date }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <a class="btn btn-outline-secondary btn-sm mt-3"
+           href="{{ url_for('subscription.payments') }}">All payments</a>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

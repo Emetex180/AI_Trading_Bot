@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Your {{ brand_name }} account has been created{% endblock %}
+{% block preheader %}Set your own password to sign in.{% endblock %}
+
+{% block content %}
+  {{ ui.heading("Your account has been created") }}
+
+  <p style="margin:0 0 14px 0;">
+    Hello {{ name }}, an account has been created for you on {{ brand_name }}.
+    Sign in with your username, and set a password of your own if you have not
+    been given one.
+  </p>
+
+  {{ ui.button("Set your password", app_url ~ password_url) }}
+  {{ ui.fallback(app_url ~ password_url) }}
+
+  {{ ui.note("We never send passwords by email. If you already have one, you
+  can sign in now and change it from your account settings.") }}
+{% endblock %}

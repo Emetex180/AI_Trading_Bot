@@ -2,24 +2,70 @@
 {% block title %}{{ c.username }}{% endblock %}
 
 {% block content %}
+{% if c.is_deleted %}
+{# Shown above everything else, because every form below it will fail: a removed
+   account cannot be edited, and an operator who did not realise they were
+   looking at one would read each refusal as a fault. #}
+<div class="flash-stack">
+  <div class="alert alert-danger" role="alert">
+    <strong>This account has been removed.</strong>
+    It cannot sign in, and it no longer appears in the client list. Its payment
+    history is retained. Restoring it below puts it back and requires the
+    account holder to sign in again.
+  </div>
+</div>
+{% endif %}
+
 <div class="client-hero">
   <div>
     <h1>{{ c.display_name }}
       <span class="badge tone-{{ 'success' if c.is_active else 'danger' }}">{{ c.status }}</span>
       <span class="badge tone-{{ 'info' if c.role == 'admin' else 'secondary' }}">{{ c.role }}</span>
+      {% if c.is_deleted %}<span class="badge tone-danger">removed</span>{% endif %}
     </h1>
     <p>
       {{ c.username }}
       {%- if c.email %} · {{ c.email }}{% endif %}
       · created {{ c.created_at_ny }} NY
       {%- if c.created_by != '—' %} by {{ c.created_by }}{% endif %}
+      {%- if c.phone %} · {{ c.phone }}{% endif %}
+      {%- if c.country %} · {{ c.country }}{% endif %}
     </p>
   </div>
   <div class="page-actions">
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.clients') }}">All clients</a>
-    {% if c.role != 'admin' %}
+    {% if c.role != 'admin' and not c.is_deleted %}
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.overview') }}">Client view</a>
     {% endif %}
+  </div>
+</div>
+
+{# ---------------------------------------------------------------- #
+   What this account can actually reach, resolved by the access layer rather
+   than read off the profile — so this panel and the guard on the client's own
+   pages cannot disagree.
+   ---------------------------------------------------------------- #}
+<div class="card mb-3">
+  <div class="card-body d-flex flex-wrap align-items-center gap-3">
+    <div>
+      <div class="setup-meta">Effective plan</div>
+      <div>
+        {% if entitlement.is_active %}
+        <span class="badge tone-success">{{ entitlement.plan_name }}</span>
+        <span class="setup-meta">
+          via {{ 'a purchased subscription' if entitlement.source == 'subscription'
+                  else ('the admin-maintained profile' if entitlement.source == 'profile'
+                        else 'administrator access') }}
+          {%- if entitlement.expires_at %}, until {{ entitlement.expires_at | ny_date }}{% endif %}
+        </span>
+        {% else %}
+        <span class="badge tone-secondary">No active plan</span>
+        <span class="setup-meta">
+          {{ entitlement.status }} — every gated page will refuse this account.
+        </span>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </div>
 
@@ -204,6 +250,68 @@
       </div>
     </div>
 
+    <div class="card mb-3">
+      <div class="card-header"><span>Account details</span></div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('admin.set_client_details', user_id=c.id) }}"
+              class="row g-3">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+
+          <div class="col-12 col-md-6">
+            <label class="form-label" for="d-display">Display name</label>
+            <input class="form-control" id="d-display" name="display_name"
+                   value="{{ user.display_name or '' }}" maxlength="128"
+                   autocomplete="off">
+          </div>
+
+          <div class="col-12 col-md-6">
+            <label class="form-label" for="d-email">Email</label>
+            <input class="form-control" id="d-email" name="email" type="email"
+                   value="{{ user.email or '' }}" maxlength="254" required
+                   autocomplete="off">
+            <div class="form-hint">
+              Used to sign in and for password recovery; must be unique.
+            </div>
+          </div>
+
+          <div class="col-12 col-md-6">
+            <label class="form-label" for="d-phone">Phone</label>
+            <input class="form-control" id="d-phone" name="phone"
+                   value="{{ user.phone or '' }}" maxlength="32"
+                   autocomplete="off">
+          </div>
+
+          <div class="col-12 col-md-6">
+            <label class="form-label" for="d-country">Country</label>
+            <input class="form-control" id="d-country" name="country"
+                   value="{{ user.country or '' }}" maxlength="64"
+                   autocomplete="off">
+          </div>
+
+          <div class="col-12">
+            <label class="form-label" for="d-notes">Internal notes</label>
+            <textarea class="form-control" id="d-notes" name="notes" rows="3"
+                      maxlength="4000">{{ user.notes or '' }}</textarea>
+            <div class="form-hint">
+              Visible to administrators only. The client never sees this.
+            </div>
+          </div>
+
+          <div class="col-12">
+            <button class="btn btn-sm btn-primary" type="submit">Save details</button>
+          </div>
+        </form>
+
+        {# Stated rather than omitted, so an operator does not go looking for a
+           field that was left out on purpose. #}
+        <p class="setup-meta mt-3 mb-0">
+          Username, role and password are not editable here. Status is set above,
+          the subscription below, and the password has its own form — each has one
+          job so that changing one cannot change another.
+        </p>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <span>Setup history</span>
@@ -232,6 +340,141 @@
             {% endfor %}
           </tbody>
         </table>
+      </div>
+    </div>
+
+    {# ---------------------------------------------------------------- #
+       Billing history. Read-only: a subscription is granted by a payment
+       settling or by the profile form above, and a third route that flipped a
+       status would be access with no payment and no audit line.
+       ---------------------------------------------------------------- #}
+    <div class="card mt-3">
+      <div class="card-header">
+        <span>Subscriptions</span>
+        <span class="card-header-note">{{ subscription_history | length }} on record</span>
+      </div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead>
+            <tr><th>Plan</th><th>Status</th><th>Started (NY)</th>
+                <th>Expires (NY)</th><th>Paid by</th></tr>
+          </thead>
+          <tbody>
+            {% for s in subscription_history %}
+            <tr class="row-highlight">
+              <td>{{ s.plan_key }}</td>
+              <td>
+                <span class="badge tone-{{ 'success' if s.status == 'active' else ('danger' if s.status in ('expired', 'cancelled') else 'secondary') }}">{{ s.status }}</span>
+              </td>
+              <td class="mono">{{ s.started_at | ny_date if s.started_at else '—' }}</td>
+              <td class="mono">{{ s.expires_at | ny_date if s.expires_at else 'no end date' }}</td>
+              <td class="setup-meta">
+                {% if s.payment_id %}Payment #{{ s.payment_id }}{% else %}Granted by an admin{% endif %}
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="empty-state">
+              No subscription has ever been recorded for this account.
+            </td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card-header border-top">
+        <span>Payments</span>
+        <span class="card-header-note">Most recent {{ payments | length }}</span>
+      </div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead>
+            <tr><th>Amount</th><th>Plan</th><th>Status</th>
+                <th>Reference</th><th>Created (NY)</th></tr>
+          </thead>
+          <tbody>
+            {% for p in payments %}
+            <tr class="row-highlight">
+              <td class="mono">{{ format_minor(p.amount_minor, p.currency) }}</td>
+              <td>{{ p.plan_key }}</td>
+              <td>
+                <span class="badge tone-{{ 'success' if p.status == 'successful' else ('danger' if p.status == 'failed' else 'secondary') }}">{{ p.status }}</span>
+                {% if p.failure_reason %}
+                <div class="setup-meta">{{ p.failure_reason }}</div>
+                {% endif %}
+              </td>
+              <td class="mono setup-meta">{{ p.reference }}</td>
+              <td class="mono">{{ p.created_at | ny_date }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="empty-state">
+              No payment has ever been attempted on this account.
+            </td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {# ---------------------------------------------------------------- #
+       Removing an account.
+
+       Set apart, at the bottom, with the confirmation spelled out. Nothing here
+       is a mis-click the interface should absorb quietly: an operator has to
+       type the username, which makes them name the account they are removing.
+       ---------------------------------------------------------------- #}
+    <div class="card mt-3">
+      <div class="card-header">
+        <span>{{ 'Restore this account' if c.is_deleted else 'Remove this account' }}</span>
+      </div>
+      <div class="card-body">
+        {% if c.is_deleted %}
+        <p class="setup-meta">
+          Removing an account is reversible. Restoring it brings the account back
+          and leaves its payment history untouched. The holder will need to sign
+          in again, because their previous session was invalidated when the
+          account was removed — which is what made the removal take effect
+          immediately rather than at the next session expiry.
+        </p>
+        <form method="post" action="{{ url_for('admin.restore_client', user_id=c.id) }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="btn btn-sm btn-primary" type="submit">Restore account</button>
+        </form>
+
+        {% elif c.id == current_user.id %}
+        {# The route refuses this as well — the message is here so the operator
+           understands why there is no button, rather than looking for one. #}
+        <p class="setup-meta mb-0">
+          You cannot remove the account you are signed in with. If it should be
+          removed, sign in as another administrator and remove it from there —
+          otherwise the deployment would have no way back into its own
+          administration.
+        </p>
+
+        {% else %}
+        <p class="setup-meta">
+          The account stops working immediately: it cannot sign in, it disappears
+          from the client list, and every gated page refuses it. Nothing it
+          recorded is destroyed — its subscriptions and payments are kept, because
+          those are the records needed if a charge is ever disputed.
+        </p>
+        <form method="post" action="{{ url_for('admin.delete_client', user_id=c.id) }}"
+              class="row g-2 align-items-end">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <div class="col-12 col-md-5">
+            <label class="form-label" for="del-confirm">
+              Type <strong>{{ c.username }}</strong> to confirm
+            </label>
+            <input class="form-control form-control-sm" id="del-confirm"
+                   name="confirm" autocomplete="off" spellcheck="false"
+                   placeholder="{{ c.username }}" required>
+          </div>
+          <div class="col-12 col-md-4">
+            <button class="btn btn-sm btn-outline-danger" type="submit">
+              Remove account
+            </button>
+          </div>
+        </form>
+        {% endif %}
       </div>
     </div>
   </div>

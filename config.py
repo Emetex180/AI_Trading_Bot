@@ -298,6 +298,49 @@ class Settings:
     min_password_length: int = 12
     #: Waitress worker threads for ``run.py serve``.
     serve_threads: int = 8
+
+    # --- 3rader: sign-up, payments, email and uploads -------------------------
+    #: Public origin of the deployment, e.g. ``https://3rader.com``. Used to
+    #: build absolute links in email (password resets, payment receipts). When
+    #: blank those links fall back to ``Host``, which is request-controlled —
+    #: acceptable on localhost, not on a public deployment. Set it in production.
+    app_url: str = ""
+    #: Registration / password-reset throttle. Its own budget, separate from the
+    #: login limiter, because these routes send mail and insert rows.
+    register_max_attempts: int = 5
+    register_lockout_minutes: int = 60
+
+    #: Flutterwave. The secret and encryption keys are **server-side only** and
+    #: must never reach a template or a response body; only the public key is
+    #: safe to hand a browser. When unconfigured the payment routes report
+    #: themselves unavailable rather than pretending to take money.
+    flutterwave_public_key: str = ""
+    flutterwave_secret_key: str = ""
+    flutterwave_encryption_key: str = ""
+    #: Where Flutterwave sends the browser back to after payment, and where it
+    #: posts the server-to-server webhook. Both are ours; neither is trusted for
+    #: confirming a payment on its own.
+    flutterwave_webhook_secret_hash: str = ""
+    #: Charge currency and the number of days one payment buys.
+    payment_currency: str = "USD"
+    subscription_period_days: int = 30
+
+    #: Resend. Server-side only. Blank disables outbound email: every send is
+    #: logged and skipped, so the platform runs without it and says so.
+    resend_api_key: str = ""
+    resend_from_email: str = "3rader <no-reply@3rader.com>"
+    #: Address shown in the footer and on the contact page.
+    support_email: str = "support@3rader.com"
+
+    #: Product name. Injected into every template as ``platform_name`` so the
+    #: existing templates that fall back to a hard-coded default pick this up
+    #: without any of them being edited.
+    brand_name: str = "3rader"
+
+    #: Profile-image limits. Enforced before a byte is written to disk.
+    avatar_max_bytes: int = 2 * 1024 * 1024      # 2 MiB
+    avatar_max_pixels: int = 4096                # per side, guards decompression bombs
+
     #: Whether starting the web application also starts the trading engine.
     #:
     #: True by default, because a dashboard whose scanner has to be started by a
@@ -427,6 +470,22 @@ def _build_settings() -> Settings:
         min_password_length=_env_int("MIN_PASSWORD_LENGTH", 12),
         serve_threads=_env_int("SERVE_THREADS", 8),
         engine_autostart=_env_bool("ENGINE_AUTOSTART", default=True),
+        # --- 3rader --------------------------------------------------------- #
+        app_url=_env_str("APP_URL"),
+        register_max_attempts=_env_int("REGISTER_MAX_ATTEMPTS", 5),
+        register_lockout_minutes=_env_int("REGISTER_LOCKOUT_MINUTES", 60),
+        flutterwave_public_key=_env_str("FLUTTERWAVE_PUBLIC_KEY"),
+        flutterwave_secret_key=_env_str("FLUTTERWAVE_SECRET_KEY"),
+        flutterwave_encryption_key=_env_str("FLUTTERWAVE_ENCRYPTION_KEY"),
+        flutterwave_webhook_secret_hash=_env_str("FLUTTERWAVE_WEBHOOK_SECRET_HASH"),
+        payment_currency=_env_str_or("PAYMENT_CURRENCY", "USD"),
+        subscription_period_days=_env_int("SUBSCRIPTION_PERIOD_DAYS", 30),
+        resend_api_key=_env_str("RESEND_API_KEY"),
+        resend_from_email=_env_str_or("RESEND_FROM_EMAIL",
+                                      "3rader <no-reply@3rader.com>"),
+        support_email=_env_str_or("SUPPORT_EMAIL", "support@3rader.com"),
+        avatar_max_bytes=_env_int("AVATAR_MAX_BYTES", 2 * 1024 * 1024),
+        avatar_max_pixels=_env_int("AVATAR_MAX_PIXELS", 4096),
     )
 
 

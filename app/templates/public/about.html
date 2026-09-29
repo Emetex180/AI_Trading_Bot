@@ -1,0 +1,104 @@
+{% extends "public/base.html" %}
+{% block page_title %}About · 3rader{% endblock %}
+{% block page_description %}3rader applies a fixed liquidity-and-structure model to the New York sessions and publishes the setups that pass every condition.{% endblock %}
+
+{% block body %}
+<section class="mk-wrap" style="padding:3.5rem 1.25rem 1rem 1.25rem;">
+  <div class="mk-section-head">
+    <span class="mk-eyebrow">About</span>
+    <h2 style="font-size:clamp(1.8rem,4vw,2.4rem);">A process, run consistently</h2>
+    <p>
+      3rader exists because discretionary trading is hard to do the same way
+      twice. The model here is fixed: the same five conditions, evaluated in the
+      same order, on every instrument, every session. What changes is the market,
+      not the method.
+    </p>
+  </div>
+</section>
+
+<section class="mk-wrap" style="padding:1.5rem 1.25rem 3rem 1.25rem;">
+  <div class="mk-grid">
+    <div class="mk-card">
+      <h3>Defined, not discretionary</h3>
+      <p>
+        Every setup on the platform is the output of a rule that can be written
+        down and checked: a liquidity purge on the hourly, a change in state of
+        delivery on the five-minute, the first qualifying imbalance on the
+        one-minute, a retracement into it, and a confirmation. If any step is
+        missing, there is no signal — which is most of the time.
+      </p>
+    </div>
+    <div class="mk-card">
+      <h3>Shown with its reasoning</h3>
+      <p>
+        A direction with no working shown is not much use. Each setup carries the
+        condition checklist that produced it and the levels it was judged
+        against, so you can disagree with a specific step rather than with the
+        whole thing.
+      </p>
+    </div>
+    <div class="mk-card">
+      <h3>Honest about the odds</h3>
+      <p>
+        Most instruments produce nothing on most sessions. The platform says so
+        rather than manufacturing activity to look busy, and it makes no claim
+        about the outcome of any trade.
+      </p>
+    </div>
+    <div class="mk-card">
+      <h3>Analysis, not advice</h3>
+      <p>
+        3rader publishes what the model found. It does not know your capital, your
+        risk tolerance or your circumstances, and it does not tell you what to do.
+        Please read the
+        <a href="{{ url_for('public.risk') }}">risk disclaimer</a>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="mk-section">
+  <div class="mk-wrap">
+    <div class="mk-section-head">
+      <h2>How the platform works</h2>
+    </div>
+    <div class="mk-steps">
+      <div class="mk-step">
+        <h3>The engine monitors</h3>
+        <p>
+          {{ figures.monitored_assets }} instruments are watched continuously
+          through {{ figures.session_names | join(', ') }} on the New York clock.
+        </p>
+      </div>
+      <div class="mk-step">
+        <h3>The model evaluates</h3>
+        <p>
+          Each instrument moves through {{ figures.strategy_states }} states. The
+          engine records the step it is on, so an instrument with no signal still
+          tells you something.
+        </p>
+      </div>
+      <div class="mk-step">
+        <h3>Confirmed setups are published</h3>
+        <p>
+          Only setups that complete the full sequence and pass the risk gate are
+          recorded. Everything else is discarded.
+        </p>
+      </div>
+      <div class="mk-step">
+        <h3>You decide</h3>
+        <p>
+          3rader does not trade. You read the analysis and act — or do not — on
+          your own judgement and at your own risk.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="mk-cta">
+  <h2>Start with a plan</h2>
+  <p>Create an account, then choose how much of the platform you need.</p>
+  <a class="btn btn-primary btn-lg" href="{{ url_for('public.pricing') }}">See pricing</a>
+</section>
+{% endblock %}

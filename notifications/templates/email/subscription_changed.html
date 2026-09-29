@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Your subscription was updated{% endblock %}
+{% block preheader %}{{ change }}{% endblock %}
+
+{% block content %}
+  {{ ui.heading("Your subscription was updated") }}
+
+  <p style="margin:0 0 14px 0;">
+    Hello {{ name }}, an administrator has changed the subscription on your
+    {{ brand_name }} account.
+  </p>
+
+  {{ ui.details([("Plan", plan_name), ("Change", change), ("Active until", expires_at)]) }}
+
+  <p style="margin:0;">
+    If you were not expecting this, or it does not match what you agreed, please
+    reply to this message so we can correct it.
+  </p>
+{% endblock %}

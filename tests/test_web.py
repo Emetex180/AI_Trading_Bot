@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.plans import spec_rows
 from app.web import create_app
 from config import get_settings
 from database.models import ROLE_ADMIN, ROLE_CLIENT, Base
@@ -42,15 +43,24 @@ def _repo():
     return Repository(session=maker())
 
 
-def _sign_in(client, repo, *, role=ROLE_ADMIN, username="tester"):
+def _sign_in(client, repo, *, role=ROLE_ADMIN, username="tester", plan="vip"):
     """Create an account, sign the client in, and return the user row.
 
     A fresh account per test, inside that test's own in-memory database, so no
     test depends on the order another ran in.
+
+    ``plan`` defaults to VIP for a **client**, because every client page is now
+    gated by subscription tier and a helper that produced an unsubscribed
+    account would make every page test assert a 403. The default is "the highest
+    tier" rather than a specific plan so the page tests keep testing the pages
+    they are named for; access control itself is tested directly in
+    ``test_plans_access`` and by passing ``plan=None`` here.
     """
     user = repo.create_user(username=username, password_hash_or_plain=_PASSWORD,
                             role=role, display_name=username,
                             subscribe=(role == ROLE_CLIENT))
+    if role == ROLE_CLIENT:
+        _grant(repo, user, plan)
     client.get("/login")
     with client.session_transaction() as sess:
         sess["csrf"] = _CSRF
@@ -59,6 +69,23 @@ def _sign_in(client, repo, *, role=ROLE_ADMIN, username="tester"):
                                        "_csrf": _CSRF})
     assert resp.status_code == 302, f"sign-in returned {resp.status_code}"
     return user
+
+
+def _grant(repo, user, plan_key):
+    """Give ``user`` an active subscription through the real purchase path."""
+    repo.sync_plans(spec_rows())
+    if not plan_key:
+        return None
+    plan = repo.get_plan_by_key(plan_key)
+    ref = f"test-{plan_key}-{user.id}"
+    repo.create_payment(user_id=user.id, plan=plan, reference=ref,
+                        amount_minor=plan.price_minor, currency=plan.currency)
+    payment, _ = repo.settle_payment(ref, provider_tx_id=f"flw-{ref}",
+                                     amount_minor=plan.price_minor,
+                                     currency=plan.currency,
+                                     payload={"status": "successful"})
+    return repo.activate_subscription(user_id=user.id, plan=plan,
+                                      payment=payment, period_days=30)
 
 
 def _client(repo, *, role=ROLE_ADMIN, settings=None):

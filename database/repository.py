@@ -10,16 +10,24 @@ default; setting ``DATABASE_URL`` migrates to PostgreSQL with no code change).
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterator
 
-from sqlalchemy import create_engine, event, func, inspect, select, text
+from sqlalchemy import (create_engine, delete, event, func, inspect, or_,
+                        select, text, true, update)
 from sqlalchemy.orm import Session, sessionmaker
 
 from config import Settings, get_settings
+from trading import time_utils as tu
 
 from . import models as m
 from .models import Base
+
+
+def _utcnow() -> datetime:
+    """Naive UTC, the project-wide convention (see ``database.models``)."""
+    return tu.now_utc()
+
 
 # Re-export models for callers that prefer ``database.models``.
 __all__ = ["Base", "models", "get_engine", "get_session", "init_db",
@@ -81,6 +89,17 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("signals", "setup_id", "VARCHAR(64)"),
     ("signals", "state", "VARCHAR(32)"),
     ("signals", "digits", "INTEGER"),
+    # 3rader account fields. Added to an existing ``users`` table by ALTER, so
+    # each carries a default an existing row can be given without a rewrite.
+    # ``updated_at``/``deleted_at`` are nullable for the same reason — NULL is
+    # the honest value for a row written before the column existed, and every
+    # reader treats NULL there as "never updated" / "not deleted".
+    ("users", "phone", "VARCHAR(32) NOT NULL DEFAULT ''"),
+    ("users", "country", "VARCHAR(64) NOT NULL DEFAULT ''"),
+    ("users", "avatar_path", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    ("users", "updated_at", "DATETIME"),
+    ("users", "deleted_at", "DATETIME"),
+    ("users", "password_changed_at", "DATETIME"),
 )
 
 # Indexes to (re)assert on every startup. Safe because ``IF NOT EXISTS`` is
@@ -575,39 +594,179 @@ class Repository:
         self.session.commit()
         return row
 
-    def get_user(self, user_id: int) -> m.User | None:
-        return self.session.get(m.User, user_id)
+    def get_user(self, user_id: int, *, include_deleted: bool = False) -> m.User | None:
+        """One user by primary key, or ``None``.
 
-    def get_user_by_username(self, username: str) -> m.User | None:
+        A soft-deleted account is reported as absent by default. That is what
+        makes deletion take effect: the session loader calls this on every
+        request, so a deleted user's open session stops resolving immediately
+        rather than lasting until its cookie expires. Admin screens that need to
+        show a removed account pass ``include_deleted=True``.
+        """
+        row = self.session.get(m.User, user_id)
+        if row is None:
+            return None
+        if row.deleted_at is not None and not include_deleted:
+            return None
+        return row
+
+    def get_user_by_username(self, username: str, *,
+                             include_deleted: bool = False) -> m.User | None:
         """Case-insensitive lookup, so ``Admin`` and ``admin`` are one account."""
         if not username:
             return None
         return self.session.execute(
-            select(m.User).where(func.lower(m.User.username) == username.strip().lower())
+            select(m.User)
+            .where(func.lower(m.User.username) == username.strip().lower())
+            .where(m.User.deleted_at.is_(None) if not include_deleted
+                   else true())
         ).scalars().first()
 
-    def list_users(self, *, role: str | None = None) -> list[m.User]:
+    def get_user_by_email(self, email: str, *,
+                          include_deleted: bool = False) -> m.User | None:
+        """Case-insensitive lookup by email address.
+
+        Email is *not* uniquely constrained in the schema — the column predates
+        account self-registration and older rows may share an empty string — so
+        this returns the first match and registration checks for an existing one
+        before inserting. Making the column unique would need a table rebuild on
+        SQLite, which is a migration this feature does not justify.
+        """
+        if not email:
+            return None
+        stmt = select(m.User).where(
+            func.lower(m.User.email) == email.strip().lower())
+        if not include_deleted:
+            stmt = stmt.where(m.User.deleted_at.is_(None))
+        return self.session.execute(stmt.order_by(m.User.id)).scalars().first()
+
+    def login_identifier_exists(self, identifier: str) -> bool:
+        """Is this username or email already taken?
+
+        Both are checked because the sign-in form accepts either, so treating
+        them as separate namespaces would let one account's email shadow
+        another's username and make sign-in ambiguous.
+        """
+        if not identifier:
+            return False
+        return (self.get_user_by_username(identifier) is not None
+                or self.get_user_by_email(identifier) is not None)
+
+    def list_users(self, *, role: str | None = None,
+                   include_deleted: bool = False) -> list[m.User]:
         stmt = select(m.User)
         if role:
             stmt = stmt.where(m.User.role == role)
+        if not include_deleted:
+            stmt = stmt.where(m.User.deleted_at.is_(None))
         stmt = stmt.order_by(m.User.role.desc(), m.User.username)
         return list(self.session.execute(stmt).scalars().all())
 
     def list_clients(self) -> list[m.User]:
         return self.list_users(role=m.ROLE_CLIENT)
 
-    def count_users(self) -> int:
-        return int(self.session.execute(
-            select(func.count()).select_from(m.User)).scalar_one())
+    def search_users(self, *, query: str = "", role: str | None = None,
+                     plan: str | None = None, status: str | None = None,
+                     include_deleted: bool = False, only_deleted: bool = False,
+                     limit: int = 500) -> list[m.User]:
+        """Admin user list: free-text search plus the three facet filters.
 
-    def set_user_password(self, user_id: int, password: str) -> bool:
-        """Replace a user's password hash. Returns False if the user is gone."""
+        ``query`` matches name, username or email, case-insensitively. ``plan``
+        filters on the subscription, which lives on ``client_profiles``
+        (admin-granted) or ``subscriptions`` (bought) — both are consulted so the
+        list agrees with what the access layer will decide for that account,
+        rather than showing a plan the account cannot use.
+
+        ``status`` filters the *account*, not the subscription: it is the same
+        value the table's Status column renders and the same values the filter
+        dropdown offers (``active`` / ``suspended``). Filtering the subscription
+        status here instead would make ``suspended`` match nothing at all, since
+        it is not a subscription state, and ``active`` match only accounts with a
+        bought subscription — a filter that silently answers a different
+        question than the one on its label.
+
+        ``include_deleted`` keeps removed accounts in the result;
+        ``only_deleted`` returns *just* the removed ones, which is what the
+        "Removed only" control asks for.
+
+        The whole thing is one query with an outer join per subscription source,
+        so filtering does not become a query per user.
+        """
+        # Newest active subscription per user, as a correlated scalar subquery.
+        active_sub = (
+            select(m.Subscription.plan_key)
+            .where(m.Subscription.user_id == m.User.id)
+            .where(m.Subscription.status == m.SUB_ACTIVE)
+            .where(or_(m.Subscription.expires_at.is_(None),
+                       m.Subscription.expires_at > _utcnow()))
+            .order_by(m.Subscription.id.desc())
+            .limit(1)
+            .correlate(m.User)
+            .scalar_subquery()
+        )
+        effective_plan = func.coalesce(
+            active_sub, func.nullif(m.ClientProfile.subscription_plan, ""))
+
+        stmt = (select(m.User)
+                .outerjoin(m.ClientProfile, m.ClientProfile.user_id == m.User.id)
+                .order_by(m.User.created_at.desc(), m.User.id.desc())
+                .limit(max(1, min(limit, 1000))))
+
+        if only_deleted:
+            stmt = stmt.where(m.User.deleted_at.is_not(None))
+        elif not include_deleted:
+            stmt = stmt.where(m.User.deleted_at.is_(None))
+        if role:
+            stmt = stmt.where(m.User.role == role)
+        if plan:
+            stmt = stmt.where(effective_plan == plan)
+        if status:
+            stmt = stmt.where(m.User.status == status)
+        if query and query.strip():
+            needle = f"%{query.strip().lower()}%"
+            stmt = stmt.where(or_(
+                func.lower(m.User.username).like(needle),
+                func.lower(m.User.email).like(needle),
+                func.lower(m.User.display_name).like(needle),
+            ))
+
+        return list(self.session.execute(stmt).scalars().unique().all())
+
+    def count_users(self, *, include_deleted: bool = True) -> int:
+        """Total accounts.
+
+        Counts *all* rows by default, including soft-deleted ones, because the
+        one caller that matters — :func:`app.auth.bootstrap_admin` — uses this to
+        answer "is this a fresh install?". Counting only live accounts would let
+        a database whose every user was removed look brand new and have an admin
+        re-created from the environment on top of live data.
+        """
+        stmt = select(func.count()).select_from(m.User)
+        if not include_deleted:
+            stmt = stmt.where(m.User.deleted_at.is_(None))
+        return int(self.session.execute(stmt).scalar_one())
+
+    def set_user_password(self, user_id: int, password: str,
+                          *, end_sessions: bool = True) -> bool:
+        """Replace a user's password hash. Returns False if the user is gone.
+
+        ``end_sessions`` stamps ``password_changed_at``, which the session loader
+        compares against — so by default this also signs the account out
+        everywhere. That is the point: a password is usually changed *because*
+        the old one is no longer trusted, and leaving other sessions alive would
+        make the change cosmetic. The one caller that legitimately wants the
+        sessions kept (an admin setting a password for someone who has never
+        signed in) can pass ``False``.
+        """
         from app.auth import hash_password
 
         row = self.session.get(m.User, user_id)
         if row is None:
             return False
         row.password_hash = hash_password(password)
+        row.updated_at = _utcnow()
+        if end_sessions:
+            row.password_changed_at = row.updated_at
         self.session.commit()
         return True
 
@@ -741,6 +900,502 @@ class Repository:
         engine with nothing to report" instead of rendering both as one thing.
         """
         return self.session.get(m.EngineState, 1)
+
+    # ------------------------------------------------------------------ #
+    # Plans
+    #
+    # Seeded from ``app.plans`` (the canonical definition) and then owned by
+    # the database, so an operator's edit is never reverted by a restart.
+    # ------------------------------------------------------------------ #
+    def sync_plans(self, rows: list[dict]) -> int:
+        """Insert any plan key that has never been stored. Returns how many.
+
+        **Never updates an existing row.** That is the whole contract: a plan
+        whose price an operator changed must survive the next deployment, and a
+        seed that overwrote would silently undo it. Adding a *new* tier to
+        ``app.plans`` does land here, which is how a fourth plan would ship.
+        """
+        existing = {key for (key,) in self.session.execute(
+            select(m.Plan.key)).all()}
+        added = 0
+        for row in rows:
+            if row["key"] in existing:
+                continue
+            self.session.add(m.Plan(**row))
+            added += 1
+        if added:
+            self.session.commit()
+        return added
+
+    def list_plans(self, *, active_only: bool = False) -> list[m.Plan]:
+        stmt = select(m.Plan)
+        if active_only:
+            stmt = stmt.where(m.Plan.is_active.is_(True))
+        return list(self.session.execute(
+            stmt.order_by(m.Plan.sort_order, m.Plan.level)).scalars().all())
+
+    def get_plan_by_key(self, key: str) -> m.Plan | None:
+        if not key:
+            return None
+        return self.session.execute(
+            select(m.Plan).where(m.Plan.key == str(key).strip().lower())
+        ).scalars().first()
+
+    def set_plan_fields(self, plan_key: str, **fields) -> m.Plan | None:
+        """Edit a stored plan. Only the operator-editable columns are writable.
+
+        ``key`` and ``level`` are deliberately excluded: the key is referenced by
+        subscriptions and payment metadata, and the level orders every access
+        decision. Changing either from a free-text form would silently re-rank
+        what customers can reach.
+
+        The identifier is named ``plan_key`` rather than ``key`` so a caller can
+        safely spread a form dict into ``**fields`` — with a parameter called
+        ``key``, a form field of that name would raise ``TypeError`` instead of
+        being ignored by the allow-list below.
+        """
+        allowed = {"name", "price_minor", "currency", "description", "features",
+                   "is_active", "highlight", "sort_order"}
+        row = self.get_plan_by_key(plan_key)
+        if row is None:
+            return None
+        for field, value in fields.items():
+            if field in allowed:
+                setattr(row, field, value)
+        row.updated_at = _utcnow()
+        self.session.commit()
+        return row
+
+    # ------------------------------------------------------------------ #
+    # Subscriptions
+    # ------------------------------------------------------------------ #
+    def active_subscription(self, user_id: int) -> m.Subscription | None:
+        """The user's live subscription, or ``None``.
+
+        The single implementation of "what is this account entitled to buy". A
+        row counts as live only while its status is ``active`` **and** its end
+        date has not passed, so an elapsed subscription stops granting access
+        the moment it lapses rather than at the next cleanup job.
+        """
+        return self.session.execute(
+            select(m.Subscription)
+            .where(m.Subscription.user_id == user_id)
+            .where(m.Subscription.status == m.SUB_ACTIVE)
+            .where(or_(m.Subscription.expires_at.is_(None),
+                       m.Subscription.expires_at > _utcnow()))
+            .order_by(m.Subscription.id.desc())
+        ).scalars().first()
+
+    def subscription_history(self, user_id: int) -> list[m.Subscription]:
+        return list(self.session.execute(
+            select(m.Subscription)
+            .where(m.Subscription.user_id == user_id)
+            .order_by(m.Subscription.id.desc())
+        ).scalars().all())
+
+    def list_subscriptions(self, *, status: str | None = None,
+                           limit: int = 500) -> list[m.Subscription]:
+        stmt = select(m.Subscription)
+        if status:
+            stmt = stmt.where(m.Subscription.status == status)
+        return list(self.session.execute(
+            stmt.order_by(m.Subscription.id.desc())
+            .limit(max(1, min(limit, 2000)))).scalars().all())
+
+    def activate_subscription(self, *, user_id: int, plan, payment: m.Payment,
+                              period_days: int) -> m.Subscription | None:
+        """Grant ``plan`` to ``user_id`` for one period, exactly once per payment.
+
+        Idempotent on ``payment_id``: the column carries a UNIQUE constraint, so
+        a second call for the same payment — a replayed webhook, or the browser
+        return leg racing the webhook — collides instead of granting a second
+        period. The existing row is returned rather than an error, because from
+        the caller's point of view "already granted" and "just granted" are the
+        same successful outcome.
+
+        Any subscription the user already holds is expired first, so an upgrade
+        never leaves two live entitlements and the access layer has one
+        unambiguous answer.
+        """
+        existing = self.session.execute(
+            select(m.Subscription)
+            .where(m.Subscription.payment_id == payment.id)
+        ).scalars().first()
+        if existing is not None:
+            return existing
+
+        now = _utcnow()
+        for old in self.session.execute(
+                select(m.Subscription)
+                .where(m.Subscription.user_id == user_id)
+                .where(m.Subscription.status == m.SUB_ACTIVE)).scalars().all():
+            old.status = m.SUB_EXPIRED
+            old.updated_at = now
+
+        row = m.Subscription(
+            user_id=user_id, plan_id=plan.id, plan_key=plan.key,
+            status=m.SUB_ACTIVE, started_at=now,
+            expires_at=now + timedelta(days=max(1, int(period_days))),
+            payment_id=payment.id)
+        self.session.add(row)
+        self.session.commit()
+        return row
+
+    def cancel_subscription(self, subscription_id: int) -> m.Subscription | None:
+        """Stop a subscription renewing/continuing. History is untouched."""
+        row = self.session.get(m.Subscription, subscription_id)
+        if row is None:
+            return None
+        row.status = m.SUB_CANCELLED
+        row.cancelled_at = _utcnow()
+        row.updated_at = row.cancelled_at
+        self.session.commit()
+        return row
+
+    # ------------------------------------------------------------------ #
+    # Payments
+    # ------------------------------------------------------------------ #
+    def create_payment(self, *, user_id: int, plan, reference: str,
+                       amount_minor: int, currency: str,
+                       provider: str = "flutterwave",
+                       checkout_url: str = "") -> m.Payment:
+        """Record an attempt *before* the customer leaves for the provider.
+
+        Written up front so the return leg and the webhook both have a row to
+        reconcile against, and so an abandoned checkout is visible to the admin
+        as a pending payment rather than vanishing.
+        """
+        row = m.Payment(user_id=user_id, plan_id=plan.id, plan_key=plan.key,
+                        reference=reference, provider=provider,
+                        amount_minor=int(amount_minor), currency=currency,
+                        status=m.PAY_PENDING, checkout_url=checkout_url or "")
+        self.session.add(row)
+        self.session.commit()
+        return row
+
+    def get_payment(self, payment_id: int) -> m.Payment | None:
+        return self.session.get(m.Payment, payment_id)
+
+    def get_payment_by_reference(self, reference: str) -> m.Payment | None:
+        if not reference:
+            return None
+        return self.session.execute(
+            select(m.Payment).where(m.Payment.reference == reference)
+        ).scalars().first()
+
+    def get_payment_by_provider_tx(self, provider_tx_id) -> m.Payment | None:
+        if not provider_tx_id:
+            return None
+        return self.session.execute(
+            select(m.Payment)
+            .where(m.Payment.provider_tx_id == str(provider_tx_id))
+        ).scalars().first()
+
+    def settle_payment(self, reference: str, *, provider_tx_id, amount_minor: int,
+                       currency: str, payload: dict) -> tuple[m.Payment | None, bool]:
+        """Move a pending payment to successful, **once**.
+
+        Returns ``(payment, first_time)``. ``first_time`` is False when the
+        payment was already settled, which is the replay signal: the caller must
+        not re-grant the subscription or re-send the receipt.
+
+        The guard is a conditional UPDATE — ``WHERE status = 'pending'`` — rather
+        than a read-then-write. Two webhook deliveries arriving on two threads
+        can both pass a read, but only one can win the update; the other sees
+        ``rowcount == 0``. The amount and currency are re-checked inside the same
+        statement's caller (see :mod:`app.payments`) against the plan price, so a
+        tampered charge cannot settle at a lower figure.
+        """
+        now = _utcnow()
+        result = self.session.execute(
+            update(m.Payment)
+            .where(m.Payment.reference == reference)
+            .where(m.Payment.status == m.PAY_PENDING)
+            .values(status=m.PAY_SUCCESSFUL, verified=True,
+                    provider_tx_id=str(provider_tx_id) if provider_tx_id else None,
+                    amount_minor=int(amount_minor), currency=currency,
+                    verification_json=payload or {}, paid_at=now, updated_at=now)
+        )
+        self.session.commit()
+        row = self.get_payment_by_reference(reference)
+        return row, result.rowcount == 1
+
+    def fail_payment(self, reference: str, reason: str = "") -> m.Payment | None:
+        """Mark a payment failed. Never touches an already-successful row.
+
+        A late failure notice for a payment that succeeded must not revoke a
+        subscription the customer paid for, so this refuses to move a settled
+        row and says so by returning it unchanged.
+        """
+        row = self.get_payment_by_reference(reference)
+        if row is None:
+            return None
+        if row.status == m.PAY_SUCCESSFUL:
+            return row
+        row.status = m.PAY_FAILED
+        row.failure_reason = (reason or "")[:500]
+        row.updated_at = _utcnow()
+        self.session.commit()
+        return row
+
+    def list_payments(self, *, user_id: int | None = None,
+                      status: str | None = None, limit: int = 200,
+                      ) -> list[m.Payment]:
+        stmt = select(m.Payment)
+        if user_id is not None:
+            stmt = stmt.where(m.Payment.user_id == user_id)
+        if status:
+            stmt = stmt.where(m.Payment.status == status)
+        return list(self.session.execute(
+            stmt.order_by(m.Payment.id.desc())
+            .limit(max(1, min(limit, 2000)))).scalars().all())
+
+    # ------------------------------------------------------------------ #
+    # In-app notifications
+    # ------------------------------------------------------------------ #
+    def notify(self, user_id: int, *, kind: str, title: str, body: str = "",
+               link: str = "") -> m.Notification:
+        row = m.Notification(user_id=user_id, kind=kind, title=title[:160],
+                             body=body, link=link)
+        self.session.add(row)
+        self.session.commit()
+        return row
+
+    def list_notifications(self, user_id: int, *, limit: int = 50,
+                           ) -> list[m.Notification]:
+        return list(self.session.execute(
+            select(m.Notification)
+            .where(m.Notification.user_id == user_id)
+            .order_by(m.Notification.id.desc())
+            .limit(max(1, min(limit, 200)))).scalars().all())
+
+    def unread_notification_count(self, user_id: int) -> int:
+        return int(self.session.execute(
+            select(func.count()).select_from(m.Notification)
+            .where(m.Notification.user_id == user_id)
+            .where(m.Notification.read_at.is_(None))).scalar_one())
+
+    def mark_notifications_read(self, user_id: int) -> int:
+        """Mark every notification read for one user. Scoped by user id.
+
+        The ``user_id`` predicate is not optional: without it this would mark
+        the whole table read, which is exactly the kind of ownership bug that
+        turns a "mark all read" button into a cross-account write.
+        """
+        result = self.session.execute(
+            update(m.Notification)
+            .where(m.Notification.user_id == user_id)
+            .where(m.Notification.read_at.is_(None))
+            .values(read_at=_utcnow()))
+        self.session.commit()
+        return int(result.rowcount or 0)
+
+    # ------------------------------------------------------------------ #
+    # Password resets
+    # ------------------------------------------------------------------ #
+    def create_password_reset(self, *, user_id: int, token_hash: str,
+                              expires_at: datetime) -> m.PasswordReset:
+        """Store a reset grant. Any earlier unused grant is invalidated first.
+
+        Superseding rather than accumulating means a user who clicks "forgot
+        password" three times has exactly one working link — the newest — which
+        is what they expect and shrinks the window an old email stays useful.
+        """
+        now = _utcnow()
+        for old in self.session.execute(
+                select(m.PasswordReset)
+                .where(m.PasswordReset.user_id == user_id)
+                .where(m.PasswordReset.used_at.is_(None))).scalars().all():
+            old.used_at = now
+        row = m.PasswordReset(user_id=user_id, token_hash=token_hash,
+                              expires_at=expires_at)
+        self.session.add(row)
+        self.session.commit()
+        return row
+
+    def consume_password_reset(self, token_hash: str) -> m.User | None:
+        """Redeem a reset grant, once. Returns the user it belonged to.
+
+        The claim is a conditional UPDATE on ``used_at IS NULL``, so two
+        submissions of the same link cannot both succeed — the second sees
+        ``rowcount == 0`` and is refused. An expired or already-used token, or
+        one for a deleted account, returns ``None``.
+        """
+        row = self.session.execute(
+            select(m.PasswordReset)
+            .where(m.PasswordReset.token_hash == token_hash)
+        ).scalars().first()
+        if row is None or row.expires_at <= _utcnow():
+            return None
+
+        result = self.session.execute(
+            update(m.PasswordReset)
+            .where(m.PasswordReset.id == row.id)
+            .where(m.PasswordReset.used_at.is_(None))
+            .values(used_at=_utcnow()))
+        self.session.commit()
+        if result.rowcount != 1:
+            return None
+        return self.get_user(row.user_id)
+
+    def purge_expired_password_resets(self, *, older_than_days: int = 7) -> int:
+        """Housekeeping: drop grants that are long dead."""
+        cutoff = _utcnow() - timedelta(days=max(1, older_than_days))
+        result = self.session.execute(
+            delete(m.PasswordReset).where(m.PasswordReset.expires_at < cutoff))
+        self.session.commit()
+        return int(result.rowcount or 0)
+
+    # ------------------------------------------------------------------ #
+    # Account maintenance (self-service profile + admin edits)
+    # ------------------------------------------------------------------ #
+    #: Columns a user may change about themselves. Role, status, password and
+    #: subscription are absent on purpose: those are exactly the fields the brief
+    #: says a user must not be able to set for themselves.
+    SELF_EDITABLE = ("display_name", "email", "phone", "country", "avatar_path")
+
+    #: What an *administrator* may edit on any account: everything the account
+    #: holder may edit about themselves, plus the fields that are the operator's
+    #: and not the user's. ``notes`` is the only one so far — an internal
+    #: remark about a client that the client must never see, which is exactly
+    #: why it is not in ``SELF_EDITABLE``.
+    #:
+    #: Note what is absent from both lists and must stay absent: ``role``,
+    #: ``status`` and ``password_hash``. Each has its own method
+    #: (:meth:`set_user_role`, :meth:`set_user_status`,
+    #: :meth:`set_user_password`) with its own validation, so there is no way to
+    #: write one of them by putting an extra field in a profile form.
+    ADMIN_EDITABLE = SELF_EDITABLE + ("notes",)
+
+    def update_user(self, user_id: int, **fields) -> m.User | None:
+        """Update a user's own profile fields. Unknown keys are ignored.
+
+        Ignoring rather than raising matches :meth:`update_client_profile`: a
+        form field added in a template must never be able to break the save, and
+        — more importantly — must never be able to write a column it was not
+        meant to.
+        """
+        return self._update_user_fields(user_id, fields, self.SELF_EDITABLE)
+
+    def update_user_as_admin(self, user_id: int, **fields) -> m.User | None:
+        """Update a user's profile as an administrator.
+
+        Same contract as :meth:`update_user` against the wider
+        :data:`ADMIN_EDITABLE` set. Kept as a separate method rather than a flag
+        on the first one so that the two permission levels cannot be confused at
+        a call site: which one was called is the whole decision.
+        """
+        return self._update_user_fields(user_id, fields, self.ADMIN_EDITABLE)
+
+    def _update_user_fields(self, user_id: int, fields: dict,
+                            allowed: tuple[str, ...]) -> m.User | None:
+        row = self.get_user(user_id)
+        if row is None:
+            return None
+        for field, value in fields.items():
+            if field in allowed:
+                setattr(row, field, value)
+        row.updated_at = _utcnow()
+        self.session.commit()
+        return row
+
+    def set_user_role(self, user_id: int, role: str) -> m.User | None:
+        """Change a role. Only the two declared roles are accepted."""
+        if role not in m.ROLES:
+            return None
+        row = self.get_user(user_id)
+        if row is None:
+            return None
+        row.role = role
+        row.updated_at = _utcnow()
+        self.session.commit()
+        return row
+
+    def soft_delete_user(self, user_id: int) -> m.User | None:
+        """Remove an account without destroying its financial history.
+
+        A hard DELETE would either orphan the user's payments and subscriptions
+        or cascade them away — and those are the records an operator needs if a
+        charge is ever disputed. Marking the row instead keeps the audit trail
+        intact while making the account unreachable: :meth:`get_user` reports it
+        absent, so any open session stops resolving on its very next request.
+
+        Also expires any live subscription, so a deleted account is not still
+        holding a plan that counts toward the platform's active figures.
+        """
+        row = self.session.get(m.User, user_id)
+        if row is None:
+            return None
+        now = _utcnow()
+        row.deleted_at = now
+        row.updated_at = now
+        row.status = m.STATUS_SUSPENDED
+        for sub in self.session.execute(
+                select(m.Subscription)
+                .where(m.Subscription.user_id == user_id)
+                .where(m.Subscription.status == m.SUB_ACTIVE)).scalars().all():
+            sub.status = m.SUB_EXPIRED
+            sub.updated_at = now
+        self.session.commit()
+        return row
+
+    def restore_user(self, user_id: int) -> m.User | None:
+        row = self.session.get(m.User, user_id)
+        if row is None:
+            return None
+        row.deleted_at = None
+        row.status = m.STATUS_ACTIVE
+        row.updated_at = _utcnow()
+        self.session.commit()
+        return row
+
+    # ------------------------------------------------------------------ #
+    # Platform statistics (admin dashboard)
+    #
+    # Every figure is a COUNT over stored rows. Nothing here is estimated,
+    # extrapolated or invented — a number the operator cannot reconcile against
+    # a table is worse than no number.
+    # ------------------------------------------------------------------ #
+    def platform_stats(self) -> dict:
+        now = _utcnow()
+        users = select(func.count()).select_from(m.User)
+        live_users = users.where(m.User.deleted_at.is_(None))
+        stats: dict[str, int] = {
+            "users_total": int(self.session.execute(live_users).scalar_one()),
+            "users_active": int(self.session.execute(
+                live_users.where(m.User.status == m.STATUS_ACTIVE)).scalar_one()),
+            "users_suspended": int(self.session.execute(
+                live_users.where(m.User.status == m.STATUS_SUSPENDED)).scalar_one()),
+            "admins": int(self.session.execute(
+                live_users.where(m.User.role == m.ROLE_ADMIN)).scalar_one()),
+            "users_deleted": int(self.session.execute(
+                users.where(m.User.deleted_at.is_not(None))).scalar_one()),
+        }
+
+        # Live subscriptions per plan, from the subscriptions table.
+        live_sub = (select(func.count()).select_from(m.Subscription)
+                    .where(m.Subscription.status == m.SUB_ACTIVE)
+                    .where(or_(m.Subscription.expires_at.is_(None),
+                               m.Subscription.expires_at > now)))
+        for key in ("basic", "premium", "vip"):
+            stats[f"subscribers_{key}"] = int(self.session.execute(
+                live_sub.where(m.Subscription.plan_key == key)).scalar_one())
+        stats["subscriptions_active"] = int(self.session.execute(
+            live_sub).scalar_one())
+        stats["subscriptions_total"] = int(self.session.execute(
+            select(func.count()).select_from(m.Subscription)).scalar_one())
+
+        # Payments by state, plus realised revenue in minor units.
+        for state in m.PAYMENT_STATES:
+            stats[f"payments_{state}"] = int(self.session.execute(
+                select(func.count()).select_from(m.Payment)
+                .where(m.Payment.status == state)).scalar_one())
+        stats["revenue_minor"] = int(self.session.execute(
+            select(func.coalesce(func.sum(m.Payment.amount_minor), 0))
+            .where(m.Payment.status == m.PAY_SUCCESSFUL)).scalar_one() or 0)
+        stats["payments_total"] = int(self.session.execute(
+            select(func.count()).select_from(m.Payment)).scalar_one())
+        return stats
 
 
 def iter_session(settings: Settings | None = None) -> Iterator[Session]:

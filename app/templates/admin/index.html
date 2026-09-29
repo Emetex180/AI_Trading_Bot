@@ -37,6 +37,62 @@
   {{ stat('Backtests', counts.backtests, '') }}
 </div>
 
+{# Billing. Kept separate from the trading figures above because they answer a
+   different question, and because an operator checking "is anyone paying?"
+   should not have to read past setup counts to find out. #}
+<div class="card mb-4">
+  <div class="card-header">
+    <span>Subscriptions and revenue</span>
+    <span class="card-header-note">
+      <a href="{{ url_for('admin.payments') }}">All payments</a>
+      ·
+      <a href="{{ url_for('admin.subscriptions') }}">All subscriptions</a>
+    </span>
+  </div>
+  <div class="card-body">
+    {% if not payments_configured %}
+    {# An empty billing panel means one of two opposite things, so it says
+       which. Otherwise an operator cannot tell "nobody has bought anything"
+       from "nothing can be bought". #}
+    <p class="setup-meta mb-3">
+      <strong>Card payments are not configured on this deployment.</strong>
+      <code>FLUTTERWAVE_SECRET_KEY</code> and <code>FLUTTERWAVE_PUBLIC_KEY</code>
+      are not both set, so the checkout is disabled and no payment can be
+      started. These figures count bought subscriptions only, so with the
+      checkout off they can only be zero — an account with a hand-granted plan
+      is not a subscription row and does not appear here. Those show as each
+      account's <em>effective plan</em> on its own page.
+    </p>
+    {% endif %}
+
+    <div class="stat-grid">
+      {{ stat('Active subscriptions', stats.subscriptions_active, 'success',
+              'bought · ' ~ stats.subscribers_basic ~ ' basic · '
+              ~ stats.subscribers_premium ~ ' premium · '
+              ~ stats.subscribers_vip ~ ' vip') }}
+      {{ stat('Payments attempted', stats.payments_total, '',
+              stats.payments_successful ~ ' succeeded') }}
+      {{ stat('Successful payments', stats.payments_successful, 'info',
+              stats.payments_pending ~ ' pending · '
+              ~ stats.payments_failed ~ ' failed') }}
+      {{ stat('Removed accounts', stats.users_deleted, '',
+              'kept for their payment history') }}
+    </div>
+
+    {# Amounts per currency, never summed across them: adding NGN to USD gives a
+       number that is not money in either currency, and a wrong total on a
+       revenue panel is worse than no total. #}
+    <div class="mt-3">
+      <div class="setup-meta mb-1">Collected, by currency</div>
+      {% for code, minor in revenue_by_currency.items() %}
+      <span class="badge tone-success">{{ format_minor(minor, code) }}</span>
+      {% else %}
+      <span class="setup-meta">No successful payment has been recorded.</span>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
 <div class="row g-3">
   <div class="col-12 col-xl-7">
     <div class="card mb-3">

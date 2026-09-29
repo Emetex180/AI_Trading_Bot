@@ -1,0 +1,179 @@
+{% extends "client/base.html" %}
+{% block title %}Settings{% endblock %}
+
+{# The one page in the client area that is about the person rather than the
+   market. Three sections, each its own card and its own form, so saving one
+   cannot silently discard another — a single form with three submits is how a
+   display name gets reverted because the password change failed. #}
+
+{% block content %}
+<div class="d-flex align-items-start justify-content-between flex-wrap gap-3 mb-3">
+  <div>
+    <h1 class="h4 mb-1">Settings</h1>
+    <p class="setup-meta mb-0">Your account details, picture and password.</p>
+  </div>
+  <a class="btn btn-outline-secondary btn-sm"
+     href="{{ url_for('subscription.index') }}">Subscription</a>
+</div>
+
+<div class="row g-4">
+
+  {# ---------------------------------------------------------------- #
+     Profile picture
+     ---------------------------------------------------------------- #}
+  <div class="col-12 col-lg-4">
+    <div class="card h-100">
+      <div class="card-header">
+        <span>Profile picture</span>
+      </div>
+      <div class="card-body">
+        <div class="avatar-panel">
+          {% set src = avatar_url(user) %}
+          {% if src %}
+            <img class="avatar-img" src="{{ src }}" alt="Your profile picture"
+                 width="96" height="96">
+          {% else %}
+            {# No picture set: initials rather than a placeholder image, so there
+               is never a broken-icon request and never a stock face standing in
+               for a real person. #}
+            <span class="avatar-img avatar-initials" aria-hidden="true">
+              {{ (user.display_name or user.username)[:1] | upper }}
+            </span>
+          {% endif %}
+          <div class="setup-meta">
+            PNG, JPEG, GIF, WebP or BMP, up to {{ avatar_max_mb }} MiB.
+            Other formats — SVG included — are not accepted.
+          </div>
+        </div>
+
+        <form method="post" action="{{ url_for('profile.avatar_upload') }}"
+              enctype="multipart/form-data" class="mt-3">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <label class="form-label" for="avatar">Choose a new picture</label>
+          <input class="form-control form-control-sm mb-2" id="avatar"
+                 name="avatar" type="file"
+                 accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+                 required>
+          <button class="btn btn-primary btn-sm" type="submit">Upload</button>
+        </form>
+
+        {% if src %}
+        <form method="post" action="{{ url_for('profile.avatar_remove') }}"
+              class="mt-2">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="btn btn-outline-danger btn-sm" type="submit">
+            Remove picture
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  {# ---------------------------------------------------------------- #
+     Personal details
+     ---------------------------------------------------------------- #}
+  <div class="col-12 col-lg-8">
+    <div class="card">
+      <div class="card-header">
+        <span>Your details</span>
+        <span class="card-header-note">
+          Signed in as {{ user.username }}
+        </span>
+      </div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('profile.settings_post') }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+
+          <div class="row g-3">
+            <div class="col-12 col-md-6">
+              <label class="form-label" for="display_name">Name</label>
+              <input class="form-control" id="display_name" name="display_name"
+                     type="text" maxlength="128" autocomplete="name"
+                     value="{{ user.display_name or '' }}">
+              <div class="form-text">What we call you. Left blank, your username is used.</div>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <label class="form-label" for="email">Email address</label>
+              <input class="form-control" id="email" name="email" type="email"
+                     maxlength="254" autocomplete="email" spellcheck="false"
+                     required value="{{ user.email or '' }}">
+              <div class="form-text">Used to sign in and for payment receipts.</div>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <label class="form-label" for="phone">Phone</label>
+              <input class="form-control" id="phone" name="phone" type="tel"
+                     maxlength="32" autocomplete="tel"
+                     value="{{ user.phone or '' }}">
+              <div class="form-text">Optional.</div>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <label class="form-label" for="country">Country</label>
+              <input class="form-control" id="country" name="country" type="text"
+                     maxlength="64" autocomplete="country-name"
+                     value="{{ user.country or '' }}">
+              <div class="form-text">Optional.</div>
+            </div>
+          </div>
+
+          {# Stated rather than left implicit, because a reader who cannot find a
+             field will wonder whether it is hidden somewhere. #}
+          <p class="setup-meta mt-3 mb-3">
+            Your username, role and plan are not editable here. Ask an
+            administrator if any of them needs to change.
+          </p>
+
+          <button class="btn btn-primary" type="submit">Save details</button>
+        </form>
+      </div>
+    </div>
+
+    {# ---------------------------------------------------------------- #
+       Password
+       ---------------------------------------------------------------- #}
+    <div class="card mt-4">
+      <div class="card-header">
+        <span>Password</span>
+      </div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('profile.password_change') }}"
+              autocomplete="off">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+
+          <div class="mb-3">
+            <label class="form-label" for="current_password">Current password</label>
+            <input class="form-control" id="current_password"
+                   name="current_password" type="password" required
+                   autocomplete="current-password">
+          </div>
+
+          <div class="row g-3">
+            <div class="col-12 col-md-6">
+              <label class="form-label" for="new_password">New password</label>
+              <input class="form-control" id="new_password" name="new_password"
+                     type="password" required autocomplete="new-password">
+            </div>
+
+            <div class="col-12 col-md-6">
+              <label class="form-label" for="confirm_password">Confirm new password</label>
+              <input class="form-control" id="confirm_password"
+                     name="confirm_password" type="password" required
+                     autocomplete="new-password">
+            </div>
+          </div>
+
+          <p class="setup-meta mt-3 mb-3">
+            Changing your password signs out every other device. This one stays
+            signed in.
+          </p>
+
+          <button class="btn btn-primary" type="submit">Change password</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

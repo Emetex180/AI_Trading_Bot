@@ -1,0 +1,77 @@
+{% extends "client/base.html" %}
+{% block title %}Payment history{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-start justify-content-between flex-wrap gap-3 mb-3">
+  <div>
+    <h1 class="h4 mb-1">Payment history</h1>
+    <p class="setup-meta mb-0">
+      Every payment attempt on this account, successful or not.
+    </p>
+  </div>
+  <a class="btn btn-outline-secondary btn-sm"
+     href="{{ url_for('subscription.index') }}">Subscription</a>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    {% if rows %}
+    <div class="table-responsive">
+      <table class="table align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Reference</th>
+            <th>Plan</th>
+            <th>Amount</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Paid</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            {# The reference is what a support conversation needs, so it is shown
+               in full rather than truncated. It identifies a transaction; it is
+               not a credential. #}
+            <td class="mono" style="font-size:.75rem;">{{ row.reference }}</td>
+            <td>{{ row.plan_key }}</td>
+            <td>{{ format_minor(row.amount_minor, row.currency) }}</td>
+            <td>
+              <span class="pill {{ 'tone-success' if row.status == 'successful' else ('tone-danger' if row.status == 'failed' else 'tone-secondary') }}">
+                <span class="dot"></span>{{ row.status }}
+              </span>
+              {% if row.status == 'failed' and row.failure_reason %}
+              {# Shown because "why did my card not work" is the question this
+                 page exists to answer. The reason is a description written by
+                 the provider or by us, never anything sensitive. #}
+              <div class="setup-meta" style="font-size:.72rem;">{{ row.failure_reason }}</div>
+              {% endif %}
+            </td>
+            <td class="setup-meta">{{ row.created_at | ny if row.created_at else '—' }}</td>
+            <td class="setup-meta">{{ row.paid_at | ny if row.paid_at else '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="mb-0">
+      No payments have been made on this account yet.
+      {% if entitlement.is_active %}
+        Your current plan was granted by an administrator.
+      {% else %}
+        <a href="{{ url_for('subscription.index') }}">Choose a plan</a> to get
+        started.
+      {% endif %}
+    </p>
+    {% endif %}
+  </div>
+</div>
+
+<p class="setup-meta mt-3">
+  A payment is only marked successful after it has been confirmed directly with
+  the payment provider. A pending payment means the checkout was opened and not
+  completed — nothing has been charged for it.
+</p>
+{% endblock %}

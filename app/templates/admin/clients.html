@@ -5,8 +5,10 @@
 <div class="client-hero">
   <div>
     <h1>Clients</h1>
-    <p>Accounts are created here. There is no public sign-up — an account exists
-       only because an admin made it.</p>
+    <p>Accounts created here, and accounts people created for themselves with
+       the public sign-up form. Both appear in the same list — a self-registered
+       account is no less an account, and an operator looking for a customer
+       should not have to know which of the two they are looking at.</p>
   </div>
 </div>
 
@@ -68,30 +70,111 @@
   </div>
 </div>
 
+{# ---------------------------------------------------------------- #
+   Search and filters.
+
+   A GET form, so the filtered view is a URL that can be bookmarked or sent to
+   a colleague. The filtering itself runs in SQL (Repository.search_users)
+   rather than here: a page that renders every account and then hides most of
+   them has still read every account.
+   ---------------------------------------------------------------- #}
 <div class="card mb-4">
   <div class="card-header">
-    <span>Clients</span>
-    <span class="card-header-note">{{ clients | length }} account{{ '' if clients | length == 1 else 's' }}</span>
+    <span>Find an account</span>
+    {% if filtering %}
+    <span class="card-header-note">
+      Showing {{ totals.shown }} of {{ totals.all }}
+      · <a href="{{ url_for('admin.clients') }}">Clear</a>
+    </span>
+    {% else %}
+    <span class="card-header-note">{{ totals.all }} account{{ '' if totals.all == 1 else 's' }}</span>
+    {% endif %}
+  </div>
+  <div class="card-body">
+    <form method="get" action="{{ url_for('admin.clients') }}" class="row g-3">
+      <div class="col-12 col-md-4">
+        <label class="form-label" for="f-q">Search</label>
+        <input class="form-control" id="f-q" name="q" type="search"
+               value="{{ filters.q }}" placeholder="username, name or email"
+               autocomplete="off">
+      </div>
+
+      <div class="col-6 col-md-2">
+        <label class="form-label" for="f-role">Role</label>
+        <select class="form-select" id="f-role" name="role">
+          <option value="">Any</option>
+          <option value="client" {{ 'selected' if filters.role == 'client' }}>Client</option>
+          <option value="admin" {{ 'selected' if filters.role == 'admin' }}>Admin</option>
+        </select>
+      </div>
+
+      <div class="col-6 col-md-2">
+        <label class="form-label" for="f-plan">Plan</label>
+        <select class="form-select" id="f-plan" name="plan">
+          <option value="">Any</option>
+          {% for p in plans %}
+          <option value="{{ p.key }}" {{ 'selected' if filters.plan == p.key }}>{{ p.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="col-6 col-md-2">
+        <label class="form-label" for="f-status">Status</label>
+        <select class="form-select" id="f-status" name="status">
+          <option value="">Any</option>
+          {% for s in statuses %}
+          <option value="{{ s }}" {{ 'selected' if filters.status == s }}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="col-6 col-md-2 d-flex align-items-end">
+        <div class="form-check">
+          <input class="form-check-input" id="f-deleted" name="deleted" type="checkbox"
+                 value="1" {{ 'checked' if filters.deleted }}>
+          <label class="form-check-label" for="f-deleted">Removed only</label>
+        </div>
+      </div>
+
+      <div class="col-12">
+        <button class="btn btn-primary" type="submit">Search</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header">
+    <span>{{ 'Matching accounts' if filtering else 'Clients' }}</span>
+    <span class="card-header-note">{{ clients | length }} shown</span>
   </div>
   <div class="table-scroll">
     <table class="table">
       <thead>
         <tr>
-          <th>Username</th><th>Name</th><th>Email</th><th>Status</th>
-          <th>Subscription</th><th>Last sign-in (NY)</th><th>Created (NY)</th>
+          <th>Username</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th>
+          <th>Plan</th><th>Last sign-in (NY)</th><th>Created (NY)</th>
         </tr>
       </thead>
       <tbody>
         {% for c in clients %}
         <tr class="row-highlight">
-          <td><a class="row-link" href="{{ url_for('admin.client_detail', user_id=c.id) }}">{{ c.username }}</a></td>
+          <td>
+            <a class="row-link" href="{{ url_for('admin.client_detail', user_id=c.id) }}">{{ c.username }}</a>
+            {% if c.is_deleted %}<span class="badge tone-danger">removed</span>{% endif %}
+          </td>
           <td>{{ c.display_name }}</td>
           <td class="setup-meta">{{ c.email or '—' }}</td>
+          <td class="setup-meta">{{ c.role }}</td>
           <td>
             <span class="badge tone-{{ 'success' if c.is_active else 'danger' }}">{{ c.status }}</span>
           </td>
           <td>
-            {{ c.subscription_status }}
+            {# The plan the account can actually use, read the same way the
+               access layer reads it. ``subscription_plan`` on its own would
+               show an admin-granted plan even when a purchased one has
+               superseded it. #}
+            {{ c.effective_plan_name or c.subscription_status }}
             {%- if c.subscription_expires_ny %}
             <span class="setup-meta">to {{ c.subscription_expires_ny }}</span>
             {%- endif %}
@@ -100,7 +183,11 @@
           <td class="mono">{{ c.created_at_ny }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="7" class="empty-state">No client accounts yet.</td></tr>
+        <tr><td colspan="8" class="empty-state">
+          {% if filtering %}No account matches those filters.
+            <a href="{{ url_for('admin.clients') }}">Clear them</a> to see everyone.
+          {% else %}No client accounts yet.{% endif %}
+        </td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -112,22 +199,28 @@
     <span>Administrators</span>
     <span class="card-header-note">{{ admins | length }}</span>
   </div>
+  <p class="setup-meta px-3 pt-3 mb-0">
+    Administrator accounts are not filtered by the search above, so this list
+    always shows every one of them — the account that can delete users should
+    not be able to be hidden from the page that lists users.
+  </p>
   <div class="table-scroll">
     <table class="table">
       <thead>
-        <tr><th>Username</th><th>Name</th><th>Status</th><th>Created (NY)</th><th>Created by</th></tr>
+        <tr><th>Username</th><th>Name</th><th>Email</th><th>Status</th><th>Created (NY)</th><th>Created by</th></tr>
       </thead>
       <tbody>
         {% for a in admins %}
         <tr class="row-highlight">
           <td><a class="row-link" href="{{ url_for('admin.client_detail', user_id=a.id) }}">{{ a.username }}</a></td>
           <td>{{ a.display_name }}</td>
+          <td class="setup-meta">{{ a.email or '—' }}</td>
           <td><span class="badge tone-{{ 'success' if a.is_active else 'danger' }}">{{ a.status }}</span></td>
           <td class="mono">{{ a.created_at_ny }}</td>
           <td class="setup-meta">{{ a.created_by }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="5" class="empty-state">No administrators.</td></tr>
+        <tr><td colspan="6" class="empty-state">No administrators.</td></tr>
         {% endfor %}
       </tbody>
     </table>

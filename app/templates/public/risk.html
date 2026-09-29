@@ -1,0 +1,112 @@
+{% extends "public/base.html" %}
+{% block page_title %}Risk disclaimer · 3rader{% endblock %}
+{% block page_description %}Trading carries a high risk of loss. 3rader provides analysis, not advice, and guarantees no outcome.{% endblock %}
+
+{% block body %}
+<div class="mk-wrap">
+  <article class="mk-doc">
+    <h1>Risk disclaimer</h1>
+    <p class="mk-doc-date">
+      Last updated {{ ny_year }}. This page is part of the
+      <a href="{{ url_for('public.terms') }}">terms of service</a> and applies to
+      everything 3rader publishes.
+    </p>
+
+    <div class="mk-callout is-warning">
+      <p>
+        <strong>Trading can lose you money, including more than you deposit.</strong>
+        Do not trade with money you cannot afford to lose. If you are unsure
+        whether trading is suitable for you, seek independent advice from someone
+        qualified to give it.
+      </p>
+    </div>
+
+    <h2>Leverage magnifies losses as well as gains</h2>
+    <p>
+      Foreign exchange, CFDs, futures, indices and cryptocurrency are leveraged
+      products. A small move in the underlying market can produce a large move in
+      the value of a position, against you as readily as for you. Losses can
+      exceed the balance on the account, and you may be required to deposit
+      further funds.
+    </p>
+
+    <h2>No advice</h2>
+    <p>
+      3rader publishes the output of a mechanical model applied to market data.
+      That is analysis and education, not financial, investment, legal or tax
+      advice. Nothing published by 3rader is a personal recommendation, and
+      nothing takes account of your financial position, your objectives, your
+      existing exposure or your tolerance for risk.
+    </p>
+    <p>
+      No member of the 3rader team is acting as your adviser, and no
+      adviser-client relationship is created by your subscription. Before acting
+      on anything here you should consider whether it is appropriate for your own
+      circumstances, and take independent advice if you are unsure.
+    </p>
+
+    <h2>No guarantee of performance</h2>
+    <p>
+      <strong>No outcome is promised or implied.</strong> 3rader makes no claim
+      about win rate, profit, return on capital or the probability of any
+      particular result. There is no such thing as a guaranteed trade, and anyone
+      who tells you otherwise is misleading you.
+    </p>
+
+    <h2>Past performance</h2>
+    <p>
+      Historical results — including anything shown in the platform's own history
+      or reporting — are not a reliable indicator of future results. Market
+      conditions change. A model that performed in one regime may not perform in
+      another, and a record assembled over one period says little about the next.
+    </p>
+
+    <h2>Execution, slippage and costs</h2>
+    <p>
+      3rader does not execute trades. What happens after you act is between you and
+      your broker. The price you receive may differ from any level published here:
+      spreads widen, orders slip, gaps occur, and markets can move faster than an
+      order can be filled. Your broker's commissions, financing and spreads are
+      costs that reduce any return and are outside our control.
+    </p>
+
+    <h2>Data and availability</h2>
+    <p>
+      Analysis depends on market data feeds and on the platform being reachable.
+      Both can fail, be delayed or be interrupted. Published levels may be based
+      on data that is later revised, and the platform may be unavailable during
+      periods you would want it — including during fast markets.
+    </p>
+
+    <h2>Signals are not a system</h2>
+    <p>
+      A signal is one input to a decision, not a complete trading plan. A signal
+      without position sizing, a stop, a defined risk per trade and a limit on
+      total exposure is not a strategy. Managing those is your responsibility, and
+      a series of losses is a normal part of any trading method.
+    </p>
+
+    <h2>Your responsibility</h2>
+    <p>
+      Every trading decision you take is yours. You are solely responsible for the
+      consequences of those decisions, including any loss. By using 3rader you
+      confirm that you have read and understood this disclaimer and the
+      <a href="{{ url_for('public.terms') }}">terms of service</a>, and that you
+      accept them.
+    </p>
+
+    <h2>If you are struggling</h2>
+    <p>
+      If trading is causing you financial difficulty or distress, stop. Consider
+      speaking to a qualified financial adviser or a debt counselling service, and
+      look into the self-exclusion arrangements your broker is required to offer.
+    </p>
+
+    <h2>Contact</h2>
+    <p>
+      Questions about this disclaimer:
+      <a href="mailto:{{ support_email }}">{{ support_email }}</a>.
+    </p>
+  </article>
+</div>
+{% endblock %}
