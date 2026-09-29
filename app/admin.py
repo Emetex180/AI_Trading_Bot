@@ -301,6 +301,7 @@ def client_detail(user_id: int):
         broker_links=[broker_row(a, repo) for a in links],
         integrations=ba.integration_status(),
         statuses=(m.STATUS_ACTIVE, m.STATUS_SUSPENDED),
+        roles=m.ROLES,
         subscriptions=m.SUBSCRIPTION_STATES,
         min_password=_cfg().min_password_length,
         entitlement=entitlement_for(user, repo),
@@ -561,6 +562,68 @@ def set_client_details(user_id: int):
                    f"{current_user().username} edited the details of "
                    f"{user.username!r}")
     flash("Client details updated.", "success")
+    return redirect(url_for("admin.client_detail", user_id=user_id))
+
+
+@admin_bp.post("/clients/<int:user_id>/role")
+@admin_required
+def set_client_role(user_id: int):
+    """Change an account's role, between the two roles the platform declares.
+
+    Narrow like every other mutation here — one field, one endpoint — and the
+    reference :func:`set_client_details` makes to it is now a real route.
+
+    Three guards, and the third is the one that cannot be left to the interface:
+
+    * **Admin-only.** :func:`app.auth.admin_required` answers a client calling
+      this endpoint directly with a flat 403, so nothing here depends on the
+      button merely not being rendered.
+    * **Only a declared role is accepted.** ``m.ROLES`` is the same tuple the
+      guard and the schema use. An unknown value is refused rather than coerced,
+      so a crafted POST cannot write one no other part of the platform
+      understands.
+    * **An admin cannot demote themselves.** The check is on the session's user
+      id, not on a form field, so it cannot be posted around. The detail page
+      also disables the control on the operator's own account, but that is a
+      convenience; this is the rule.
+
+    Recorded at ``WARN``, like the other privilege-shaped mutations here: the
+    line names the actor, the target and both roles, because "who changed whose
+    access, and when" is the question an audit trail exists to answer. No
+    credential of any kind is written to it.
+    """
+    denied = _deny_unless_csrf()
+    if denied is not None:
+        return denied
+
+    repo = g.repo
+    user = repo.get_user(user_id)
+    if user is None:
+        abort(404)
+
+    wanted = (request.form.get("role") or "").strip().lower()
+    if wanted not in m.ROLES:
+        flash("Unknown role.", "danger")
+        return redirect(url_for("admin.client_detail", user_id=user_id))
+
+    actor = current_user()
+    # Refused rather than flashed about as a warning: an admin who removes their
+    # own admin role locks the deployment out of its own administration, and
+    # there is no route back in except the command line.
+    if user.id == actor.id and wanted != m.ROLE_ADMIN:
+        flash("You cannot remove your own administrator role.", "danger")
+        return redirect(url_for("admin.client_detail", user_id=user_id))
+
+    previous = user.role
+    if previous == wanted:
+        flash(f"{user.username} is already {wanted}.", "info")
+        return redirect(url_for("admin.client_detail", user_id=user_id))
+
+    repo.set_user_role(user_id, wanted)
+    repo.log_event("WARN", "admin",
+                   f"{actor.username} changed the role of {user.username!r} "
+                   f"from {previous} to {wanted}")
+    flash(f"{user.username} is now {wanted}.", "success")
     return redirect(url_for("admin.client_detail", user_id=user_id))
 
 

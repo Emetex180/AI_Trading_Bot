@@ -96,6 +96,47 @@
     </div>
 
     <div class="card mb-3">
+      <div class="card-header"><span>Role</span></div>
+      <div class="card-body">
+        <p class="setup-meta">
+          Current role:
+          <span class="badge tone-{{ 'info' if c.role == 'admin' else 'secondary' }}">{{ c.role }}</span>
+          {% if c.role == 'admin' %}
+          — this account can reach the whole administration area.
+          {% else %}
+          — this account can reach only the client platform.
+          {% endif %}
+        </p>
+        {% if current_user and current_user.id == c.id %}
+        {# The control is not rendered on the operator's own account, because a
+           demotion here is the one mistake that cannot be undone from inside the
+           app. It is also refused server-side, so disabling it is a courtesy
+           rather than the protection. #}
+        <p class="setup-meta mb-0">
+          This is the account you are signed in with, so its administrator role
+          cannot be removed — not from here, and not by posting the form
+          directly.
+        </p>
+        {% else %}
+        <form method="post" action="{{ url_for('admin.set_client_role', user_id=c.id) }}"
+              class="d-flex flex-wrap align-items-end gap-2"
+              onsubmit="return confirm('Change this account to ' + this.elements['role'].value + '? This takes effect immediately.');">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <div>
+            <label class="form-label" for="r-role">Role</label>
+            <select class="form-select form-select-sm" id="r-role" name="role">
+              {% for r in roles %}
+              <option value="{{ r }}" {{ 'selected' if c.role == r }}>{{ r }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <button class="btn btn-sm btn-primary" type="submit">Apply</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card mb-3">
       <div class="card-header"><span>Subscription</span></div>
       <div class="card-body">
         <form method="post" action="{{ url_for('admin.set_client_profile', user_id=c.id) }}"
@@ -305,9 +346,9 @@
         {# Stated rather than omitted, so an operator does not go looking for a
            field that was left out on purpose. #}
         <p class="setup-meta mt-3 mb-0">
-          Username, role and password are not editable here. Status is set above,
-          the subscription below, and the password has its own form — each has one
-          job so that changing one cannot change another.
+          Username and password are not editable here. Status, role and the
+          subscription each have their own form above, and the password has its
+          own — each has one job so that changing one cannot change another.
         </p>
       </div>
     </div>

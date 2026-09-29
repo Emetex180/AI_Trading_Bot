@@ -69,6 +69,19 @@
   --bs-focus-ring-color: rgba(var(--rgb-accent), .45);
 }
 
+/* Primary buttons. app.css hard-codes an indigo hover and active
+   (#5457e5 / #4f46e5) rather than deriving them from --c-accent, so the token
+   re-point above cannot reach them and a brand-blue button flashed purple the
+   moment it was hovered — on the login, register, pricing and CTA buttons,
+   which are the most brand-visible controls on the platform. Re-pointed here at
+   the same specificity, which is what loading last is for. */
+.btn-primary {
+  --bs-btn-hover-bg: var(--c-accent-soft);
+  --bs-btn-hover-border-color: var(--c-accent-soft);
+  --bs-btn-active-bg: #0090DB;
+  --bs-btn-active-border-color: #0090DB;
+}
+
 /* A link on the dark surface needs the brighter accent to stay readable at
    body size; --c-accent is tuned for fills and borders. */
 a {

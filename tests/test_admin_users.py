@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from app.plans import format_minor, get_plan, spec_rows
 from database import models as m
 
 from test_admin_pages import _admin, _app, _body, _make_client, _post, _repo
-from test_web import _CSRF, _PASSWORD, _grant
+from test_web import _CSRF, _PASSWORD, _grant, _sign_in
 
 
 def _failed_payment(repo, user, reference="r-fail", reason="Insufficient funds"):
@@ -271,6 +273,232 @@ def test_an_edit_without_a_csrf_token_is_refused():
 
     repo.session.expire_all()
     assert repo.get_user(alice.id).email == "alice@example.com"
+
+
+# --------------------------------------------------------------------------- #
+# Changing a role
+#
+# The endpoint is narrow (one field), admin-only, CSRF-checked and POST-only, and
+# it must not be a way for an admin to lock the deployment out of its own
+# administration. Each of those is asserted here rather than inferred from the
+# template, because the template is not the gate.
+# --------------------------------------------------------------------------- #
+def test_an_admin_can_promote_a_client():
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    _post(client, f"/admin/clients/{target.id}/role", role=m.ROLE_ADMIN)
+
+    repo.session.expire_all()
+    assert repo.get_user(target.id).role == m.ROLE_ADMIN
+
+
+def test_an_admin_can_demote_another_admin():
+    """The policy permits it — nothing here guards a last remaining admin — and
+    it takes effect on the target's very next request, because the role is
+    re-read from the database rather than carried in the session."""
+    repo = _repo()
+    client = _admin(repo)
+
+    victim = _app(repo).test_client()
+    other = _sign_in(victim, repo, role=m.ROLE_ADMIN, username="second")
+    assert victim.get("/admin/clients").status_code == 200
+
+    _post(client, f"/admin/clients/{other.id}/role", role=m.ROLE_CLIENT)
+
+    repo.session.expire_all()
+    assert repo.get_user(other.id).role == m.ROLE_CLIENT
+    # Immediate, not at session expiry: the demotion actually revoked access.
+    assert victim.get("/admin/clients").status_code == 403
+
+
+def test_an_admin_cannot_remove_their_own_admin_role():
+    """The one mistake that cannot be undone from inside the app.
+
+    The refusal must come from the self-check rather than from a malformed
+    request, so everything else about the POST is valid.
+    """
+    repo = _repo()
+    client = _admin(repo)
+    mine = client.user.id
+
+    _post(client, f"/admin/clients/{mine}/role", role=m.ROLE_CLIENT)
+
+    repo.session.expire_all()
+    assert repo.get_user(mine).role == m.ROLE_ADMIN
+    assert "cannot remove your own administrator role" in _body(
+        client, f"/admin/clients/{mine}")
+
+
+def test_the_role_control_is_not_offered_on_the_operators_own_account():
+    """The server-side refusal above is the protection; this is the courtesy, so
+    that an operator is not invited to try something that cannot work."""
+    repo = _repo()
+    other = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    mine = _body(client, f"/admin/clients/{client.user.id}")
+    assert f"/admin/clients/{client.user.id}/role" not in mine
+    assert "cannot be removed" in mine
+
+    theirs = _body(client, f"/admin/clients/{other.id}")
+    assert f"/admin/clients/{other.id}/role" in theirs
+
+
+def test_a_client_cannot_change_a_role():
+    """The escalation test: a signed-in client posting a *well-formed* request —
+    valid CSRF token and a real role — is refused by the endpoint itself."""
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _app(repo).test_client()
+    _sign_in(client, repo, role=m.ROLE_CLIENT, username="mallory")
+
+    response = _post(client, f"/admin/clients/{target.id}/role",
+                     role=m.ROLE_ADMIN)
+
+    # 403, not a redirect: they are authenticated and the answer is a flat no.
+    assert response.status_code == 403
+    repo.session.expire_all()
+    assert repo.get_user(target.id).role == m.ROLE_CLIENT
+
+
+@pytest.mark.parametrize("value", ["", "superuser", "administrator", "root",
+                                   "1", "admin,client"])
+def test_a_role_that_is_not_declared_is_refused(value):
+    """Only the two declared roles are writable, so a crafted POST cannot put a
+    value in the column that no other part of the platform understands."""
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    _post(client, f"/admin/clients/{target.id}/role", role=value)
+
+    repo.session.expire_all()
+    assert repo.get_user(target.id).role == m.ROLE_CLIENT, f"accepted {value!r}"
+
+
+def test_a_role_is_normalised_the_way_every_other_field_is():
+    """Case and surrounding whitespace are tolerated, like the status field —
+    a form control is not a place to be strict about either."""
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    _post(client, f"/admin/clients/{target.id}/role", role=" Admin ")
+
+    repo.session.expire_all()
+    assert repo.get_user(target.id).role == m.ROLE_ADMIN
+
+
+def test_a_role_change_with_no_role_field_at_all_is_refused():
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    _post(client, f"/admin/clients/{target.id}/role")
+
+    repo.session.expire_all()
+    assert repo.get_user(target.id).role == m.ROLE_CLIENT
+
+
+def test_a_role_change_without_a_csrf_token_is_refused():
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    client.post(f"/admin/clients/{target.id}/role", data={"role": m.ROLE_ADMIN})
+
+    repo.session.expire_all()
+    assert repo.get_user(target.id).role == m.ROLE_CLIENT
+
+
+def test_a_role_change_cannot_be_made_by_a_get():
+    """Only POST is registered on the path, so a link or a prefetch cannot
+    promote anyone."""
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    response = client.get(f"/admin/clients/{target.id}/role?role=admin")
+
+    assert response.status_code == 405
+    repo.session.expire_all()
+    assert repo.get_user(target.id).role == m.ROLE_CLIENT
+
+
+def test_a_role_change_is_recorded_in_the_audit_log():
+    """Actor, target, both roles and a timestamp — the question an audit trail
+    exists to answer. Nothing sensitive is written to it."""
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    _post(client, f"/admin/clients/{target.id}/role", role=m.ROLE_ADMIN)
+
+    line = repo.recent_events(5)[0]
+    assert line.source == "admin"
+    # Privilege-shaped, so it is recorded at WARN alongside the password reset.
+    assert line.level == "WARN"
+    assert client.user.username in line.message
+    assert target.username in line.message
+    assert m.ROLE_CLIENT in line.message
+    assert m.ROLE_ADMIN in line.message
+    assert line.event_time_utc is not None
+    # No credential is ever written to the log.
+    assert "password" not in line.message.lower()
+
+
+def test_a_refused_role_change_is_not_logged_as_a_change():
+    """A refused demotion must not leave a line saying it happened."""
+    repo = _repo()
+    client = _admin(repo)
+    before = len(repo.recent_events(200))
+
+    _post(client, f"/admin/clients/{client.user.id}/role", role=m.ROLE_CLIENT)
+
+    assert len(repo.recent_events(200)) == before
+
+
+def test_the_role_change_leaves_the_rest_of_the_admin_area_working():
+    """The promotion must not take the operator's own pages down with it."""
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+
+    _post(client, f"/admin/clients/{target.id}/role", role=m.ROLE_ADMIN)
+
+    for path in ("/admin", "/admin/clients", "/admin/accounts",
+                 "/admin/activity"):
+        assert client.get(path).status_code == 200, path
+    # The promoted account is listed as an administrator, which is where the
+    # client list keeps them.
+    assert "alice" in _body(client, "/admin/clients")
+
+
+def test_a_role_change_to_the_role_it_already_has_is_harmless():
+    """Idempotent, and does not write an audit line claiming a change."""
+    repo = _repo()
+    target = _make_client(repo, "alice")
+    client = _admin(repo)
+    before = len(repo.recent_events(200))
+
+    response = _post(client, f"/admin/clients/{target.id}/role",
+                     role=m.ROLE_CLIENT)
+
+    assert response.status_code in (302, 200)
+    repo.session.expire_all()
+    assert repo.get_user(target.id).role == m.ROLE_CLIENT
+    assert len(repo.recent_events(200)) == before
+
+
+def test_changing_the_role_of_a_missing_account_is_a_404():
+    repo = _repo()
+    client = _admin(repo)
+
+    response = _post(client, "/admin/clients/99999/role", role=m.ROLE_ADMIN)
+
+    assert response.status_code == 404
 
 
 # --------------------------------------------------------------------------- #

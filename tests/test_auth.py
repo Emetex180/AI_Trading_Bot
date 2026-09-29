@@ -56,6 +56,7 @@ OPERATOR_MUTATIONS = [
     "/api/auto-trading",
     "/api/data/probe",
     "/admin/clients/create",
+    "/admin/clients/1/role",
 ]
 
 CLIENT_PAGES = ["/dashboard", "/market", "/setups", "/history", "/analysis"]
