@@ -15,7 +15,6 @@ The app is built per-test against its own in-memory database.
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import replace
 from datetime import timedelta
 
@@ -611,93 +610,181 @@ def test_a_broken_mailer_cannot_change_the_outcome_of_a_payment(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# The missing-reference diagnostic (TEMPORARY — delete with the diagnostic)
+# The webhook
+#
+# Flutterwave's payload shape is the provider's to change, and the reference is
+# the only thing this endpoint can act on: a rename turns a payment that has
+# already been taken into a 400 and a customer with no subscription. These pin
+# the confirmed production shape — and the older one, so neither can be dropped
+# silently.
 # --------------------------------------------------------------------------- #
 #: The ``verif-hash`` the test deployment is configured with. A real secret
 #: never appears in a test; this one exists only to be echoed back.
 _VERIF_HASH = "test-verif-hash"
 
+#: A reference in the shape :func:`app.subscription._new_reference` produces:
+#: ours, carrying the user id, and nothing Flutterwave would ever mint.
+_REFERENCE = "3R-7-20260930120000-abcd1234"
+
 
 def _webhook_client(repo):
-    """A client whose provider is configured, so the signature check can pass."""
+    """A client whose deployment knows the webhook hash, so the real signature
+    check runs and can pass."""
     settings = replace(get_settings(), flask_secret_key="test-secret",
                        flutterwave_webhook_secret_hash=_VERIF_HASH)
     return create_app(settings=settings, repository=repo,
                       setup_db=False).test_client()
 
 
-def _post_webhook(client, body, *, content_type="application/json"):
-    return client.post("/subscription/webhook", data=body,
-                       content_type=content_type,
-                       headers={"verif-hash": _VERIF_HASH})
+def _post_webhook(client, body, *, verif_hash=_VERIF_HASH):
+    return client.post("/subscription/webhook", data=json.dumps(body),
+                       content_type="application/json",
+                       headers={"verif-hash": verif_hash})
 
 
-def _diagnostic_line(caplog) -> str:
-    """The one diagnostic line the endpoint logged, or a failed assertion."""
-    lines = [r.getMessage() for r in caplog.records
-             if "Flutterwave webhook diagnostic" in r.getMessage()]
-    assert len(lines) == 1, f"expected one diagnostic line, got {lines}"
-    return lines[0]
+def _awaiting_payment(repo, *, plan_key="premium", reference=_REFERENCE):
+    """An account with one pending payment row for ``reference``."""
+    repo.sync_plans(spec_rows())
+    user = _user(repo)
+    plan = repo.get_plan_by_key(plan_key)
+    repo.create_payment(user_id=user.id, plan=plan, reference=reference,
+                        amount_minor=plan.price_minor, currency=plan.currency)
+    return user, plan
 
 
-def test_the_webhook_diagnostic_explains_a_payload_with_no_tx_ref(caplog):
-    """The 400 is otherwise silent. This names where the reference actually is
-    — Flutterwave's v4 format carries it as ``data.id`` — without reproducing a
-    single value from the body."""
-    repo = _repo()
+def _verify_settles(monkeypatch, plan, seen):
+    """Stand in for the provider's API: record the reference, confirm a payment.
+
+    Patched on the *class*, so the client the route builds for itself is the one
+    that answers — the signature check and the whole of ``_finalise`` stay real.
+    ``seen`` is what proves the endpoint read the reference out of the payload
+    rather than arriving at the right row some other way.
+    """
+    from app.payments import Verification
+
+    def fake_verify(self, reference):
+        seen.append(reference)
+        return Verification(ok=True, status="successful",
+                            provider_tx_id="flw-tx-1",
+                            amount_minor=plan.price_minor,
+                            currency=plan.currency,
+                            payload={"status": "successful"})
+
+    monkeypatch.setattr("app.payments.FlutterwaveClient.verify", fake_verify)
+    # A receipt must never be the thing that decides whether a test reaches the
+    # network, and an operator's RESEND_API_KEY must not be spent by one.
+    for name in ("send_payment_received", "send_subscription_activated"):
+        monkeypatch.setattr(f"notifications.email.{name}", lambda u, **kw: True)
+
+
+def _production_payload(reference: str | None) -> dict:
+    """The payload Flutterwave actually sent, as the diagnostic confirmed it.
+
+    There is no ``data`` object at all and the reference is at the top level as
+    ``txRef`` — beside ``id``, ``flwRef`` and ``orderRef``, which are the
+    provider's own identifiers and are deliberately not interchangeable with
+    ours. ``event`` is absent too; the key is ``event.type``.
+    """
     body = {
-        "event": "charge.completed",
-        "data": {
-            "id": 1234567,
-            "status": "successful",
-            "reference": "flw-ref-not-ours",
-            "customer": {"email": "buyer@example.com",
-                         "phone_number": "+15551234567"},
-            "card": {"last_4digits": "4242"},
-        },
+        "event.type": "CARD_TRANSACTION",
+        "id": 1234567,
+        "flwRef": "FLW-MOCK-1234",
+        "orderRef": "URF-1234",
+        "status": "successful",
+        "amount": 100.0,
+        "charged_amount": 100.0,
+        "currency": "USD",
+        "customer": {"email": "buyer@example.com"},
     }
-    with caplog.at_level(logging.WARNING, logger="app.subscription"):
-        resp = _post_webhook(_webhook_client(repo), json.dumps(body))
+    if reference is not None:
+        body["txRef"] = reference
+    return body
+
+
+def test_a_webhook_carrying_the_reference_at_the_top_level_settles_the_payment(
+        monkeypatch):
+    """The regression this whole change exists for.
+
+    Flutterwave delivers ``txRef`` at the top level, which is where nothing used
+    to look: the webhook answered 400 and the customer's money was taken with no
+    subscription to show for it.
+    """
+    repo = _repo()
+    user, plan = _awaiting_payment(repo)
+    seen = []
+    _verify_settles(monkeypatch, plan, seen)
+
+    resp = _post_webhook(_webhook_client(repo), _production_payload(_REFERENCE))
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "outcome": "settled"}
+    # Read from the payload, and the *right* thing read: the provider was asked
+    # about our reference, not about the transaction id beside it.
+    assert seen == [_REFERENCE]
+    repo.session.expire_all()
+    assert repo.get_payment_by_reference(_REFERENCE).status == m.PAY_SUCCESSFUL
+    assert repo.active_subscription(user.id) is not None
+
+
+def test_a_webhook_in_the_older_nested_shape_still_settles_the_payment(monkeypatch):
+    """``data.tx_ref`` is the shape this endpoint was written for, and a
+    deployment pointed at a provider account still sending it must keep working."""
+    repo = _repo()
+    user, plan = _awaiting_payment(repo)
+    seen = []
+    _verify_settles(monkeypatch, plan, seen)
+
+    resp = _post_webhook(_webhook_client(repo), {
+        "event": "charge.completed",
+        "data": {"id": 1234567, "tx_ref": _REFERENCE, "status": "successful"},
+    })
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "outcome": "settled"}
+    assert seen == [_REFERENCE]
+    repo.session.expire_all()
+    assert repo.get_payment_by_reference(_REFERENCE).status == m.PAY_SUCCESSFUL
+    assert repo.active_subscription(user.id) is not None
+
+
+def test_an_unknown_transaction_id_is_not_mistaken_for_our_reference(monkeypatch):
+    """Tolerating more than one *name* is not the same as accepting anything.
+
+    A payload with the provider's own identifiers and no reference of ours
+    settles nothing — the alternative would be an endpoint that settles whatever
+    row a stranger's transaction id happens to match.
+    """
+    repo = _repo()
+    user, plan = _awaiting_payment(repo)
+    seen = []
+    _verify_settles(monkeypatch, plan, seen)
+
+    resp = _post_webhook(_webhook_client(repo),
+                         _production_payload(reference=None))
 
     assert resp.status_code == 400
     assert resp.get_json() == {"ok": False, "reason": "no_reference"}
-
-    line = _diagnostic_line(caplog)
-    assert "data_keys={card, customer, id, reference, status}" in line
-    assert "reference_keys_present=reference, id" in line
-    assert "event=charge.completed" in line
-
-    # Structure is reported; no customer detail and no transaction id is.
-    for leaked in ("buyer@example.com", "+15551234567", "4242", "1234567"):
-        assert leaked not in line
+    assert seen == []
+    repo.session.expire_all()
+    assert repo.get_payment_by_reference(_REFERENCE).status == m.PAY_PENDING
+    assert repo.active_subscription(user.id) is None
 
 
-def test_the_webhook_diagnostic_reports_a_body_that_never_parsed(caplog):
-    """A proxy that drops the JSON content type looks identical in the access
-    log to a payload with no reference in it, and this is what tells them
-    apart: the reference is in the body, the body just was not read as JSON."""
+def test_an_unauthenticated_webhook_is_refused_before_the_body_is_read(monkeypatch):
+    """The signature is the only thing between this endpoint and a forged
+    subscription, so a caller who has not proved they are Flutterwave settles
+    nothing — including through the shape this change added."""
     repo = _repo()
-    with caplog.at_level(logging.WARNING, logger="app.subscription"):
-        resp = _post_webhook(_webhook_client(repo), {"tx_ref": "ref-1"},
-                             content_type="application/x-www-form-urlencoded")
+    user, plan = _awaiting_payment(repo)
+    seen = []
+    _verify_settles(monkeypatch, plan, seen)
 
-    assert resp.status_code == 400
-    line = _diagnostic_line(caplog)
-    assert "json_parsed=False" in line
-    assert "body_looks_json=False" in line
-    assert "content_type=application/x-www-form-urlencoded" in line
-    assert "form_keys={tx_ref}" in line
-
-
-def test_an_unauthenticated_webhook_is_refused_before_any_diagnostic(caplog):
-    """The diagnostic reports a payload. It is never a reason to parse one from
-    a caller who has not proved they are Flutterwave."""
-    repo = _repo()
-    with caplog.at_level(logging.WARNING, logger="app.subscription"):
-        resp = _webhook_client(repo).post(
-            "/subscription/webhook", json={"data": {"id": 1234567}},
-            headers={"verif-hash": "not-the-hash"})
+    resp = _post_webhook(_webhook_client(repo), _production_payload(_REFERENCE),
+                         verif_hash="not-the-hash")
 
     assert resp.status_code == 401
-    assert "diagnostic" not in caplog.text
-    assert "1234567" not in caplog.text
+    assert resp.get_json() == {"ok": False, "reason": "invalid_signature"}
+    assert seen == []
+    repo.session.expire_all()
+    assert repo.get_payment_by_reference(_REFERENCE).status == m.PAY_PENDING
+    assert repo.active_subscription(user.id) is None

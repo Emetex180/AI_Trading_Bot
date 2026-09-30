@@ -34,7 +34,6 @@ CSRF token.
 from __future__ import annotations
 
 import logging
-import re
 import secrets
 from urllib.parse import urlsplit
 
@@ -166,79 +165,36 @@ def _diag_checkout(reference: str, label: str, *, link=None, target=None) -> Non
         target or "<none>", label)
 
 
-#: Names a Flutterwave payload has carried the transaction reference under over
-#: the life of the v3 and v4 webhook formats. Reported by *presence* only, so a
-#: reference that arrived under an unexpected name is visible in the log.
-_REFERENCE_KEY_NAMES = ("tx_ref", "txRef", "reference", "flw_ref",
-                        "transaction_id", "id")
+def _webhook_reference(payload) -> str:
+    """Our transaction reference, from wherever Flutterwave's payload puts it.
 
-#: What the diagnostic will print verbatim: a short identifier-shaped token.
-#: Anything else is replaced before it reaches the log, so a payload cannot
-#: smuggle a credential or a customer detail in through a key *name*.
-_LOG_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_.\-]{1,40}")
+    The confirmed production payload delivers it at the **top level** as
+    ``txRef``; the older v3 format nests it under ``data`` as ``tx_ref``. Both
+    are read, because the shape is the provider's to change and the cost of
+    guessing wrong is a customer who has been charged and given nothing — the
+    endpoint can act on nothing but a reference, so one it cannot find is a 400
+    and a payment that never reaches the account it paid for.
 
+    Read by *name*, never by position. ``id``, ``flwRef`` and ``orderRef``
+    travel beside ``txRef`` in the same payload, and none of them is the key
+    this app files payments under: looking a payment up by one of those would
+    find nothing today, and could one day find a row belonging to someone else.
 
-def _diag_key_names(obj) -> str:
-    """The key names of ``obj`` — and never a single value.
-
-    Only structure is wanted: ``{customer, card, amount}`` says which payload
-    shape arrived, while the values beside those keys are the customer's name,
-    email, phone and card digits.
+    Nothing here is trusted. The value only names a row; whether that payment
+    actually succeeded is still asked of the provider over an authenticated
+    connection, and the amount it reports is still compared against the price
+    recorded at checkout before anything is granted.
     """
-    if not isinstance(obj, dict):
-        return f"<{type(obj).__name__}>"
-    names = []
-    for key in obj:
-        text = str(key)
-        names.append(text if _LOG_SAFE_TOKEN.fullmatch(text)
-                     else "<non-token-key>")
-    return "{" + ", ".join(sorted(names)) + "}"
-
-
-def _diag_webhook_payload(payload) -> None:
-    """TEMPORARY webhook diagnostic — remove once the 400 is explained.
-
-    Answers "why did this webhook arrive with no ``tx_ref``?" from the log
-    alone. The endpoint refuses a body it cannot read a reference out of, and
-    the access log records only the 400 — it cannot say whether the body was
-    JSON at all, whether ``data`` was present, or whether the reference is
-    simply under a different name. Flutterwave has shipped all three across its
-    v3 and v4 formats, and a reverse proxy that rewrites ``Content-Type``
-    produces the first one without the provider being at fault.
-
-    Called only after the signature check, and reports only shape: the content
-    type, whether a JSON body actually parsed, whether the bytes even look like
-    JSON, and the *key names* of the payload, its ``data`` object, the form and
-    the query string. No value from the body is logged, no header is read — the
-    request carries the provider's credentials in its headers — and nothing
-    here touches settlement.
-    """
-    raw = request.get_data(cache=True) or b""
-    parsed = payload if isinstance(payload, dict) else {}
-    event = parsed.get("event")
-    data = parsed.get("data")
-    nested = data if isinstance(data, dict) else {}
-
-    def _token(value) -> str:
-        text = str(value)
-        return text if _LOG_SAFE_TOKEN.fullmatch(text) else "<non-token>"
-
-    # A reference present anywhere the endpoint does *not* look is the whole
-    # point: it names the exact rename that broke the parse.
-    found = [name for name in _REFERENCE_KEY_NAMES
-             if str(parsed.get(name) or nested.get(name) or "").strip()]
-
-    log.warning(
-        "Flutterwave webhook diagnostic: no tx_ref - content_type=%s bytes=%d "
-        "json_parsed=%s body_looks_json=%s event=%s form_keys=%s query_keys=%s "
-        "top_level_keys=%s data_type=%s data_keys=%s reference_keys_present=%s",
-        request.headers.get("Content-Type", "<none>"), len(raw),
-        bool(payload), raw.lstrip()[:1] in (b"{", b"["),
-        _token(event) if event else "<absent>", _diag_key_names(request.form),
-        _diag_key_names(request.args), _diag_key_names(parsed),
-        type(data).__name__ if "data" in parsed else "<absent>",
-        _diag_key_names(nested) if isinstance(data, dict) else "<absent>",
-        ", ".join(found) or "<none>")
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data")
+    sources = [payload, data] if isinstance(data, dict) else [payload]
+    for source in sources:
+        for name in ("txRef", "tx_ref"):
+            value = str(source.get(name) or "").strip()
+            if value:
+                return value
+    return ""
 
 
 def _finalise(cfg, repo, payment, verification) -> str:
@@ -625,10 +581,15 @@ def webhook():
         return jsonify({"ok": False, "reason": "invalid_signature"}), 401
 
     payload = request.get_json(silent=True) or {}
-    data = payload.get("data") or {}
-    reference = str(data.get("tx_ref") or "").strip()
+    reference = _webhook_reference(payload)
     if not reference:
-        _diag_webhook_payload(payload)  # TEMPORARY diagnostic
+        # Said out loud rather than answered 200 in silence. A reference the
+        # endpoint cannot find means a payment that has been taken is not being
+        # settled, and that is otherwise invisible: the access log records the
+        # 400 but cannot distinguish a renamed key from a body that never
+        # parsed, which is exactly the silence that made this payload shape
+        # hard to diagnose in the first place.
+        log.warning("Flutterwave webhook carried no transaction reference")
         return jsonify({"ok": False, "reason": "no_reference"}), 400
 
     payment = repo.get_payment_by_reference(reference)
