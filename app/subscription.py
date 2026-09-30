@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from urllib.parse import urlsplit
 
 from flask import (Blueprint, abort, current_app, flash, g, jsonify, redirect,
                    render_template, request, url_for)
@@ -103,6 +104,36 @@ def _plan_row(repo, key: str):
         repo.sync_plans(spec_rows())
         row = repo.get_plan_by_key(key)
     return row
+
+
+def _provider_redirect(link):
+    """The provider's checkout URL, checked before the browser is sent to it.
+
+    The link is used exactly as Flutterwave returned it — never rewritten and
+    never defaulted to a checkout host of our own, because a URL this app
+    invents is a URL this app cannot vouch for. The only thing done to it is a
+    sanity check: it must be an absolute ``https`` URL.
+
+    That check is not ceremony. A browser resolves a ``Location`` that is
+    relative, scheme-less or otherwise unusable against *this* site, so a
+    malformed link walks the customer back into the app instead of to the
+    payment page — arriving, in the worst case, on a page that looks as though
+    nothing happened, with a payment row already written and no checkout to pay
+    it. Returning ``None`` turns that into a visible failure instead.
+
+    A URL carrying userinfo is refused as well: ``https://checkout.test@evil.example/``
+    reads as Flutterwave to someone skimming the address bar, and is not.
+
+    Surrounding whitespace is trimmed, which is the one normalisation applied —
+    it is not meaningful in a URL and would otherwise make the check above
+    refuse a link that works.
+    """
+    target = str(link or "").strip()
+    parts = urlsplit(target)
+    if parts.scheme != "https" or not parts.netloc or \
+            parts.username or parts.password:
+        return None
+    return target
 
 
 def _finalise(cfg, repo, payment, verification) -> str:
@@ -381,10 +412,27 @@ def checkout(plan_key: str):
         flash(str(exc), "warning")
         return redirect(url_for("subscription.index"))
 
+    # The one place a customer is handed to the provider. ``link`` is
+    # Flutterwave's own URL, used as returned; this either redirects to it or
+    # fails the attempt outright, and never guesses at where the checkout lives.
+    target = _provider_redirect(link)
+    if target is None:
+        log.error("Flutterwave returned an unusable checkout link for %s",
+                  reference)
+        # Failed rather than left pending. "Pending" means a customer opened a
+        # checkout and walked away from it; this one never reached them, and a
+        # row they cannot pay sitting on their payment history is exactly the
+        # uncertainty that status is supposed to describe away.
+        repo.fail_payment(reference, "The payment page could not be opened.")
+        flash("We could not open the payment page, so nothing has been "
+              "charged. Please try again, or contact support if this "
+              "continues.", "warning")
+        return redirect(url_for("subscription.index"))
+
     repo.log_event("INFO", "payments",
                    f"Checkout started for {user.username} on {plan.key} "
                    f"({reference})")
-    return redirect(link)
+    return redirect(target)
 
 
 @subscription_bp.get("/subscription/callback")
