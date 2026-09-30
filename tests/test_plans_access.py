@@ -14,6 +14,8 @@ The app is built per-test against its own in-memory database.
 """
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import replace
 from datetime import timedelta
 
@@ -23,6 +25,8 @@ from app.access import (FEATURE_ANALYSIS, FEATURE_DASHBOARD, FEATURE_HISTORY,
                         FEATURE_MARKET, FEATURE_SETUPS, PLAN_FEATURES,
                         entitlement_for, has_feature)
 from app.plans import PLANS, PLAN_KEYS, get_plan, spec_rows
+from app.web import create_app
+from config import get_settings
 from database import models as m
 from trading import time_utils as tu
 
@@ -604,3 +608,96 @@ def test_a_broken_mailer_cannot_change_the_outcome_of_a_payment(monkeypatch):
     assert repo.get_payment_by_reference(payment.reference).status == \
         m.PAY_SUCCESSFUL
     assert repo.active_subscription(user.id) is not None
+
+
+# --------------------------------------------------------------------------- #
+# The missing-reference diagnostic (TEMPORARY — delete with the diagnostic)
+# --------------------------------------------------------------------------- #
+#: The ``verif-hash`` the test deployment is configured with. A real secret
+#: never appears in a test; this one exists only to be echoed back.
+_VERIF_HASH = "test-verif-hash"
+
+
+def _webhook_client(repo):
+    """A client whose provider is configured, so the signature check can pass."""
+    settings = replace(get_settings(), flask_secret_key="test-secret",
+                       flutterwave_webhook_secret_hash=_VERIF_HASH)
+    return create_app(settings=settings, repository=repo,
+                      setup_db=False).test_client()
+
+
+def _post_webhook(client, body, *, content_type="application/json"):
+    return client.post("/subscription/webhook", data=body,
+                       content_type=content_type,
+                       headers={"verif-hash": _VERIF_HASH})
+
+
+def _diagnostic_line(caplog) -> str:
+    """The one diagnostic line the endpoint logged, or a failed assertion."""
+    lines = [r.getMessage() for r in caplog.records
+             if "Flutterwave webhook diagnostic" in r.getMessage()]
+    assert len(lines) == 1, f"expected one diagnostic line, got {lines}"
+    return lines[0]
+
+
+def test_the_webhook_diagnostic_explains_a_payload_with_no_tx_ref(caplog):
+    """The 400 is otherwise silent. This names where the reference actually is
+    — Flutterwave's v4 format carries it as ``data.id`` — without reproducing a
+    single value from the body."""
+    repo = _repo()
+    body = {
+        "event": "charge.completed",
+        "data": {
+            "id": 1234567,
+            "status": "successful",
+            "reference": "flw-ref-not-ours",
+            "customer": {"email": "buyer@example.com",
+                         "phone_number": "+15551234567"},
+            "card": {"last_4digits": "4242"},
+        },
+    }
+    with caplog.at_level(logging.WARNING, logger="app.subscription"):
+        resp = _post_webhook(_webhook_client(repo), json.dumps(body))
+
+    assert resp.status_code == 400
+    assert resp.get_json() == {"ok": False, "reason": "no_reference"}
+
+    line = _diagnostic_line(caplog)
+    assert "data_keys={card, customer, id, reference, status}" in line
+    assert "reference_keys_present=reference, id" in line
+    assert "event=charge.completed" in line
+
+    # Structure is reported; no customer detail and no transaction id is.
+    for leaked in ("buyer@example.com", "+15551234567", "4242", "1234567"):
+        assert leaked not in line
+
+
+def test_the_webhook_diagnostic_reports_a_body_that_never_parsed(caplog):
+    """A proxy that drops the JSON content type looks identical in the access
+    log to a payload with no reference in it, and this is what tells them
+    apart: the reference is in the body, the body just was not read as JSON."""
+    repo = _repo()
+    with caplog.at_level(logging.WARNING, logger="app.subscription"):
+        resp = _post_webhook(_webhook_client(repo), {"tx_ref": "ref-1"},
+                             content_type="application/x-www-form-urlencoded")
+
+    assert resp.status_code == 400
+    line = _diagnostic_line(caplog)
+    assert "json_parsed=False" in line
+    assert "body_looks_json=False" in line
+    assert "content_type=application/x-www-form-urlencoded" in line
+    assert "form_keys={tx_ref}" in line
+
+
+def test_an_unauthenticated_webhook_is_refused_before_any_diagnostic(caplog):
+    """The diagnostic reports a payload. It is never a reason to parse one from
+    a caller who has not proved they are Flutterwave."""
+    repo = _repo()
+    with caplog.at_level(logging.WARNING, logger="app.subscription"):
+        resp = _webhook_client(repo).post(
+            "/subscription/webhook", json={"data": {"id": 1234567}},
+            headers={"verif-hash": "not-the-hash"})
+
+    assert resp.status_code == 401
+    assert "diagnostic" not in caplog.text
+    assert "1234567" not in caplog.text

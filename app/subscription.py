@@ -34,6 +34,7 @@ CSRF token.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from urllib.parse import urlsplit
 
@@ -163,6 +164,81 @@ def _diag_checkout(reference: str, label: str, *, link=None, target=None) -> Non
         reference, bool(link_text), scheme, host,
         bool(link_text) and _provider_redirect(link) is not None,
         target or "<none>", label)
+
+
+#: Names a Flutterwave payload has carried the transaction reference under over
+#: the life of the v3 and v4 webhook formats. Reported by *presence* only, so a
+#: reference that arrived under an unexpected name is visible in the log.
+_REFERENCE_KEY_NAMES = ("tx_ref", "txRef", "reference", "flw_ref",
+                        "transaction_id", "id")
+
+#: What the diagnostic will print verbatim: a short identifier-shaped token.
+#: Anything else is replaced before it reaches the log, so a payload cannot
+#: smuggle a credential or a customer detail in through a key *name*.
+_LOG_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_.\-]{1,40}")
+
+
+def _diag_key_names(obj) -> str:
+    """The key names of ``obj`` — and never a single value.
+
+    Only structure is wanted: ``{customer, card, amount}`` says which payload
+    shape arrived, while the values beside those keys are the customer's name,
+    email, phone and card digits.
+    """
+    if not isinstance(obj, dict):
+        return f"<{type(obj).__name__}>"
+    names = []
+    for key in obj:
+        text = str(key)
+        names.append(text if _LOG_SAFE_TOKEN.fullmatch(text)
+                     else "<non-token-key>")
+    return "{" + ", ".join(sorted(names)) + "}"
+
+
+def _diag_webhook_payload(payload) -> None:
+    """TEMPORARY webhook diagnostic — remove once the 400 is explained.
+
+    Answers "why did this webhook arrive with no ``tx_ref``?" from the log
+    alone. The endpoint refuses a body it cannot read a reference out of, and
+    the access log records only the 400 — it cannot say whether the body was
+    JSON at all, whether ``data`` was present, or whether the reference is
+    simply under a different name. Flutterwave has shipped all three across its
+    v3 and v4 formats, and a reverse proxy that rewrites ``Content-Type``
+    produces the first one without the provider being at fault.
+
+    Called only after the signature check, and reports only shape: the content
+    type, whether a JSON body actually parsed, whether the bytes even look like
+    JSON, and the *key names* of the payload, its ``data`` object, the form and
+    the query string. No value from the body is logged, no header is read — the
+    request carries the provider's credentials in its headers — and nothing
+    here touches settlement.
+    """
+    raw = request.get_data(cache=True) or b""
+    parsed = payload if isinstance(payload, dict) else {}
+    event = parsed.get("event")
+    data = parsed.get("data")
+    nested = data if isinstance(data, dict) else {}
+
+    def _token(value) -> str:
+        text = str(value)
+        return text if _LOG_SAFE_TOKEN.fullmatch(text) else "<non-token>"
+
+    # A reference present anywhere the endpoint does *not* look is the whole
+    # point: it names the exact rename that broke the parse.
+    found = [name for name in _REFERENCE_KEY_NAMES
+             if str(parsed.get(name) or nested.get(name) or "").strip()]
+
+    log.warning(
+        "Flutterwave webhook diagnostic: no tx_ref - content_type=%s bytes=%d "
+        "json_parsed=%s body_looks_json=%s event=%s form_keys=%s query_keys=%s "
+        "top_level_keys=%s data_type=%s data_keys=%s reference_keys_present=%s",
+        request.headers.get("Content-Type", "<none>"), len(raw),
+        bool(payload), raw.lstrip()[:1] in (b"{", b"["),
+        _token(event) if event else "<absent>", _diag_key_names(request.form),
+        _diag_key_names(request.args), _diag_key_names(parsed),
+        type(data).__name__ if "data" in parsed else "<absent>",
+        _diag_key_names(nested) if isinstance(data, dict) else "<absent>",
+        ", ".join(found) or "<none>")
 
 
 def _finalise(cfg, repo, payment, verification) -> str:
@@ -552,6 +628,7 @@ def webhook():
     data = payload.get("data") or {}
     reference = str(data.get("tx_ref") or "").strip()
     if not reference:
+        _diag_webhook_payload(payload)  # TEMPORARY diagnostic
         return jsonify({"ok": False, "reason": "no_reference"}), 400
 
     payment = repo.get_payment_by_reference(reference)
