@@ -124,6 +124,20 @@ def auto_trading_enabled(settings: Any) -> bool:
     return bool(override)
 
 
+def bare_host(value: str) -> str:
+    """``host[:port]`` reduced to a lower-case hostname.
+
+    A numeric port is dropped, so ``3rader.com`` and ``3rader.com:443`` name the
+    same host. Anything that is *not* a port is left where it is, so a crafted
+    ``3rader.com:evil`` never compares equal to a trusted name.
+    """
+    value = (value or "").strip().lower()
+    if value.startswith("["):                        # IPv6 literal: [::1]:5000
+        return value.partition("]")[0] + "]"
+    head, sep, tail = value.rpartition(":")
+    return head if sep and tail.isdigit() else value
+
+
 # --------------------------------------------------------------------------- #
 # Settings object
 # --------------------------------------------------------------------------- #
@@ -287,6 +301,14 @@ class Settings:
     #: when the app is reached directly, or a client could forge its own scheme
     #: and host through those headers.
     trust_proxy: bool = False
+    #: The public hostname(s) this deployment answers on, comma separated
+    #: (``3rader.com``, or ``3rader.com,www.3rader.com``). Read only when
+    #: ``trust_proxy`` is on, where it is the allowlist ``X-Forwarded-Host`` is
+    #: checked against — so a forged header can never decide the domain absolute
+    #: URLs are built from. Blank means no forwarded host is trusted at all: the
+    #: scheme is still corrected from ``X-Forwarded-Proto``, and the host stays
+    #: whatever the request actually carried.
+    public_host: str = ""
     #: First-run admin, created only while the users table is empty.
     bootstrap_admin_username: str = ""
     bootstrap_admin_password: str = ""
@@ -369,6 +391,22 @@ class Settings:
         override is used.
         """
         return auto_trading_enabled(self)
+
+    @property
+    def public_hosts(self) -> frozenset[str]:
+        """``public_host`` as the set of names a forwarded host may carry.
+
+        A set rather than a single value because a deployment can legitimately
+        answer on more than one name — the apex and ``www``, or an old domain
+        kept alive beside a new one. Compared through :func:`bare_host`, so the
+        match is case-insensitive and a default port is irrelevant.
+
+        Empty when nothing is configured, which is the safe reading: no host is
+        then trusted and ``X-Forwarded-Host`` cannot influence a URL at all.
+        """
+        return frozenset(bare_host(part)
+                         for part in self.public_host.split(",")
+                         if part.strip())
 
     def asset_overrides_for(self, asset_name: str) -> dict[str, Any]:
         """Per-asset strategy overrides read from ``ASSET_<NAME>_...`` env keys.
@@ -462,6 +500,7 @@ def _build_settings() -> Settings:
         session_cookie_secure=_env_bool("SESSION_COOKIE_SECURE", default=False),
         session_lifetime_hours=_env_int("SESSION_LIFETIME_HOURS", 12),
         trust_proxy=_env_bool("TRUST_PROXY", default=False),
+        public_host=_env_str("PUBLIC_HOST"),
         bootstrap_admin_username=_env_str("ADMIN_USERNAME"),
         bootstrap_admin_password=_env_str("ADMIN_PASSWORD"),
         bootstrap_admin_email=_env_str("ADMIN_EMAIL"),

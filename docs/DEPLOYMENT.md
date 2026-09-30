@@ -90,6 +90,7 @@ FLASK_HOST=127.0.0.1          # binds loopback; the reverse proxy fronts it
 FLASK_PORT=5000
 SESSION_COOKIE_SECURE=true    # ONLY once HTTPS works (step 9)
 TRUST_PROXY=true              # ONLY if a reverse proxy is in front
+PUBLIC_HOST=3rader.com        # the hostname absolute URLs must be built from
 SESSION_LIFETIME_HOURS=12
 SERVE_THREADS=8
 
@@ -269,7 +270,12 @@ The short version:
 2. Enable proxy in ARR.
 3. Create a site bound to `:80` on your hostname.
 4. Add a reverse-proxy rule from `(.*)` to `http://127.0.0.1:5000/{R:1}`.
-5. Set `TRUST_PROXY=true` in `.env` and restart the web task.
+5. Set `TRUST_PROXY=true` and `PUBLIC_HOST=<your hostname>` in `.env`, then
+   restart the web task. Both are needed: `TRUST_PROXY` is what makes the app
+   read the headers at all, and `PUBLIC_HOST` is the only hostname it will take
+   an `X-Forwarded-Host` for. With `TRUST_PROXY=true` and no `PUBLIC_HOST`, the
+   app logs a warning at startup and every absolute URL — the Flutterwave
+   `redirect_url` among them — keeps naming `127.0.0.1:5000`.
 
 ## 9. DNS and HTTPS
 

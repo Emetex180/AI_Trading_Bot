@@ -155,6 +155,22 @@ single-domain deployment. `TRUST_PROXY=true` should only be set when a proxy is
 genuinely in front and the headers are genuinely arriving — otherwise a client
 can forge its own scheme and address.
 
+When you do set it, set `PUBLIC_HOST` alongside it:
+
+```ini
+TRUST_PROXY=true
+PUBLIC_HOST=3rader.com
+```
+
+`PUBLIC_HOST` is the allowlist `X-Forwarded-Host` is checked against. A value
+that does not match is ignored rather than applied, so the header can only ever
+name a domain this deployment actually serves — a forged one leaves the request
+on the `Host` IIS sent instead of redirecting a customer somewhere else. Leaving
+`PUBLIC_HOST` blank trusts no forwarded host at all: the scheme is still
+corrected to `https`, but absolute URLs keep the host the request carried, which
+is `127.0.0.1:5000` when `preserveHostHeader` is off. The app logs a warning at
+startup if `TRUST_PROXY` is on and `PUBLIC_HOST` is blank.
+
 ## 5. HTTPS
 
 ```powershell
@@ -207,7 +223,7 @@ including the client-gets-403-on-/admin test.
 |---|---|
 | 502 / 504 from IIS | The `serve` task is not running, or it is bound to a different port than the rule targets. |
 | 500 from IIS, rewrite in the log | `allowedServerVariables` is missing the header the rule sets. |
-| Redirects point at `127.0.0.1:5000` | `preserveHostHeader` is off, or `TRUST_PROXY` does not match whether the headers actually arrive. |
+| Redirects point at `127.0.0.1:5000` | `preserveHostHeader` is off, or `TRUST_PROXY` does not match whether the headers actually arrive, or `PUBLIC_HOST` does not name the host the site is reached on (`X-Forwarded-Host` is ignored unless it matches). The app logs a warning at startup for the blank-`PUBLIC_HOST` case. |
 | Paying sends the customer to a 404 **on this site**, at a path like `/v3/hosted/pay/…` | ARR's reverse host rewrite is on. Set `reverseRewriteHostInResponseHeaders` to `False` (section 2). The path is Flutterwave's; only the host was swapped for ours. |
 | Sign-in works but immediately signs out | `FLASK_SECRET_KEY` is blank, so a temporary key is generated on each restart. Or two web processes are running with different keys. |
 | Sign-in form posts but nothing happens | `SESSION_COOKIE_SECURE=true` while the page is being served over HTTP. |

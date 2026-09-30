@@ -41,10 +41,11 @@ import logging
 from flask import (Flask, abort, current_app, g, jsonify, redirect,
                    render_template, request, url_for)
 from sqlalchemy.orm import sessionmaker
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from backtesting.compare import batch_totals, rank_assets
 from backtesting.compare import tidy as tidy_summary
-from config import Settings, get_settings
+from config import Settings, bare_host, get_settings
 from database.repository import Repository, ensure_schema, get_engine
 from trading import time_utils as tu
 
@@ -81,6 +82,50 @@ _TEMPLATES = "templates"
 
 #: Human labels for breakdown bucket keys (sessions / Silver Bullet windows).
 _WINDOW_LABELS: dict[str, str] = {}
+
+
+class _TrustedProxyFix(ProxyFix):
+    """``ProxyFix`` that only believes ``X-Forwarded-Host`` for hosts we serve.
+
+    IIS terminates TLS and proxies to Waitress on ``127.0.0.1:5000``, so the
+    request Flask sees names the loopback address and the ``http`` scheme. Every
+    absolute URL built from it — the Flutterwave ``redirect_url`` a customer's
+    browser is sent to after checkout, and any redirect — would name the address
+    only the proxy can reach. ``ProxyFix`` is what corrects that, from the two
+    headers the IIS rewrite rule in ``deploy/iis-arr-notes.md`` sets.
+
+    Its host handling trusts the header outright, though, and that header is not
+    the proxy's alone to write. An allowlisted host is what stops a forged
+    ``X-Forwarded-Host`` from choosing the domain every absolute URL — and the
+    same-origin check in :mod:`app.api`, which compares that same host against
+    the browser's ``Origin`` — is built from. A value we do not serve is dropped
+    whole, and the request keeps the ``Host`` the proxy actually sent.
+
+    The check is applied to the value ``ProxyFix`` would *select*, so the guard
+    and the rewrite can never disagree: with one trusted proxy that is the last
+    element of the comma-separated list, which is also the only element a client
+    cannot forge.
+
+    ``x_for`` is left at zero. Client addresses feed the login throttle, and
+    whether ARR appends the real address to a client-supplied
+    ``X-Forwarded-For`` is a question about the proxy's configuration rather
+    than this app's; left untrusted, the throttle keeps behaving exactly as it
+    does today.
+    """
+
+    def __init__(self, app, allowed_hosts, **kwargs):
+        super().__init__(app, x_for=0, **kwargs)
+        self.allowed_hosts = frozenset(allowed_hosts)
+
+    def __call__(self, environ, start_response):
+        forwarded = environ.get("HTTP_X_FORWARDED_HOST")
+        if forwarded:
+            candidate = bare_host(forwarded.split(",")[-1])
+            if candidate not in self.allowed_hosts:
+                # Not a name we answer on. Dropping it leaves ``HTTP_HOST`` as
+                # the proxy sent it, which is still an address this app serves.
+                environ.pop("HTTP_X_FORWARDED_HOST", None)
+        return super().__call__(environ, start_response)
 
 
 def _window_label(key: str) -> str:
@@ -230,6 +275,26 @@ def create_app(settings: Settings | None = None,
 
     app = Flask(__name__, template_folder=_TEMPLATES,
                 static_folder="static", static_url_path="/static")
+
+    # Behind IIS/ARR the app is only ever reached through the proxy, so without
+    # this every ``_external=True`` URL names ``127.0.0.1:5000`` — the address
+    # the customer or their bank is not on. Opt-in, because the same headers are
+    # forgeable the moment the app can be reached without a proxy in front.
+    if cfg.trust_proxy:
+        # A blank allowlist is not an error but it is almost certainly an
+        # oversight: ``TRUST_PROXY`` was set expecting the public host to be
+        # picked up, and the scheme alone will be. Said out loud for the same
+        # reason a blank ``FLASK_SECRET_KEY`` is.
+        if not cfg.public_hosts:
+            logging.getLogger(__name__).warning(
+                "TRUST_PROXY is on but PUBLIC_HOST is blank, so "
+                "X-Forwarded-Host is ignored and absolute URLs will keep "
+                "whatever host arrived. Set PUBLIC_HOST to the public "
+                "hostname, e.g. PUBLIC_HOST=3rader.com")
+        app.wsgi_app = _TrustedProxyFix(app.wsgi_app,
+                                        allowed_hosts=cfg.public_hosts,
+                                        x_proto=1, x_host=1)
+
     app.config["CFG"] = cfg
     app.config["SESSION_FACTORY"] = factory
     #: ``None`` when the caller injected its own repository, which is exactly
