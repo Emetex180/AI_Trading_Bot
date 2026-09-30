@@ -366,3 +366,22 @@ def test_the_installer_requires_an_env_file():
 
     assert ".env" in text
     assert "throw" in text.lower() or "exit 1" in text.lower()
+
+
+def test_the_iis_notes_disable_the_arr_host_rewrite_that_breaks_checkout():
+    """ARR's default sends the customer to our own 404 instead of the payment page.
+
+    ``reverseRewriteHostInResponseHeaders`` is on by default and rewrites the
+    host of every redirect's ``Location`` header to the host the client asked
+    for. Flask hands the browser Flutterwave's absolute checkout URL and ARR
+    turns it into a URL on this site -- ``/v3/hosted/pay/…``, which is a 404
+    here, with the payment row already written. Nothing in the application can
+    see or fix that, so the setting has to be in the file an operator applies.
+    """
+    text = IIS_NOTES.read_text(encoding="utf-8")
+
+    assert "reverseRewriteHostInResponseHeaders" in text
+    # The name alone is not the fix -- it ships enabled.
+    assert re.search(
+        r"reverseRewriteHostInResponseHeaders'\s+-Value\s+'False'", text
+    ), "the notes must set it to False, not merely mention it"

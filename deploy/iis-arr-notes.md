@@ -50,6 +50,20 @@ Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' `
 Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' `
     -Filter 'system.webServer/proxy' -Name 'preserveHostHeader' -Value 'True'
 
+# Stop ARR rewriting the host in the Location header of a redirect. This is
+# ON by default and it is the setting that breaks the payment flow: it rewrites
+# the host of *every* 302 to the host the client asked for, so Flutterwave's
+# absolute checkout URL comes back as https://<this site>/v3/hosted/pay/... and
+# the customer lands on our own 404 instead of the payment page. The path still
+# points at the checkout, which is what makes it look like an app bug.
+#
+# The app has no use for the repair. The reverse rewrite exists for backends
+# that emit URLs pointing at their own internal address; preserveHostHeader
+# above already gives Flask the real public host to build its URLs from, and
+# the checkout URL is Flutterwave's own and must pass through untouched.
+Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' `
+    -Filter 'system.webServer/proxy' -Name 'reverseRewriteHostInResponseHeaders' -Value 'False'
+
 # Give the backend a moment before timing out. The client pages poll every five
 # seconds and are cheap; this is headroom, not a requirement.
 Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' `
@@ -194,6 +208,7 @@ including the client-gets-403-on-/admin test.
 | 502 / 504 from IIS | The `serve` task is not running, or it is bound to a different port than the rule targets. |
 | 500 from IIS, rewrite in the log | `allowedServerVariables` is missing the header the rule sets. |
 | Redirects point at `127.0.0.1:5000` | `preserveHostHeader` is off, or `TRUST_PROXY` does not match whether the headers actually arrive. |
+| Paying sends the customer to a 404 **on this site**, at a path like `/v3/hosted/pay/…` | ARR's reverse host rewrite is on. Set `reverseRewriteHostInResponseHeaders` to `False` (section 2). The path is Flutterwave's; only the host was swapped for ours. |
 | Sign-in works but immediately signs out | `FLASK_SECRET_KEY` is blank, so a temporary key is generated on each restart. Or two web processes are running with different keys. |
 | Sign-in form posts but nothing happens | `SESSION_COOKIE_SECURE=true` while the page is being served over HTTP. |
 | `.env` or `.db` reachable over the web | The IIS site's physical path was pointed at the project directory. Move it to an empty shell directory. |
