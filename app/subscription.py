@@ -136,6 +136,35 @@ def _provider_redirect(link):
     return target
 
 
+def _diag_checkout(reference: str, label: str, *, link=None, target=None) -> None:
+    """TEMPORARY checkout diagnostic — remove before committing.
+
+    Answers "which of the four guards sent the customer back to /subscription?"
+    from the log alone, because the access log cannot tell them apart: every one
+    of them returns the same ``302 Location: /subscription``.
+
+    Records the payment reference, whether the provider returned a link, that
+    link's scheme and host, whether :func:`_provider_redirect` accepted it, and
+    the target the route is about to redirect to. Deliberately no secret, no
+    customer email or phone, and nothing read from the provider's payload.
+    """
+    link_text = "" if link is None else str(link).strip()
+    scheme = host = "<none>"
+    if link_text:
+        try:
+            parts = urlsplit(link_text)
+            scheme = parts.scheme or "<empty>"
+            host = parts.hostname or "<empty>"
+        except ValueError:  # a link too malformed to even split
+            scheme = host = "<unparseable>"
+    log.warning(
+        "FLUTTERWAVE CHECKOUT DIAG: reference=%s link_present=%s scheme=%s "
+        "host=%s accepted=%s target=%s path=%s",
+        reference, bool(link_text), scheme, host,
+        bool(link_text) and _provider_redirect(link) is not None,
+        target or "<none>", label)
+
+
 def _finalise(cfg, repo, payment, verification) -> str:
     """Reconcile one verified payment. Returns a short outcome word.
 
@@ -371,6 +400,8 @@ def checkout(plan_key: str):
 
     plan = _plan_row(repo, spec.key)
     if plan is None or not plan.is_active:
+        _diag_checkout("<none: no payment row>", "plan-unavailable",
+                       target=url_for("subscription.index"))
         flash("That plan is not available at the moment.", "warning")
         return redirect(url_for("subscription.index"))
 
@@ -379,6 +410,8 @@ def checkout(plan_key: str):
         # Said out loud rather than swallowed: a customer who clicked "subscribe"
         # deserves to know the difference between "your card failed" and "this
         # deployment cannot take cards".
+        _diag_checkout("<none: no payment row>", "provider-not-configured",
+                       target=url_for("subscription.index"))
         flash("Card payments are not configured on this deployment yet. "
               "Please contact support.", "warning")
         return redirect(url_for("subscription.index"))
@@ -408,6 +441,8 @@ def checkout(plan_key: str):
     except PaymentError as exc:
         # ``exc`` is written to be customer-safe; the detail is already logged in
         # app.payments.
+        _diag_checkout(reference, "initialize-failed",
+                       target=url_for("subscription.index"))
         repo.fail_payment(reference, str(exc))
         flash(str(exc), "warning")
         return redirect(url_for("subscription.index"))
@@ -417,6 +452,8 @@ def checkout(plan_key: str):
     # fails the attempt outright, and never guesses at where the checkout lives.
     target = _provider_redirect(link)
     if target is None:
+        _diag_checkout(reference, "invalid-checkout-link", link=link,
+                       target=url_for("subscription.index"))
         log.error("Flutterwave returned an unusable checkout link for %s",
                   reference)
         # Failed rather than left pending. "Pending" means a customer opened a
@@ -432,6 +469,7 @@ def checkout(plan_key: str):
     repo.log_event("INFO", "payments",
                    f"Checkout started for {user.username} on {plan.key} "
                    f"({reference})")
+    _diag_checkout(reference, "ok", link=link, target=target)
     return redirect(target)
 
 
