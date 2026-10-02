@@ -6,6 +6,7 @@
    is the whole page. The shell lives here rather than being repeated in each of
    the four so the brand block, the stylesheet order and the footer note stay
    identical across them. #}
+{% from "_brand.html" import brand_logo, brand_icons %}
 <!doctype html>
 <html lang="en" data-bs-theme="dark">
 <head>
@@ -21,15 +22,18 @@
   <link href="{{ url_for('static', filename='css/app.css') }}" rel="stylesheet">
   <link href="{{ url_for('static', filename='css/client.css') }}" rel="stylesheet">
   <link href="{{ url_for('static', filename='css/3rader.css') }}" rel="stylesheet">
+  {{ brand_icons() }}
 </head>
 <body class="auth-body">
 
 <main class="auth-wrap">
   <div class="auth-card card">
     <div class="auth-brand">
-      <span class="brand-mark" aria-hidden="true"></span>
+      {# The wordmark carries the name, so the old text lockup next to it is
+         gone rather than repeated — two "3rader"s read twice on a screen
+         reader and look like a mistake in print. #}
+      {{ brand_logo() }}
       <div>
-        <div class="auth-title">{{ platform_name | default("3rader") }}</div>
         <div class="auth-sub">{% block auth_sub %}New York session analysis{% endblock %}</div>
       </div>
     </div>
@@ -69,5 +73,9 @@
   {% endblock %}
 </main>
 
+{# These pages carried no script before, and this is the only thing they need:
+   the show/hide control on the password fields. Without it the button renders
+   and does nothing, so it is not optional here. #}
+<script src="{{ url_for('static', filename='js/password.js') }}"></script>
 </body>
 </html>

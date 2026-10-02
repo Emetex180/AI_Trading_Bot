@@ -92,6 +92,98 @@ a:hover {
 }
 
 /* --------------------------------------------------------------------------
+   Brand lockup
+   The wordmark, as a rule and then one size per slot. Sized here rather than by
+   the width/height attributes, which exist only to reserve the intrinsic ratio
+   so a header does not reflow when the image lands. Slack on the right of the
+   artwork is trimmed at build time, so the box is the glyphs.
+
+   Each shell keeps its own height rather than sharing one: the auth card is the
+   only place the mark is the subject rather than a label on a navigation bar,
+   and it reads as an afterthought at the sidebar's size.
+   -------------------------------------------------------------------------- */
+.brand-logo {
+  display: block;
+  flex: none;
+  width: auto;
+  height: 22px;
+}
+.topbar .brand-logo { height: 22px; }        /* console */
+.sidebar-brand .brand-logo { height: 26px; } /* client + admin */
+.mk-brand .brand-logo { height: 24px; }      /* public nav */
+.mk-foot .brand-logo { height: 22px; }       /* public footer */
+.auth-brand .brand-logo { height: 34px; }    /* sign in / register */
+
+/* Qualifies the wordmark on the operator console, which shares a deployment
+   with the client product and would otherwise be indistinguishable from it. */
+.brand-suffix {
+  font-size: .6875rem;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+  padding-left: .6rem;
+  border-left: 1px solid var(--c-line);
+  align-self: center;
+}
+
+/* --------------------------------------------------------------------------
+   Password field — input plus a show/hide control
+   The wrapper is only a positioning context, so it adds no height and the field
+   keeps whatever spacing its page already gave it. Room is reserved on the
+   right of the input so a long value never runs underneath the button.
+   -------------------------------------------------------------------------- */
+.pw-field {
+  position: relative;
+  display: block;
+}
+
+.pw-field .form-control {
+  padding-right: 2.75rem;
+}
+
+.pw-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 2.75rem;          /* 44px: a comfortable touch target on a phone */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--c-text-faint);
+  cursor: pointer;
+}
+
+.pw-toggle:hover { color: var(--c-text); }
+
+/* Inset rather than outset: the ring belongs inside the input's own outline, or
+   it would sit on top of the field border. */
+.pw-toggle:focus-visible {
+  outline: 2px solid var(--bs-focus-ring-color);
+  outline-offset: -2px;
+  color: var(--c-text);
+}
+
+/* One glyph per state, and the button shows the action it performs: a plain eye
+   while the password is hidden, a struck-through eye once it is visible. */
+.pw-field .pw-toggle-eye-off { display: none; }
+.pw-field.is-revealed .pw-toggle-eye { display: none; }
+.pw-field.is-revealed .pw-toggle-eye-off { display: block; }
+
+/* Bootstrap renders a validation icon inside `.is-invalid` / `.is-valid`
+   fields at the same right edge; move the toggle clear of it rather than
+   letting the two overlap. */
+.pw-field .form-control.is-invalid,
+.pw-field .form-control.is-valid {
+  background-position: right calc(2.75rem + .4rem) center;
+}
+
+/* --------------------------------------------------------------------------
    Flash messages
    The client shell had no region for these, because nothing flashed inside it
    before the subscription flow. Placed at the top of the content column so a
@@ -214,7 +306,6 @@ a:hover {
   text-decoration: none;
 }
 .mk-brand:hover { color: var(--c-text); }
-.mk-brand .brand-mark { width: 10px; height: 10px; }
 
 .mk-links {
   display: flex;

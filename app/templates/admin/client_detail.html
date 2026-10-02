@@ -1,4 +1,5 @@
 {% extends "admin/base.html" %}
+{% from "_macros.html" import password_field %}
 {% block title %}{{ c.username }}{% endblock %}
 
 {% block content %}
@@ -181,8 +182,10 @@
           <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <div>
             <label class="form-label" for="pw-new">New password</label>
+            {% call password_field('pw-new') %}
             <input class="form-control" id="pw-new" name="password" type="password"
                    required minlength="{{ min_password }}" autocomplete="new-password">
+            {% endcall %}
           </div>
           <button class="btn btn-sm btn-outline-danger" type="submit">Reset</button>
         </form>

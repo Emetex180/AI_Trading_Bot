@@ -8,6 +8,7 @@
    server for the first paint and then ticked by client.js, which resolves the
    zone from window.ictClock — the same zone the server's `ny` filter uses, so
    the browser and the tables can never disagree. #}
+{% from "_brand.html" import brand_logo, brand_icons %}
 <!doctype html>
 <html lang="en" data-bs-theme="dark">
 <head>
@@ -28,6 +29,7 @@
      it. It restates the design tokens rather than editing any component, so
      nothing here can break by being re-coloured. #}
   <link href="{{ url_for('static', filename='css/3rader.css') }}" rel="stylesheet">
+  {{ brand_icons() }}
 </head>
 <body>
 {% set u = current_user %}
@@ -37,11 +39,8 @@
 
   <aside class="sidebar">
     <a class="sidebar-brand" href="{{ url_for('root') }}">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span>
-        <span class="sidebar-brand-text">{{ platform_name | default("ICT Platform") }}</span>
-        <span class="sidebar-brand-sub">New York sessions</span>
-      </span>
+      {{ brand_logo() }}
+      <span class="sidebar-brand-sub">New York sessions</span>
     </a>
 
     {# The product navigation. A block so the admin area can prepend its own
@@ -210,6 +209,7 @@
    with no block here simply gets the clock and the status chrome, which is the
    right default: nothing is polled that the page does not show. #}
 {% block poll_config %}{% endblock %}
+<script src="{{ url_for('static', filename='js/password.js') }}"></script>
 <script src="{{ url_for('static', filename='js/client.js') }}"></script>
 {% block scripts %}{% endblock %}
 </body>

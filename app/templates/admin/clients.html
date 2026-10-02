@@ -1,4 +1,5 @@
 {% extends "admin/base.html" %}
+{% from "_macros.html" import password_field %}
 {% block title %}Clients{% endblock %}
 
 {% block content %}
@@ -43,8 +44,10 @@
 
       <div class="col-12 col-md-4">
         <label class="form-label" for="n-password">Password</label>
+        {% call password_field('n-password') %}
         <input class="form-control" id="n-password" name="password" type="password"
                required minlength="{{ min_password }}" autocomplete="new-password">
+        {% endcall %}
         <div class="form-hint">Stored as a hash; never in plain text.</div>
       </div>
 

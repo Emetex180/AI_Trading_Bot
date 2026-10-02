@@ -1,7 +1,7 @@
 {# Shared presentation macros.
 
    Imported explicitly by each page:
-     {% from "_macros.html" import dir_badge, status_badge, outcome_badge, stat, empty %}
+     {% from "_macros.html" import dir_badge, status_badge, outcome_badge, stat, empty, password_field %}
 
    Jinja does not expose a parent template's macros inside a child's blocks,
    so these deliberately do not live in base.html.
@@ -45,4 +45,46 @@
 
 {% macro empty(colspan, message) -%}
   <tr><td colspan="{{ colspan }}" class="empty-state">{{ message }}</td></tr>
+{%- endmacro %}
+
+{# Password input with a show/hide control.
+
+   Written as a call block so the field keeps whatever attributes its page
+   already gave it. The macro contributes the wrapper and the button and never
+   rewrites the input's own markup, so `required`, `autocomplete`, `minlength`
+   and `autofocus` travel through untouched:
+
+     {% call password_field('password') %}
+       <input class="form-control" id="password" name="password" type="password" ...>
+     {% endcall %}
+
+   `id` only feeds `aria-controls`; the script finds the field by walking up to
+   `.pw-field`, so a page cannot desynchronise the two by editing one of them.
+
+   The button is `type="button"`: it sits inside the form it belongs to, and
+   the default type would submit it. It is wired by static/js/password.js. #}
+{% macro password_field(id) -%}
+  <div class="pw-field">
+    {{ caller() }}
+    <button type="button" class="pw-toggle" data-pw-toggle
+            aria-controls="{{ id }}" aria-pressed="false"
+            aria-label="Show password" title="Show password">
+      <svg class="pw-toggle-eye" viewBox="0 0 24 24" width="18" height="18"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true" focusable="false">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+      <svg class="pw-toggle-eye-off" viewBox="0 0 24 24" width="18" height="18"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true" focusable="false">
+        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+        <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/>
+        <line x1="1" y1="1" x2="23" y2="23"/>
+      </svg>
+    </button>
+  </div>
 {%- endmacro %}

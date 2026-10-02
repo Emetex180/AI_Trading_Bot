@@ -1,0 +1,33 @@
+{# The 3rader brand lockup and the document icon set.
+
+   One place for both, so the four shells (console, client, auth, public) cannot
+   drift apart or end up shipping a second, informal mark. The wordmark PNG
+   already contains the "3rader" text, so the name lives in `alt` and no shell
+   repeats it as markup next to the image — that would read the name twice to a
+   screen reader.
+
+   The artwork is derived from the supplied logo by scripts/build_brand_assets.py,
+   which keys the near-black plate out to real transparency. The plate is a few
+   levels off --c-bg, so a raw JPG would have drawn a faint rectangle behind the
+   mark on every page.
+
+   Sized by CSS (`.brand-logo` in 3rader.css) with the intrinsic ratio reserved
+   by the width/height attributes, so the header does not reflow when the image
+   lands. #}
+
+{% macro brand_logo(height=22, cls='') -%}
+  {%- set w = (height * 700 / 167) | round | int -%}
+  <img class="brand-logo {{ cls }}" src="{{ url_for('static', filename='image/3rader-logo.png') }}"
+       alt="{{ platform_name | default('3rader') }}"
+       width="{{ w }}" height="{{ height }}" decoding="async">
+{%- endmacro %}
+
+{# Document icons. Modern browsers take the PNG and ignore the .ico; the .ico is
+   there for the bare /favicon.ico request a browser makes on its own, which
+   app/web.py also answers directly for anything that skips these links. #}
+{% macro brand_icons() -%}
+  <link rel="icon" href="{{ url_for('static', filename='image/favicon.ico') }}" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32"
+        href="{{ url_for('static', filename='image/favicon-32.png') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='image/apple-touch-icon.png') }}">
+{%- endmacro %}

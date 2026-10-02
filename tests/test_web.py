@@ -135,7 +135,11 @@ def test_index_renders_auto_trading_off_and_seeded_signal():
     resp = client.get("/console")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert "ICT Multi-Asset Scanner" in body
+    # The console now carries the shared 3rader wordmark rather than its own
+    # product name; the qualifier is what still tells an operator which of the
+    # two surfaces they are looking at.
+    assert "image/3rader-logo.png" in body
+    assert "brand-suffix" in body
     assert "AUTO-TRADING OFF" in body or "auto-trading-pill" in body
     assert "USTEC" in body          # seeded signal rendered
     assert "Approved" in body

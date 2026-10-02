@@ -1,9 +1,10 @@
+{% from "_brand.html" import brand_logo, brand_icons %}
 <!doctype html>
 <html lang="en" data-bs-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}ICT Scanner{% endblock %}</title>
+  <title>{% block title %}3rader Console{% endblock %}</title>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,6 +15,7 @@
   <link href="{{ url_for('static', filename='css/app.css') }}" rel="stylesheet">
   {# The brand layer, last so its token block re-tones the console too. #}
   <link href="{{ url_for('static', filename='css/3rader.css') }}" rel="stylesheet">
+  {{ brand_icons() }}
 </head>
 <body>
 {% set nav = request.endpoint or '' %}
@@ -21,8 +23,12 @@
 <header class="topbar">
   <div class="shell topbar-inner">
     <a class="brand" href="{{ url_for('index') }}">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span>ICT Multi-Asset Scanner</span>
+      {# The same wordmark as every other surface. The console is operator-only
+         and sits beside the client product in one deployment, so the qualifier
+         stays: without it an operator with both open cannot tell at a glance
+         which one they are looking at. #}
+      {{ brand_logo() }}
+      <span class="brand-suffix">Console</span>
     </a>
 
     <nav class="topbar-nav">

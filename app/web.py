@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 
 from flask import (Flask, abort, current_app, g, jsonify, redirect,
-                   render_template, request, url_for)
+                   render_template, request, send_from_directory, url_for)
 from sqlalchemy.orm import sessionmaker
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -631,6 +631,20 @@ def create_app(settings: Settings | None = None,
         """
         return jsonify({"status": "ok",
                         "live_running": bool(live_view(jobs).get("alive"))})
+
+    @app.get("/favicon.ico")
+    def favicon():
+        """Answer the bare /favicon.ico a browser asks for on its own.
+
+        Every shell links the icon set explicitly (see ``_brand.html``), so this
+        is the fallback for the clients that probe the root path regardless —
+        and for anything that cached a 404 from before the mark existed. Served
+        from static with the right type, since the default guess for .ico is
+        unreliable on some servers.
+        """
+        return send_from_directory(
+            app.static_folder, "image/favicon.ico",
+            mimetype="image/vnd.microsoft.icon")
 
     # Control endpoints (start/stop live, run backtest, poll status).
     register_api(app)
