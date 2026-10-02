@@ -48,7 +48,9 @@
     <span>Levels</span>
     <span class="card-header-note">Risk / reward {{ s.rr_label }}</span>
   </div>
-  <div class="setup-levels">
+  {# `four-up` because this page shows the ratio as a fourth level; the three-up
+     default is what the setup cards use. See client.css §3. #}
+  <div class="setup-levels four-up">
     {{ level('Entry', s.entry, s.asset) }}
     {{ level('Stop loss', s.sl, s.asset) }}
     {{ level('Target', s.tp, s.asset) }}

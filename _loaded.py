@@ -30,15 +30,33 @@ OUT = S.OUT.__class__(sys.argv[1] if len(sys.argv) > 1 else "snapshots_loaded")
 sys.path.insert(0, "tests")
 from test_database import _signal  # noqa: E402
 
-#: asset, direction, entry, stop, target, status, minutes after 13:10 UTC
+#: asset, direction, entry, stop, target, status, minutes after 13:10 UTC,
+#: efficiency, model state, rejection reason
 SETUPS = [
-    ("USTEC", "buy", 101.70, 99.50, 106.00, "APPROVED", 0),
-    ("EURUSD", "sell", 1.08620, 1.08900, 1.07900, "APPROVED", 35),
-    ("XAUUSD", "buy", 2412.4, 2401.0, 2440.0, "APPROVED", 70),
-    ("GBPUSD", "sell", 1.27040, 1.27310, 1.26300, "APPROVED", 105),
-    ("USDJPY", "buy", 157.220, 156.800, 158.200, "REJECTED", 140),
-    ("AUDUSD", "buy", 0.66410, 0.66180, 0.66950, "PENDING", 175),
+    ("USTEC", "buy", 101.70, 99.50, 106.00, "APPROVED", 0, 82.5, "TRADE_CONFIRMED", ""),
+    ("EURUSD", "sell", 1.08620, 1.08900, 1.07900, "APPROVED", 35, 64.0, "TRADE_CONFIRMED", ""),
+    ("XAUUSD", "buy", 2412.4, 2401.0, 2440.0, "APPROVED", 70, 71.5, "TRADE_CONFIRMED", ""),
+    ("GBPUSD", "sell", 1.27040, 1.27310, 1.26300, "APPROVED", 105, 55.0, "FVG_FOUND", ""),
+    ("USDJPY", "buy", 157.220, 156.800, 158.200, "REJECTED", 140, 38.0,
+     "CISD_CONFIRMED", "Spread 4.2 pips at entry is above the 2.0 cap."),
+    ("AUDUSD", "buy", 0.66410, 0.66180, 0.66950, "PENDING", 175, 47.0,
+     "LIQUIDITY_PURGED", ""),
 ]
+
+#: The first signal also carries a full advisory overlay, so the AI branch of
+#: the detail page renders rather than only its empty state.
+ADVISORY = dict(
+    ai_status="COMPLETED", ai_score=78.0, ai_decision="TAKE", ai_confidence=72.0,
+    ai_reasoning="Clean 1H purge below the prior day low, followed by a "
+                 "displacement leg that left an unmitigated M1 fair value gap. "
+                 "The stop sits behind the liquidity-taking candle wick and the "
+                 "target is the nearest unswept high, giving a 2:1 payoff on a "
+                 "level the model already validated.",
+    ai_strengths=["Displacement leg closed above the opening range",
+                  "FVG unmitigated on the retrace", "Stop behind the sweep wick"],
+    ai_risks=["Entry is 40 minutes before the New York open",
+              "Spread widens around the 10:00 NY data release"],
+)
 
 EVENTS = [
     ("info", "scanner", "Scanner started, 17 assets registered from the terminal."),
@@ -69,27 +87,38 @@ def main() -> int:
                      repository=repo, setup_db=False)
 
     base = datetime(2026, 1, 6, 13, 10)
-    for asset, direction, entry, stop, target, status, lag in SETUPS:
+    rows: list[tuple[str, object]] = []
+    for (asset, direction, entry, stop, target, status, lag,
+         efficiency, state, reason) in SETUPS:
         t = base + timedelta(minutes=lag)
-        repo.save_signal(_signal(
+        extra = ADVISORY if asset == "USTEC" else {}
+        row = repo.save_signal(_signal(
             asset=asset, direction=direction, entry=entry, sl=stop, tp=target,
-            status=status,
+            status=status, state=state, reason=reason,
+            efficiency_score=efficiency,
             risk_approved=(status == "APPROVED"),
             alert_only=(status != "APPROVED"),
             entry_time_utc=t, entry_time_ny=t,
             purge_time_ny=t - timedelta(minutes=70),
             cisd_confirm_time_ny=t - timedelta(minutes=40),
             liquidity_price=round(entry - (0.4 if direction == "buy" else -0.4), 5),
-            rr=2.0,
+            rr=2.0, **extra,
         ))
+        rows.append((asset, row))
     for level, source, message in EVENTS:
         repo.log_event(level, source, message)
+
+    # One detail page per branch: a taken setup carrying an advisory, and a
+    # rejected one whose "Not taken" notice only renders when a reason exists.
+    by_asset = {asset: row for asset, row in rows}
+    detail = [("setup-detail", f"/setups/{by_asset['USTEC'].id}"),
+              ("setup-detail-rejected", f"/setups/{by_asset['USDJPY'].id}")]
 
     client = app.test_client()
     S.sign_in(client, repo, "snap-client", "client", plan="vip")
     S.emit(client, [("dashboard", "/dashboard"), ("setups", "/setups"),
                     ("market", "/market"), ("history", "/history"),
-                    ("analysis", "/analysis")])
+                    ("analysis", "/analysis")] + detail)
     print(f"\n{OUT.resolve()}")
     return 0
 

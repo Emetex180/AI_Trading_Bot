@@ -377,6 +377,28 @@
 
 .setup-level.rr .setup-level-value { color: var(--c-accent-soft); }
 
+/* The detail page prints four levels — entry, stop, target and the ratio — where
+   a card prints three. In the fixed three-track grid above, the fourth orphaned
+   onto a row of its own at a third width, leaving the other two thirds of that
+   row empty at every window size. Four tracks need ~148px each at the narrowest
+   point the collapsed shell gives them, which still clears the widest price this
+   prints, so the fourth fits on the one row at every width above 40rem. Below
+   that the strip pairs up instead of squeezing: four tracks at a phone width
+   would leave a 7-character mono price no room. */
+.setup-levels.four-up { grid-template-columns: repeat(4, 1fr); }
+
+@media (max-width: 40rem) {
+  .setup-levels.four-up { grid-template-columns: repeat(2, 1fr); }
+  /* In a 2x2 the right column must not draw its divider against the card edge —
+     `:last-child` above covers only the fourth cell, so the second needs saying
+     too. The lower pair is a row of its own and needs a rule above it, which the
+     single-row case never had to draw. */
+  .setup-levels.four-up .setup-level:nth-child(2n) { border-right: 0; }
+  .setup-levels.four-up .setup-level:nth-child(n+3) {
+    border-top: 1px solid var(--c-line-soft);
+  }
+}
+
 .setup-body {
   padding: .875rem 1rem;
   display: flex;
