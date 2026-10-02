@@ -295,7 +295,12 @@
    -------------------------------------------------------------------------- */
 .setup-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(21rem, 1fr));
+  /* `min(21rem, 100%)` rather than a bare 21rem floor: something taller than the
+     column must not force the track wider than the screen. At 21rem (336px) a
+     bare floor overflowed the page by 10px on a 360px phone, where the content
+     column is only ~310px. The card has a workable minimum above that, so it
+     simply narrows instead. */
+  grid-template-columns: repeat(auto-fill, minmax(min(21rem, 100%), 1fr));
   gap: 1rem;
 }
 
