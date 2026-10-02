@@ -295,12 +295,19 @@
    -------------------------------------------------------------------------- */
 .setup-grid {
   display: grid;
-  /* `min(21rem, 100%)` rather than a bare 21rem floor: something taller than the
-     column must not force the track wider than the screen. At 21rem (336px) a
-     bare floor overflowed the page by 10px on a 360px phone, where the content
-     column is only ~310px. The card has a workable minimum above that, so it
-     simply narrows instead. */
-  grid-template-columns: repeat(auto-fill, minmax(min(21rem, 100%), 1fr));
+  /* `min(18.5rem, 100%)` rather than a bare 18.5rem floor: something wider than
+     the column must not force the track wider than the screen. At a 360px phone
+     the content column is only ~310px, so the floor has to yield; the card has
+     a workable minimum above that and simply narrows instead.
+
+     18.5rem (296px) is set by the narrowest place this grid is used rather than
+     by taste. On the dashboard the grid sits in a two-thirds column, ~640px at
+     a 1280px window: a 21rem floor wanted 688px for two tracks, so every setup
+     fell to one per row and four setups pushed the page past 1400px. At 296px
+     two tracks need 608px and fit, which halves the height of the dashboard and
+     matches the density /setups already had. Wider windows simply get more
+     columns. */
+  grid-template-columns: repeat(auto-fill, minmax(min(18.5rem, 100%), 1fr));
   gap: 1rem;
 }
 
@@ -490,6 +497,14 @@
 
 .feed-item {
   display: flex;
+  /* The feed is shown in a 7-of-12 column on /analysis and a 4-of-12 column on
+     the dashboard. In that narrow column a fixed 7.5rem timestamp plus the
+     source label left barely 80px for the message, which broke a one-line event
+     such as "Poll completed: 17 assets, 4 states changed, 1.2s." across six.
+     Allowing the row to wrap lets the message drop to its own full-width line
+     when it cannot fit beside them, and changes nothing on the wide page where
+     it does fit. */
+  flex-wrap: wrap;
   gap: .75rem;
   padding: .625rem 0;
   border-bottom: 1px solid var(--c-line-soft);
@@ -508,7 +523,7 @@
 }
 
 .feed-text {
-  flex: 1 1 auto;
+  flex: 1 1 11rem;
   color: var(--c-text-dim);
   min-width: 0;
   overflow-wrap: anywhere;
