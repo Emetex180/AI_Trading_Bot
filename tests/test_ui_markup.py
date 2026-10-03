@@ -339,3 +339,62 @@ def test_the_stylesheet_is_linked_after_bootstrap(dashboard):
     html = dashboard["html"]["dashboard"]
     assert html.index("bootstrap.min.css") < html.index("css/app.css")
 
+
+def _media_blocks(css: str, query: str) -> str:
+    """The body of every ``@media`` block whose query matches, in file order.
+
+    *Every* block, not the first one: this stylesheet declares the 860px
+    breakpoint in more than one place, and a rule sitting in the later block is
+    still a rule that applies. Reading only the first would report a rule as
+    missing while it is right there in the file.
+
+    Brace-matched rather than regexed: the blocks here hold nested rules, and a
+    pattern that stopped at the first ``}`` would report a rule as missing that
+    is sitting on the next line.
+    """
+    needle = "@media " + query
+    blocks, cursor = [], 0
+
+    while True:
+        start = css.find(needle, cursor)
+        if start == -1:
+            return "\n".join(blocks)
+        depth = 0
+        for index in range(css.index("{", start), len(css)):
+            if css[index] == "{":
+                depth += 1
+            elif css[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(css[start:index + 1])
+                    cursor = index + 1
+                    break
+        else:
+            raise AssertionError(f"unterminated @media block after {query}")
+
+
+def test_the_narrow_screen_breakpoints_actually_hide_their_columns(css):
+    """The markers the tables carry must resolve to a rule that hides them.
+
+    The templates put ``table-hide-*`` on the columns that do not fit a phone.
+    A class in the markup with no rule behind it hides nothing, and the page
+    simply stays broken — so the pairing between the two is pinned here.
+    """
+    assert ".table-hide-md" in _media_blocks(css, "(max-width: 860px)")
+    assert ".table-hide-sm" in _media_blocks(css, "(max-width: 40rem)")
+
+
+def test_the_scroll_box_scrolls_both_ways_and_pins_its_first_column(css):
+    """A table wider than its box pans sideways with its identity column fixed.
+
+    Without ``overflow-x`` the wide tables are squeezed instead of scrolled;
+    without the pinned column the reader loses which row they are reading the
+    moment they pan. Both are one line each in the same place, so they are
+    checked together.
+    """
+    block = css.split(".table-scroll", 1)[1]
+
+    assert "overflow-x: auto" in block
+    assert "position: sticky" in block
+    assert "left: 0" in block
+

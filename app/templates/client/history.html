@@ -77,17 +77,26 @@
 </form>
 
 <div class="card">
+  {# Eleven columns, which is a desktop table and not a phone one. The columns
+     that go first are the ones that restate another column — the time beside
+     the date, the session beside the status — and the two level prices, which
+     are one tap away on the setup's own page, linked from its asset. Entry and
+     R:R stay because together they carry the shape of the trade.
+
+     Each marker is on the <th> and its <td> together; a test pins that. #}
   <div class="table-scroll">
     <table class="table" id="history-table">
       <thead>
         <tr>
-          <th>Date (NY)</th><th>Time</th><th>Asset</th><th>Dir</th>
+          <th>Date (NY)</th>
+          <th class="table-hide-md">Time</th>
+          <th>Asset</th><th>Dir</th>
           <th class="text-end">Entry</th>
-          <th class="text-end">Stop</th>
-          <th class="text-end">Target</th>
+          <th class="text-end table-hide-sm">Stop</th>
+          <th class="text-end table-hide-sm">Target</th>
           <th class="text-end">R:R</th>
-          <th>Session</th>
-          <th>State</th>
+          <th class="table-hide-md">Session</th>
+          <th class="table-hide-sm">State</th>
           <th>Status</th>
         </tr>
       </thead>
@@ -95,17 +104,17 @@
         {% for s in setups %}
         <tr class="row-highlight" data-asset="{{ s.asset }}">
           <td class="mono">{{ s.entry_date_ny }}</td>
-          <td class="mono">{{ s.entry_time_short }}</td>
+          <td class="mono table-hide-md">{{ s.entry_time_short }}</td>
           <td><a class="row-link" href="{{ s.url }}">{{ s.asset }}</a></td>
           <td>{{ s.direction }}</td>
           {# Em dashes, never zeros: a level the engine did not record is not a
              level of zero. #}
           <td class="text-end mono">{{ (s.entry | price(s.asset)) or '—' }}</td>
-          <td class="text-end mono">{{ (s.sl | price(s.asset)) or '—' }}</td>
-          <td class="text-end mono">{{ (s.tp | price(s.asset)) or '—' }}</td>
+          <td class="text-end mono table-hide-sm">{{ (s.sl | price(s.asset)) or '—' }}</td>
+          <td class="text-end mono table-hide-sm">{{ (s.tp | price(s.asset)) or '—' }}</td>
           <td class="text-end mono">{{ s.rr_label }}</td>
-          <td>{{ s.session_label }}</td>
-          <td>{{ state_chip(s.state_info) }}</td>
+          <td class="table-hide-md">{{ s.session_label }}</td>
+          <td class="table-hide-sm">{{ state_chip(s.state_info) }}</td>
           <td>{{ s.status | status }}</td>
         </tr>
         {% else %}

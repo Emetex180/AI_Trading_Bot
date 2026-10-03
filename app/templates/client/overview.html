@@ -113,13 +113,19 @@
         <span>Recent setups</span>
         <span class="card-header-note">Newest first</span>
       </div>
+      {# Seven columns, trimmed to six on anything narrower than a laptop. The
+         session goes first: these are the newest setups, so the session is the
+         column a reader is least likely to be asking about. The time stays at
+         every width — it is the only temporal column this table has, and it is
+         the row's identity, which the pinned first column keeps in view while
+         the rest scrolls. #}
       <div class="table-scroll">
-        <table class="table">
+        <table class="table" id="recent-setups">
           <thead>
             <tr>
               <th>Time (NY)</th><th>Asset</th><th>Dir</th>
               <th class="text-end">Entry</th><th class="text-end">R:R</th>
-              <th>Session</th><th>Status</th>
+              <th class="table-hide-md">Session</th><th>Status</th>
             </tr>
           </thead>
           <tbody>
@@ -130,7 +136,7 @@
               <td>{{ s.direction }}</td>
               <td class="text-end mono">{{ (s.entry | price(s.asset)) or '—' }}</td>
               <td class="text-end mono">{{ s.rr_label }}</td>
-              <td>{{ s.session_label }}</td>
+              <td class="table-hide-md">{{ s.session_label }}</td>
               <td>{{ s.status | status }}</td>
             </tr>
             {% else %}

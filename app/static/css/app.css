@@ -489,15 +489,122 @@ input[type="number"] {
 
 /* Table headers that stay put while a long result set scrolls in place.
    Applied to the scroll wrapper, not the table: the pinned header has to be
-   positioned against the box that actually scrolls. */
+   positioned against the box that actually scrolls.
+
+   ``overflow-x`` is stated rather than left implicit. Per the overflow rules a
+   ``visible`` cross-axis computes to ``auto`` as soon as the other axis is
+   ``auto``, so a wide table already scrolls sideways here — writing it down is
+   what keeps that true if the height cap below is ever lifted, and it is the
+   property the narrow-screen behaviour actually depends on. */
 .table-scroll {
   max-height: 72vh;
   overflow-y: auto;
+  overflow-x: auto;
 }
 .table-scroll table > thead > tr > th {
   position: sticky;
   top: 0;
   z-index: 2;
+}
+
+/* --------------------------------------------------------------------------
+   The identity column, pinned
+   --------------------------------------------------------------------------
+   The widest tables here — history prints eleven columns, live market nine —
+   are wider than a phone. Panning one sideways is only usable if the reader can
+   still tell which row they are looking at, and the first column is always that
+   row's identity: the asset, or the setup's date. So it stays put while the
+   rest scrolls under it.
+
+   Scoped to ``.table-scroll`` rather than to every table. Bootstrap's
+   ``.table-responsive`` also scrolls, but on the payment history its first
+   column is the full provider reference, and pinning ~40% of a phone viewport
+   to a transaction id would cost more than it saves, so that one is left on
+   ``.table-responsive`` alone.
+
+   The wrapper is the trigger, and it is not a narrow set: the admin area, the
+   console's asset and backtest tables and the client platform all wrap in it,
+   so this rule reaches far more tables than the three it was written for. That
+   is deliberate rather than overlooked, and it is safe for two reasons. Pinning
+   only does anything once the table overflows its box, which the short ones —
+   the three-column state list, a key/value table — never do. And where it does
+   paint, the colour is ``--c-surface``, which is what ``.card`` already paints
+   underneath, so the opaque fill a pinned cell needs is invisible inside the
+   card every one of these tables sits in.
+
+   A pinned cell has to be opaque or the columns sliding beneath it show
+   through, and the table itself is transparent over its card: hence a
+   background, and one variant per row state that already paints one. */
+.table-scroll table > thead > tr > th:first-child,
+.table-scroll table > tbody > tr > td:first-child,
+.table-scroll table > tbody > tr > th:first-child {
+  position: sticky;
+  left: 0;
+}
+
+/* Above the cells scrolling past it, below the pinned header row. */
+.table-scroll table > tbody > tr > td:first-child,
+.table-scroll table > tbody > tr > th:first-child {
+  z-index: 1;
+  background-color: var(--c-surface);
+}
+
+/* The header's own first cell is pinned on both axes at once, so it needs to
+   outrank the other header cells, which are already sticky at z-index 2. Its
+   background is the header's and is set with the rest of the header above. */
+.table-scroll table > thead > tr > th:first-child {
+  z-index: 3;
+  background-color: var(--c-surface-2);
+}
+
+/* Hover and the cross-asset highlight both paint a row, and the pinned cell
+   must not drop out of that state. The highlight is a tint over the card
+   surface, so it is layered as a gradient over the same background rather than
+   replacing it — a flat colour here would end the tint at the first column. */
+.table-scroll table > tbody > tr:hover > td:first-child,
+.table-scroll table > tbody > tr:hover > th:first-child {
+  background-color: var(--bs-table-hover-bg);
+}
+.table-scroll table > tbody > tr.row-highlight > td:first-child,
+.table-scroll table > tbody > tr.row-highlight > th:first-child {
+  background-color: var(--c-surface);
+  background-image: linear-gradient(rgba(var(--rgb-pos), .07),
+                                    rgba(var(--rgb-pos), .07));
+}
+.table-scroll table > tbody > tr.row-highlight:hover > td:first-child,
+.table-scroll table > tbody > tr.row-highlight:hover > th:first-child {
+  background-color: var(--c-surface-2);
+  background-image: linear-gradient(rgba(var(--rgb-pos), .11),
+                                    rgba(var(--rgb-pos), .11));
+}
+
+/* --------------------------------------------------------------------------
+   Column priority on a narrow screen
+   --------------------------------------------------------------------------
+   An eleven-column history table cannot be made to fit a phone by shrinking it:
+   the values are prices at a fixed precision and the type is already at its
+   floor. So the columns that answer the question the page is open for stay, and
+   the ones that only add detail are dropped below the width where they can be
+   read.
+
+   Marked on the <th> and its <td>s alike. A column hidden on one and not the
+   other would silently shift every value under the wrong heading, which is the
+   worst way for this to fail — so the pairing is pinned by a test in
+   tests/test_client_pages.py.
+
+   40rem matches the phone breakpoint the client stylesheet already uses; 860px
+   is the width the console topbar and the public nav collapse at. */
+@media (max-width: 860px) {
+  .table-hide-md { display: none; }
+}
+
+@media (max-width: 40rem) {
+  .table-hide-sm { display: none; }
+
+  /* Less air per cell, so the columns that survive have the room the hidden
+     ones are no longer taking. The header keeps its own padding-block from the
+     rule above; only the inline padding moves here. */
+  .table > :not(caption) > * > * { padding: 0.6rem 0.7rem; }
 }
 
 /* A narrow-column list that can outgrow its card — the dashboard's asset list
@@ -723,6 +830,16 @@ input[type="number"] {
   border: 1px solid var(--c-line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+/* On a phone the fields share the row evenly instead of each sizing to its own
+   content. A select is as wide as its longest option, and "All sessions" beside
+   "Approved" adds up to more than the screen: left to their natural widths the
+   fields wrap wherever they happen to run out of room, which reads as a broken
+   grid. Two to a row holds the column edges straight. */
+@media (max-width: 40rem) {
+  .filter-bar { padding: 0.75rem; gap: 0.5rem; }
+  .filter-bar > * { flex: 1 1 8rem; min-width: 0; }
 }
 
 /* A hint under a form field. */

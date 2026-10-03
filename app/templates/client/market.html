@@ -226,17 +226,25 @@
       {{ status.monitored_assets | length }} in the running session · {{ rows | length }} registered
     </span>
   </div>
+  {# Nine columns do not fit a phone at a size the prices can still be read at,
+     so below the widths in app.css the table drops the columns that only add
+     detail and keeps the ones the page is open for: the quote, and the two
+     model states. That is the question "what is each asset doing right now".
+
+     Every marker carries a matching class on its <th>, and a test pins the
+     pairing — a column hidden on one and not the other shifts every value in
+     the table under the wrong heading. #}
   <div class="table-scroll">
     <table class="table" id="market-table">
       <thead>
         <tr>
           <th>Asset</th>
-          <th>Symbol</th>
+          <th class="table-hide-md">Symbol</th>
           <th class="text-end">Bid</th>
           <th class="text-end">Ask</th>
-          <th class="text-end">Spread</th>
-          <th class="text-end">Engine close</th>
-          <th>Quote time (NY)</th>
+          <th class="text-end table-hide-sm">Spread</th>
+          <th class="text-end table-hide-md">Engine close</th>
+          <th class="table-hide-sm">Quote time (NY)</th>
           <th>Buy model</th>
           <th>Sell model</th>
         </tr>
@@ -252,7 +260,7 @@
             {% if not r.enabled %}<span class="setup-meta">disabled</span>{% endif %}
             {% if r.monitored %}<span class="setup-meta">· monitored</span>{% endif %}
           </td>
-          <td class="mono setup-meta">{{ r.symbol or '—' }}</td>
+          <td class="mono setup-meta table-hide-md">{{ r.symbol or '—' }}</td>
           {# An unread figure is an em dash. It is never rendered as 0.00000,
              which would read as a real quote of zero. #}
           <td class="text-end mono" data-role="bid">
@@ -261,17 +269,17 @@
           <td class="text-end mono" data-role="ask">
             {{ (r.ask | price(r.name)) if r.ask is not none else '—' }}
           </td>
-          <td class="text-end mono setup-meta" data-role="spread">
+          <td class="text-end mono setup-meta table-hide-sm" data-role="spread">
             {%- if r.spread is not none -%}
               {{ r.spread | price(r.name) }}
               {%- if r.spread_points is not none %}
               <span class="setup-meta">({{ r.spread_points }} pt)</span>{% endif -%}
             {%- else -%}—{%- endif -%}
           </td>
-          <td class="text-end mono" data-role="price">
+          <td class="text-end mono table-hide-md" data-role="price">
             {{ (r.price | price(r.name)) or '—' }}
           </td>
-          <td class="setup-meta mono" data-role="price-time">{{ r.quote_time_ny or '—' }}</td>
+          <td class="setup-meta mono table-hide-sm" data-role="price-time">{{ r.quote_time_ny or '—' }}</td>
           <td data-role="buy">{{ state_chip(r.buy) }}</td>
           <td data-role="sell">{{ state_chip(r.sell) }}</td>
         </tr>

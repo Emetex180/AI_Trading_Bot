@@ -273,12 +273,29 @@
 
 @media (max-width: 992px) {
   .app-shell { grid-template-columns: 1fr; }
+
+  /* The rail becomes a bar across the top. Left exactly as it was — the brand
+     block, then the section list, then the account block and sign-out — this
+     chrome stood nearly half a phone screen tall above the content, on every
+     page, before the sticky topbar or the page itself had started. */
   .sidebar {
     position: static;
     height: auto;
     border-right: 0;
     border-bottom: 1px solid var(--c-line);
+    gap: 0.75rem;
+    padding: 0.75rem 1rem 1rem;
+    overflow: visible;
   }
+
+  /* The wordmark stands alone on the bar. "New York sessions" is a caption for
+     a vertical rail; the topbar clock two rows below says the same thing and
+     says it with the actual time, so on a phone it is a line of chrome spent
+     twice. Only the vertical padding is trimmed — the inline padding stays, so
+     the mark keeps the left edge it shares with the links beneath it. */
+  .sidebar-brand { padding: 0 0.5rem 0.5rem; }
+  .sidebar-brand-sub { display: none; }
+
   /* The nav becomes a horizontal scroller so the product still fits a phone
      without hiding half the sections behind a hamburger. */
   .sidebar-nav {
@@ -287,7 +304,41 @@
     padding-bottom: .25rem;
   }
   .sidebar-link { white-space: nowrap; }
-  .sidebar-foot { margin-top: .5rem; }
+
+  /* The account block repeats the topbar's account chip — the same picture and
+     the same name, two rows further down — so on the bar it is a whole row of
+     chrome carrying no new information. Sign-out appears nowhere else, so it
+     stays: on a row of its own, and at its natural width rather than stretched
+     across one. */
+  .sidebar-foot {
+    margin-top: 0;
+    padding-top: 0.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .sidebar-user { display: none; }
+  .sidebar-foot .btn {
+    /* Beats the .w-100 Bootstrap puts on the button, which is a full-width
+       control for the rail and an odd shape for a single trailing action. */
+    width: auto !important;
+    padding-inline: 1.25rem;
+  }
+}
+
+/* Sticky chrome is paid for in content on every scroll, so on a phone the topbar
+   keeps only what it alone can say. It keeps the clock — every timestamp on this
+   product is New York time — and it keeps both state pills, including the one
+   that says whether the bot may place orders, which is a safety affordance and
+   is not dropped at any width.
+
+   What goes is the restating: the zone name beside a time the page header
+   already spells out, and the session window, which the scanner pill names in
+   its own text one element to the left. */
+@media (max-width: 40rem) {
+  .client-topbar { gap: 0.5rem; padding-block: 0.625rem; }
+  .clock-chip .clock-zone { display: none; }
+  .client-topbar .setup-meta { display: none; }
 }
 
 /* --------------------------------------------------------------------------
@@ -397,6 +448,15 @@
   .setup-levels.four-up .setup-level:nth-child(n+3) {
     border-top: 1px solid var(--c-line-soft);
   }
+
+  /* The card's three levels stay on one line where the detail page's four pair
+     up. That is not an inconsistency to flatten: the strip reads left to right
+     as entry → stop → target, and three is what a card has room for once it
+     gives up padding rather than track count. Two of three would orphan the
+     third on a row of its own, which is the exact shape the rule above exists
+     to avoid. */
+  .setup-level { padding: 0.6rem 0.65rem; }
+  .setup-level-value { font-size: 0.875rem; }
 }
 
 .setup-body {

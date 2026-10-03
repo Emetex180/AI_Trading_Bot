@@ -16,6 +16,7 @@ The engine is stubbed (``_FakeJobs``) so no test can reach MT5.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import datetime
 
@@ -631,6 +632,87 @@ def test_a_date_filter_is_read_on_the_new_york_clock():
                  entry_time_ny=datetime(2026, 1, 5, 21, 0))
     assert "USTEC" in table(_body(_client(late), "/history?from=2026-01-05&to=2026-01-05"))
     assert "USTEC" not in table(_body(_client(late), "/history?from=2026-01-06&to=2026-01-06"))
+
+
+# --------------------------------------------------------------------------- #
+# Narrow screens
+# --------------------------------------------------------------------------- #
+#: The tables wider than a phone, and the page each one renders on. The markers
+#: these carry are defined in app.css; this section is the contract between the
+#: templates that emit them and the stylesheet that acts on them.
+RESPONSIVE_TABLES = [
+    ("recent-setups", "/dashboard"),
+    ("market-table", "/market"),
+    ("history-table", "/history"),
+]
+
+#: The classes that drop a column at one of the two narrow breakpoints.
+HIDE_MARKERS = {"table-hide-md", "table-hide-sm"}
+
+#: The opening tag of a <th> or <td>, with its attributes. Only the opening tag
+#: is read: the classes on it are all this section compares.
+_CELL = re.compile(r"<(th|td)\b([^>]*)>")
+
+
+def _class_sets(table: str, tag: str) -> list[set[str]]:
+    """The class set of every ``<tag>`` cell in ``table``, in document order."""
+    found = []
+    for kind, attrs in _CELL.findall(table):
+        if kind != tag:
+            continue
+        match = re.search(r'class="([^"]*)"', attrs)
+        found.append(set(match.group(1).split()) if match else set())
+    return found
+
+
+@pytest.mark.parametrize("table_id,path", RESPONSIVE_TABLES)
+def test_a_dropped_column_is_dropped_from_its_heading_and_its_cells(table_id, path):
+    """A column hidden on a narrow screen must be hidden in both rows.
+
+    The marker sits on the <th> and on the <td> under it. When only one side
+    carries it, the surviving cells stay where they are while the headings move
+    left — and every value in the table is then read under the wrong heading.
+    On a page of prices that is a wrong number, not a cosmetic slip, so the
+    pairing is pinned here rather than left to review.
+    """
+    body = _body(_client(_seeded()), path)
+    # Cut at the close tag: the page may carry a second table below this one,
+    # and its cells would otherwise be read as this table's.
+    table = body.split(f'id="{table_id}"', 1)[1].split("</table>", 1)[0]
+
+    headings = _class_sets(table, "th")
+    assert headings, f"{table_id} rendered no headings"
+
+    # The first row's cells, which is as many as there are headings: every row
+    # of these tables carries the same classes.
+    cells = _class_sets(table, "td")[:len(headings)]
+    assert len(cells) == len(headings), (
+        f"{table_id} rendered {len(cells)} cells under {len(headings)} headings")
+
+    for index, (heading, cell) in enumerate(zip(headings, cells)):
+        assert (heading & HIDE_MARKERS) == (cell & HIDE_MARKERS), (
+            f"{table_id} column {index}: heading carries "
+            f"{sorted(heading & HIDE_MARKERS) or 'no marker'}, cell carries "
+            f"{sorted(cell & HIDE_MARKERS) or 'no marker'}")
+
+
+@pytest.mark.parametrize("table_id,path", RESPONSIVE_TABLES)
+def test_a_narrow_table_keeps_its_identity_column(table_id, path):
+    """The first column survives at every width.
+
+    It is the row's identity — the asset, or the setup's date — and on a phone
+    the table scrolls sideways beneath it. Dropping it would leave a reader
+    panning through prices with nothing to anchor them to. That it is also the
+    column the stylesheet pins is checked in tests/test_ui_markup.py, which is
+    where the stylesheet's own contract lives.
+    """
+    body = _body(_client(_seeded()), path)
+    table = body.split(f'id="{table_id}"', 1)[1].split("</table>", 1)[0]
+
+    headings = _class_sets(table, "th")
+
+    assert not (headings[0] & HIDE_MARKERS), (
+        f"{table_id} drops its first column at a narrow width")
 
 
 # --------------------------------------------------------------------------- #
