@@ -654,10 +654,17 @@ HIDE_MARKERS = {"table-hide-md", "table-hide-sm"}
 _CELL = re.compile(r"<(th|td)\b([^>]*)>")
 
 
-def _class_sets(table: str, tag: str) -> list[set[str]]:
-    """The class set of every ``<tag>`` cell in ``table``, in document order."""
+def cell_classes(markup: str, tag: str) -> list[set[str]]:
+    """The class set of every ``<tag>`` cell in ``markup``, in document order.
+
+    Reads literal opening tags, which means it works on rendered HTML and on the
+    JavaScript source that concatenates that HTML alike — ``dashboard.js``
+    builds its rows as strings carrying the same attributes. The browser-built
+    tables are checked that way in tests/test_ui_markup.py, since their rows do
+    not exist until the script runs.
+    """
     found = []
-    for kind, attrs in _CELL.findall(table):
+    for kind, attrs in _CELL.findall(markup):
         if kind != tag:
             continue
         match = re.search(r'class="([^"]*)"', attrs)
@@ -696,11 +703,11 @@ def column_marker_problems(table_html: str, table_id: str) -> list[str]:
     Shared with the admin and console suites, which import it from here rather
     than each restating the regexes above.
     """
-    headings = _class_sets(table_html, "th")
+    headings = cell_classes(table_html, "th")
     if not headings:
         return [f"{table_id} rendered no headings"]
 
-    cells = _class_sets(table_html, "td")[:len(headings)]
+    cells = cell_classes(table_html, "td")[:len(headings)]
     if len(cells) != len(headings):
         return [f"{table_id} rendered {len(cells)} cells under "
                 f"{len(headings)} headings"]
@@ -743,7 +750,7 @@ def test_a_narrow_table_keeps_its_identity_column(table_id, path):
     body = _body(_client(_seeded()), path)
     table = table_by_id(body, table_id)
 
-    headings = _class_sets(table, "th")
+    headings = cell_classes(table, "th")
 
     assert not (headings[0] & HIDE_MARKERS), (
         f"{table_id} drops its first column at a narrow width")

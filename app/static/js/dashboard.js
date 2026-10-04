@@ -456,12 +456,17 @@
     }
 
     var shown = matched.slice(0, BROKER_ROW_LIMIT);
+    /* The `table-hide-md` classes here are half of a pair: the matching halves
+     * are on the headings in templates/assets.html. This tbody has no rows
+     * until this function writes them, so a marker that exists only in the
+     * template would look correct until the first scan and then quietly stop
+     * applying. tests/test_ui_markup.py compares the two sources cell by cell. */
     host.innerHTML = shown.map(function (s) {
       return "<tr>" +
         '<td class="fw-semibold">' + esc(s.name) + "</td>" +
-        '<td class="mono">' + num(s.digits) + "</td>" +
+        '<td class="mono table-hide-md">' + num(s.digits) + "</td>" +
         '<td class="mono text-muted">' + num(s.trade_contract_size) + "</td>" +
-        '<td class="mono text-muted">' + num(s.volume_min) + "</td>" +
+        '<td class="mono text-muted table-hide-md">' + num(s.volume_min) + "</td>" +
         '<td class="text-end">' + (s.in_registry
           ? '<span class="badge tone-secondary">in registry</span>'
           : '<button type="button" class="btn btn-sm btn-outline-primary" ' +
@@ -491,8 +496,8 @@
     host.innerHTML = list.map(function (a) {
       return "<tr>" +
         '<td class="fw-semibold">' + esc(a.name) + "</td>" +
-        '<td class="mono text-muted">' + esc(a.broker_symbol) + "</td>" +
-        '<td class="mono">' + num(a.digits) + "</td>" +
+        '<td class="mono text-muted table-hide-md">' + esc(a.broker_symbol) + "</td>" +
+        '<td class="mono table-hide-md">' + num(a.digits) + "</td>" +
         '<td><span class="badge tone-' +
           (a.enabled ? "success" : "secondary") + '">' +
           (a.enabled ? "enabled" : "disabled") + "</span></td>" +

@@ -46,17 +46,30 @@
         </div>
       </div>
       <div class="table-scroll">
-        <table class="table table-hover">
+        <table class="table table-hover" id="registry-table">
+          {# Five columns. The broker's own name for the asset and its digit
+             count are both detail behind the registry name, which is the one
+             every other page uses — so those two go at the laptop width. State
+             and Actions stay at every width, because they are the only two
+             things this table does.
+
+             Every marker here has a twin in dashboard.js: this tbody is
+             replaced wholesale by renderRegistry() on the first poll and on
+             every toggle, so a class that lives only in this file survives
+             until the next refresh and then silently vanishes. The pairing of
+             the two sources is pinned in tests/test_ui_markup.py. #}
           <thead>
-            <tr><th>Name</th><th>Broker symbol</th><th>Digits</th>
+            <tr><th>Name</th>
+                <th class="table-hide-md">Broker symbol</th>
+                <th class="table-hide-md">Digits</th>
                 <th>State</th><th class="text-end">Actions</th></tr>
           </thead>
           <tbody id="registry-rows">
           {% for a in assets %}
             <tr>
               <td class="fw-semibold">{{ a.name }}</td>
-              <td class="mono text-muted">{{ a.broker_symbol }}</td>
-              <td class="mono">{{ a.digits }}</td>
+              <td class="mono text-muted table-hide-md">{{ a.broker_symbol }}</td>
+              <td class="mono table-hide-md">{{ a.digits }}</td>
               <td>
                 <span class="badge tone-{{ 'success' if a.enabled else 'secondary' }}">
                   {{ 'enabled' if a.enabled else 'disabled' }}
@@ -123,9 +136,19 @@
         </div>
       </div>
       <div class="table-scroll">
-        <table class="table table-hover">
+        <table class="table table-hover" id="broker-table">
+          {# Five columns, and this tbody is empty until the browser fills it —
+             every row comes from renderCatalog() in dashboard.js, so the
+             markers that matter for this table live there. They are repeated on
+             these headings, which is the other half of the pairing pinned in
+             tests/test_ui_markup.py. Contract size and minimum lot are the two
+             a phone can do without; the symbol and its Add button are the row's
+             whole purpose. #}
           <thead>
-            <tr><th>Symbol</th><th>Digits</th><th>Contract</th><th>Min lot</th>
+            <tr><th>Symbol</th>
+                <th class="table-hide-md">Digits</th>
+                <th>Contract</th>
+                <th class="table-hide-md">Min lot</th>
                 <th class="text-end">Add</th></tr>
           </thead>
           <tbody id="broker-rows">
