@@ -38,11 +38,19 @@
         </span>
       </div>
       <div class="table-scroll">
-        <table class="table">
+        <table class="table" id="admin-activity-assets">
+          {# Seven columns. The broker symbol is the terminal's name for the
+             asset and the registry name is the one every other page uses, so on
+             a narrow screen the duplicate goes; the candle timestamp follows,
+             being a freshness check rather than the reading itself. The price
+             and the two model states are what the row is open for. #}
           <thead>
             <tr>
-              <th>Asset</th><th>Symbol</th><th>State</th>
-              <th class="text-end">Last price</th><th>Candle (NY)</th>
+              <th>Asset</th>
+              <th class="table-hide-md">Symbol</th>
+              <th>State</th>
+              <th class="text-end">Last price</th>
+              <th class="table-hide-md">Candle (NY)</th>
               <th>Buy model</th><th>Sell model</th>
             </tr>
           </thead>
@@ -51,7 +59,7 @@
             {% set sm = setups.get(a.name) or {} %}
             <tr class="{{ '' if a.enabled else 'text-muted' }}">
               <td class="fw-semibold">{{ a.name }}</td>
-              <td class="mono setup-meta">{{ a.broker_symbol or '—' }}</td>
+              <td class="mono setup-meta table-hide-md">{{ a.broker_symbol or '—' }}</td>
               <td>
                 <span class="badge tone-{{ 'success' if a.enabled else 'secondary' }}">
                   {{ 'enabled' if a.enabled else 'disabled' }}
@@ -60,7 +68,7 @@
               {# An unread price is blank here, never 0 — the terminal has simply
                  not delivered a candle for this asset yet. #}
               <td class="text-end mono">{{ (prices.get(a.name) | price(a.name)) or '—' }}</td>
-              <td class="mono setup-meta">{{ (price_times.get(a.name) | ny) or '—' }}</td>
+              <td class="mono setup-meta table-hide-md">{{ (price_times.get(a.name) | ny) or '—' }}</td>
               <td class="mono setup-meta">{{ sm.get('buy') or '—' }}</td>
               <td class="mono setup-meta">{{ sm.get('sell') or '—' }}</td>
             </tr>
@@ -78,12 +86,17 @@
         <span class="card-header-note">{{ recent_signals | length }}</span>
       </div>
       <div class="table-scroll">
-        <table class="table">
+        <table class="table" id="admin-activity-signals">
+          {# Seven columns. The reason is a sentence, and the first to go; R:R
+             follows at the phone width, where asset, direction, entry and
+             status still say what the signal was. #}
           <thead>
             <tr>
               <th>Time (NY)</th><th>Asset</th><th>Dir</th>
-              <th class="text-end">Entry</th><th class="text-end">R:R</th>
-              <th>Status</th><th>Reason</th>
+              <th class="text-end">Entry</th>
+              <th class="text-end table-hide-sm">R:R</th>
+              <th>Status</th>
+              <th class="table-hide-md">Reason</th>
             </tr>
           </thead>
           <tbody>
@@ -93,9 +106,9 @@
               <td><a class="row-link" href="{{ url_for('signal_detail', signal_id=s.id) }}">{{ s.asset }}</a></td>
               <td>{{ (s.direction or '') | upper }}</td>
               <td class="text-end mono">{{ (s.entry | price(s.asset)) or '—' }}</td>
-              <td class="text-end mono">{{ s.rr | num(2) }}</td>
+              <td class="text-end mono table-hide-sm">{{ s.rr | num(2) }}</td>
               <td>{{ s.status | status }}</td>
-              <td class="setup-meta">{{ s.reason or '—' }}</td>
+              <td class="setup-meta table-hide-md">{{ s.reason or '—' }}</td>
             </tr>
             {% else %}
             <tr><td colspan="7" class="empty-state">No signals recorded yet.</td></tr>
@@ -115,11 +128,14 @@
         </span>
       </div>
       <div class="table-scroll">
-        <table class="table">
+        <table class="table" id="admin-activity-executions">
+          {# Six columns. The reason is a sentence and the first to go, the same
+             as on the signals list above it. #}
           <thead>
             <tr>
               <th>Requested (NY)</th><th>Asset</th><th>Dir</th>
-              <th class="text-end">Lots</th><th>Status</th><th>Reason</th>
+              <th class="text-end">Lots</th><th>Status</th>
+              <th class="table-hide-md">Reason</th>
             </tr>
           </thead>
           <tbody>
@@ -130,7 +146,7 @@
               <td>{{ (t.direction or '') | upper }}</td>
               <td class="text-end mono">{{ t.lots | num(2) }}</td>
               <td>{{ t.status | status }}</td>
-              <td class="setup-meta">{{ t.reason or '—' }}</td>
+              <td class="setup-meta table-hide-md">{{ t.reason or '—' }}</td>
             </tr>
             {% else %}
             <tr><td colspan="6" class="empty-state">

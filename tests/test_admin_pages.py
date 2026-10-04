@@ -22,9 +22,15 @@ import pytest
 from app.web import create_app
 from config import get_settings
 from database import models as m
+from trading.executor import ExecutionResult
 
 from test_web import (_CSRF, _PASSWORD, _FakeJobs, _grant, _lease, _repo,
                       _save_signal, _sign_in)
+
+# The narrow-screen pairing check is one implementation, shared with the client
+# and console suites: the rule it enforces belongs to the stylesheet, not to any
+# one area of the application.
+from test_client_pages import column_marker_problems, table_by_id
 
 ADMIN_PAGES = ["/admin", "/admin/clients", "/admin/activity", "/admin/accounts"]
 
@@ -538,3 +544,58 @@ def test_the_client_list_never_shows_a_password_hash():
     assert user.password_hash not in body
     assert "scrypt:" not in body
     assert "pbkdf2:" not in body
+
+
+# --------------------------------------------------------------------------- #
+# Narrow screens
+# --------------------------------------------------------------------------- #
+#: The admin tables wide enough to need column priority, and the page each one
+#: renders on. Two of these pages carry two and three tables apiece, which is
+#: why every table is named rather than assumed to be the page's only one.
+ADMIN_RESPONSIVE_TABLES = [
+    ("admin-payments", "/admin/payments"),
+    ("admin-subscriptions", "/admin/subscriptions"),
+    ("admin-clients", "/admin/clients"),
+    ("admin-operators", "/admin/clients"),
+    ("admin-activity-assets", "/admin/activity"),
+    ("admin-activity-signals", "/admin/activity"),
+    ("admin-activity-executions", "/admin/activity"),
+]
+
+
+def _tables_repo():
+    """A repository holding a row for every admin table under test.
+
+    The rows are the point rather than incidental. A table with none renders its
+    empty state — a single colspan'd cell carrying no markers at all — and a
+    pairing check run against that passes while proving nothing. So each table
+    is given something to print: an account and a settled payment for the two
+    ledger pages, then a registered asset, a signal and an execution attempt for
+    the three on the activity page.
+    """
+    repo = _repo()
+    account = _make_client(repo, username="tabledata")
+    _grant(repo, account, "basic")
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    row = _save_signal(repo)
+    repo.save_trade(ExecutionResult(
+        asset="USTEC", symbol="USTEC", direction="buy",
+        signal_fingerprint=row.fingerprint, entry=101.7, sl=99.5, tp=106.0,
+        lots=0.0, status="SKIPPED", reason="auto_trading_disabled",
+        requested_at_utc=datetime(2026, 1, 6, 13, 10)), signal_id=row.id)
+    return repo
+
+
+@pytest.mark.parametrize("table_id,path", ADMIN_RESPONSIVE_TABLES)
+def test_an_admin_column_is_dropped_from_its_heading_and_its_cells(table_id, path):
+    """The admin tables hold the same contract the client tables do.
+
+    An operator on a phone reading a payment under the wrong heading is the same
+    failure as a client reading a price under the wrong one, and it is the same
+    rule that prevents it — so this is the shared check rather than a second
+    implementation free to drift from the first.
+    """
+    body = _body(_admin(_tables_repo()), path)
+    problems = column_marker_problems(table_by_id(body, table_id), table_id)
+
+    assert not problems, "; ".join(problems)

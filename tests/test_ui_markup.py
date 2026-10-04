@@ -25,6 +25,11 @@ from trading.executor import ExecutionResult
 from test_database import _signal
 from test_web import _FakeJobs, _repo, _sign_in
 
+# The narrow-screen pairing check is one implementation, shared with the client
+# and admin suites: the rule it enforces belongs to the stylesheet, not to any
+# one area of the application.
+from test_client_pages import column_marker_problems, table_by_id
+
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -397,4 +402,18 @@ def test_the_scroll_box_scrolls_both_ways_and_pins_its_first_column(css):
     assert "overflow-x: auto" in block
     assert "position: sticky" in block
     assert "left: 0" in block
+
+
+def test_the_console_trade_table_drops_its_columns_in_pairs(dashboard):
+    """The replay's eleven-column trade table holds the same contract.
+
+    It is the widest table in the console and the only one there carrying the
+    markers, so it is checked against its own rendered markup — the fixture's
+    replay produced a trade, which means the row under the headings is a real
+    one rather than an empty state that would pass while proving nothing.
+    """
+    body = dashboard["html"]["backtest_detail"]
+    problems = column_marker_problems(table_by_id(body, "trade-rows"), "trade-rows")
+
+    assert not problems, "; ".join(problems)
 

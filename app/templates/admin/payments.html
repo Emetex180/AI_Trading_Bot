@@ -102,11 +102,21 @@
     </form>
   </div>
   <div class="table-scroll">
-    <table class="table">
+    <table class="table" id="admin-payments">
+      {# Eight columns. The two reference columns go first: a Flutterwave
+         reference and a provider transaction id are both long opaque strings
+         that restate no other column and are looked up by copying them out,
+         which a phone is the wrong tool for. What a payments ledger is read for
+         — whose account, how much, whether it settled — is the first four. #}
       <thead>
         <tr>
-          <th>Account</th><th>Plan</th><th>Amount</th><th>Status</th>
-          <th>Reference</th><th>Provider id</th><th>Created (NY)</th><th>Paid (NY)</th>
+          <th>Account</th>
+          <th class="table-hide-sm">Plan</th>
+          <th>Amount</th><th>Status</th>
+          <th class="table-hide-md">Reference</th>
+          <th class="table-hide-md">Provider id</th>
+          <th>Created (NY)</th>
+          <th class="table-hide-sm">Paid (NY)</th>
         </tr>
       </thead>
       <tbody>
@@ -119,7 +129,7 @@
             <span class="setup-meta">account {{ r.payment.user_id }} (missing)</span>
             {% endif %}
           </td>
-          <td>{{ r.payment.plan_key }}</td>
+          <td class="table-hide-sm">{{ r.payment.plan_key }}</td>
           <td class="mono">{{ format_minor(r.payment.amount_minor, r.payment.currency) }}</td>
           <td>
             <span class="badge tone-{{ 'success' if r.payment.status == 'successful' else ('danger' if r.payment.status == 'failed' else 'secondary') }}">
@@ -135,10 +145,10 @@
             <div class="setup-meta">{{ r.payment.failure_reason }}</div>
             {% endif %}
           </td>
-          <td class="mono setup-meta">{{ r.payment.reference }}</td>
-          <td class="mono setup-meta">{{ r.payment.provider_tx_id or '—' }}</td>
+          <td class="mono setup-meta table-hide-md">{{ r.payment.reference }}</td>
+          <td class="mono setup-meta table-hide-md">{{ r.payment.provider_tx_id or '—' }}</td>
           <td class="mono">{{ r.payment.created_at | ny_date }}</td>
-          <td class="mono">{{ r.payment.paid_at | ny_date if r.payment.paid_at else '—' }}</td>
+          <td class="mono table-hide-sm">{{ r.payment.paid_at | ny_date if r.payment.paid_at else '—' }}</td>
         </tr>
         {% else %}
         <tr><td colspan="8" class="empty-state">

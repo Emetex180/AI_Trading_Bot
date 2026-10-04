@@ -227,8 +227,19 @@
       <div class="table-responsive table-scroll">
       <table class="table table-hover" id="trade-rows">
         <thead>
-          <tr><th>#</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Entry (NY)</th><th>Exit (NY)</th>
-              <th>RR</th><th>PnL (R)</th><th>Bars</th><th>Outcome</th><th>Reason</th></tr>
+          {# Eleven columns, the widest table in the console. What a replay is
+             read for is what each trade did: the direction, the two prices, the
+             result in R, and how it ended. The timestamp pair restates the pair
+             of prices one column to the left, so the exit time goes first and
+             the entry time follows it at the phone width; bars held and the
+             free-text reason are the last detail to survive. #}
+          <tr><th>#</th><th>Dir</th><th>Entry</th><th>Exit</th>
+              <th class="table-hide-sm">Entry (NY)</th>
+              <th class="table-hide-md">Exit (NY)</th>
+              <th class="table-hide-sm">RR</th>
+              <th>PnL (R)</th>
+              <th class="table-hide-md">Bars</th><th>Outcome</th>
+              <th class="table-hide-md">Reason</th></tr>
         </thead>
         <tbody>
         {% for t in trades %}
@@ -239,14 +250,14 @@
             <td>{{ dir_badge(t.direction) }}</td>
             <td class="mono">{{ t.entry | price(t.asset) }}</td>
             <td class="mono">{{ t.exit_price | price(t.asset) }}</td>
-            <td class="mono text-muted">{{ t.entry_time_utc | ny }}</td>
-            <td class="mono text-muted">{{ t.exit_time_utc | ny }}</td>
-            <td class="mono">{{ '%.2f' | format(t.rr) }}</td>
+            <td class="mono text-muted table-hide-sm">{{ t.entry_time_utc | ny }}</td>
+            <td class="mono text-muted table-hide-md">{{ t.exit_time_utc | ny }}</td>
+            <td class="mono table-hide-sm">{{ '%.2f' | format(t.rr) }}</td>
             <td class="mono {{ 'text-pos' if t.pnl > 0 else ('text-neg' if t.pnl < 0 else '') }}">
               {{ '%.2f' | format(t.pnl) }}</td>
-            <td class="mono text-muted">{{ t.bars_held }}</td>
+            <td class="mono text-muted table-hide-md">{{ t.bars_held }}</td>
             <td>{{ outcome_badge(t.outcome) }}</td>
-            <td class="small text-muted">{{ t.reason }}</td>
+            <td class="small text-muted table-hide-md">{{ t.reason }}</td>
           </tr>
         {% else %}
           {{ empty(11, 'No trades recorded.') }}

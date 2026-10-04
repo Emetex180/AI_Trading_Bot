@@ -65,11 +65,18 @@
     </form>
   </div>
   <div class="table-scroll">
-    <table class="table">
+    <table class="table" id="admin-subscriptions">
+      {# Six columns. "Paid by" is an audited detail — which payment settled the
+         row, or a warning that none did — and it is the first to go. Started
+         follows at the phone width: a subscription's identity is its plan and
+         its status, and between the two dates the one that decides whether
+         access is still open is the expiry. #}
       <thead>
         <tr>
           <th>Account</th><th>Plan</th><th>Status</th>
-          <th>Started (NY)</th><th>Expires (NY)</th><th>Paid by</th>
+          <th class="table-hide-sm">Started (NY)</th>
+          <th>Expires (NY)</th>
+          <th class="table-hide-md">Paid by</th>
         </tr>
       </thead>
       <tbody>
@@ -88,13 +95,13 @@
               {{ r.sub.status }}
             </span>
           </td>
-          <td class="mono">{{ r.sub.started_at | ny_date if r.sub.started_at else '—' }}</td>
+          <td class="mono table-hide-sm">{{ r.sub.started_at | ny_date if r.sub.started_at else '—' }}</td>
           <td class="mono">{{ r.sub.expires_at | ny_date if r.sub.expires_at else 'no end date' }}</td>
           {# A NULL payment_id is permitted by the schema but no route writes one,
              so seeing this means a row was inserted outside the application.
              That is worth flagging rather than dressing up: a subscription with
              no payment behind it is access nobody can account for. #}
-          <td class="setup-meta">
+          <td class="setup-meta table-hide-md">
             {% if r.sub.payment_id %}
             Payment #{{ r.sub.payment_id }}
             {% else %}

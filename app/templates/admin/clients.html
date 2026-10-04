@@ -152,11 +152,20 @@
     <span class="card-header-note">{{ clients | length }} shown</span>
   </div>
   <div class="table-scroll">
-    <table class="table">
+    <table class="table" id="admin-clients">
+      {# Eight columns. Contact detail and the two audit timestamps are what a
+         phone does not need: an operator scanning this list is looking for an
+         account, and the row already links to the page that holds the rest.
+         Role goes at the phone width, where the list is the client list by
+         default and the rare operator row is the exception. #}
       <thead>
         <tr>
-          <th>Username</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th>
-          <th>Plan</th><th>Last sign-in (NY)</th><th>Created (NY)</th>
+          <th>Username</th><th>Name</th>
+          <th class="table-hide-md">Email</th>
+          <th class="table-hide-sm">Role</th><th>Status</th>
+          <th>Plan</th>
+          <th class="table-hide-sm">Last sign-in (NY)</th>
+          <th class="table-hide-md">Created (NY)</th>
         </tr>
       </thead>
       <tbody>
@@ -167,8 +176,8 @@
             {% if c.is_deleted %}<span class="badge tone-danger">removed</span>{% endif %}
           </td>
           <td>{{ c.display_name }}</td>
-          <td class="setup-meta">{{ c.email or '—' }}</td>
-          <td class="setup-meta">{{ c.role }}</td>
+          <td class="setup-meta table-hide-md">{{ c.email or '—' }}</td>
+          <td class="setup-meta table-hide-sm">{{ c.role }}</td>
           <td>
             <span class="badge tone-{{ 'success' if c.is_active else 'danger' }}">{{ c.status }}</span>
           </td>
@@ -182,8 +191,8 @@
             <span class="setup-meta">to {{ c.subscription_expires_ny }}</span>
             {%- endif %}
           </td>
-          <td class="mono">{{ c.last_login_ny or 'never' }}</td>
-          <td class="mono">{{ c.created_at_ny }}</td>
+          <td class="mono table-hide-sm">{{ c.last_login_ny or 'never' }}</td>
+          <td class="mono table-hide-md">{{ c.created_at_ny }}</td>
         </tr>
         {% else %}
         <tr><td colspan="8" class="empty-state">
@@ -208,19 +217,26 @@
     not be able to be hidden from the page that lists users.
   </p>
   <div class="table-scroll">
-    <table class="table">
+    <table class="table" id="admin-operators">
+      {# Six columns, and the same two go as on the client list above: the
+         contact address, which the linked account page carries, and "created
+         by", which is an audit column rather than something this list is read
+         for. Username, name and status are the row. #}
       <thead>
-        <tr><th>Username</th><th>Name</th><th>Email</th><th>Status</th><th>Created (NY)</th><th>Created by</th></tr>
+        <tr><th>Username</th><th>Name</th>
+            <th class="table-hide-md">Email</th><th>Status</th>
+            <th>Created (NY)</th>
+            <th class="table-hide-md">Created by</th></tr>
       </thead>
       <tbody>
         {% for a in admins %}
         <tr class="row-highlight">
           <td><a class="row-link" href="{{ url_for('admin.client_detail', user_id=a.id) }}">{{ a.username }}</a></td>
           <td>{{ a.display_name }}</td>
-          <td class="setup-meta">{{ a.email or '—' }}</td>
+          <td class="setup-meta table-hide-md">{{ a.email or '—' }}</td>
           <td><span class="badge tone-{{ 'success' if a.is_active else 'danger' }}">{{ a.status }}</span></td>
           <td class="mono">{{ a.created_at_ny }}</td>
-          <td class="setup-meta">{{ a.created_by }}</td>
+          <td class="setup-meta table-hide-md">{{ a.created_by }}</td>
         </tr>
         {% else %}
         <tr><td colspan="6" class="empty-state">No administrators.</td></tr>

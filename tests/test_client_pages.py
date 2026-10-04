@@ -665,6 +665,55 @@ def _class_sets(table: str, tag: str) -> list[set[str]]:
     return found
 
 
+def table_by_id(body: str, table_id: str) -> str:
+    """One table's markup, cut at its close tag.
+
+    The page may carry a second table below this one, and its cells would
+    otherwise be read as this table's — the admin pages carry two and three
+    apiece, so this is the rule rather than the exception.
+
+    Shared with the admin and console suites, which import it from here instead
+    of each keeping its own copy of the regexes above.
+    """
+    marker = f'id="{table_id}"'
+    assert marker in body, f"no table carries {marker} on this page"
+    return body.split(marker, 1)[1].split("</table>", 1)[0]
+
+
+def column_marker_problems(table_html: str, table_id: str) -> list[str]:
+    """Every way one table's hide markers fail to line up. Empty when sound.
+
+    Three things are checked, and they fail the same way — silently, by shifting
+    values under the wrong heading — so they are reported together:
+
+    * the table rendered headings at all;
+    * every heading has a body cell under it;
+    * the marker on each heading matches the marker on its own cell.
+
+    The first body row is read against the headings, which is sound because
+    every row of these tables carries the same classes.
+
+    Shared with the admin and console suites, which import it from here rather
+    than each restating the regexes above.
+    """
+    headings = _class_sets(table_html, "th")
+    if not headings:
+        return [f"{table_id} rendered no headings"]
+
+    cells = _class_sets(table_html, "td")[:len(headings)]
+    if len(cells) != len(headings):
+        return [f"{table_id} rendered {len(cells)} cells under "
+                f"{len(headings)} headings"]
+
+    return [
+        f"{table_id} column {index}: heading carries "
+        f"{sorted(heading & HIDE_MARKERS) or 'no marker'}, cell carries "
+        f"{sorted(cell & HIDE_MARKERS) or 'no marker'}"
+        for index, (heading, cell) in enumerate(zip(headings, cells))
+        if (heading & HIDE_MARKERS) != (cell & HIDE_MARKERS)
+    ]
+
+
 @pytest.mark.parametrize("table_id,path", RESPONSIVE_TABLES)
 def test_a_dropped_column_is_dropped_from_its_heading_and_its_cells(table_id, path):
     """A column hidden on a narrow screen must be hidden in both rows.
@@ -676,24 +725,9 @@ def test_a_dropped_column_is_dropped_from_its_heading_and_its_cells(table_id, pa
     pairing is pinned here rather than left to review.
     """
     body = _body(_client(_seeded()), path)
-    # Cut at the close tag: the page may carry a second table below this one,
-    # and its cells would otherwise be read as this table's.
-    table = body.split(f'id="{table_id}"', 1)[1].split("</table>", 1)[0]
+    problems = column_marker_problems(table_by_id(body, table_id), table_id)
 
-    headings = _class_sets(table, "th")
-    assert headings, f"{table_id} rendered no headings"
-
-    # The first row's cells, which is as many as there are headings: every row
-    # of these tables carries the same classes.
-    cells = _class_sets(table, "td")[:len(headings)]
-    assert len(cells) == len(headings), (
-        f"{table_id} rendered {len(cells)} cells under {len(headings)} headings")
-
-    for index, (heading, cell) in enumerate(zip(headings, cells)):
-        assert (heading & HIDE_MARKERS) == (cell & HIDE_MARKERS), (
-            f"{table_id} column {index}: heading carries "
-            f"{sorted(heading & HIDE_MARKERS) or 'no marker'}, cell carries "
-            f"{sorted(cell & HIDE_MARKERS) or 'no marker'}")
+    assert not problems, "; ".join(problems)
 
 
 @pytest.mark.parametrize("table_id,path", RESPONSIVE_TABLES)
@@ -707,7 +741,7 @@ def test_a_narrow_table_keeps_its_identity_column(table_id, path):
     where the stylesheet's own contract lives.
     """
     body = _body(_client(_seeded()), path)
-    table = body.split(f'id="{table_id}"', 1)[1].split("</table>", 1)[0]
+    table = table_by_id(body, table_id)
 
     headings = _class_sets(table, "th")
 
