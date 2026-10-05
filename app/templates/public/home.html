@@ -1,27 +1,408 @@
 {% extends "public/base.html" %}
-{% block page_title %}3rader — structured market analysis for the New York sessions{% endblock %}
-{% block page_description %}3rader monitors your instruments through every New York session, applies a fixed liquidity-and-structure model, and publishes only the setups that pass every condition. From {{ plans[0].price_display }} a month.{% endblock %}
+{% block page_title %}3rader — Your trading decisions are backed by data{% endblock %}
+{% block page_description %}3rader monitors the markets continuously and applies a fixed, rule-based model to every instrument, bringing you the setups that meet every condition. From {{ plans[0].price_display }} a month.{% endblock %}
+
+{#
+  The public homepage.
+
+  Every figure below is read from the running system (app/public.py): the
+  instrument count comes from the registry the engine actually reads, and the
+  sessions and state count from the strategy's own definitions. There is no win
+  rate, no return figure and no customer count anywhere on this page, because
+  none of them could be substantiated.
+
+  The previews work the same way. The monitoring panel shows the sessions the
+  engine covers and the states it walks; the setup card shows the fields a
+  confirmed setup carries with the values left blank. A marketing page with
+  invented entry and target prices printed on it would be publishing a trading
+  result, however small the print.
+#}
 
 {% block body %}
-<section class="mk-hero">
-  <div class="mk-wrap">
-    <span class="mk-eyebrow">New York session analysis</span>
-    <h1>A defined process, applied to every session.</h1>
-    <p class="mk-hero-lede">
-      3rader monitors your instruments through the New York sessions and works a
-      fixed liquidity-and-structure model on each one: purge, change in state of
-      delivery, fair value gap, retracement, confirmation. You see the setups that
-      reach the end of that sequence, and the state of the ones that have not.
-      Nothing is skipped and nothing is invented to fill a panel.
-    </p>
 
-    <div class="mk-actions">
-      <a class="btn btn-primary btn-lg" href="{{ url_for('auth.register') }}">
-        Create an account
-      </a>
-      <a class="btn btn-outline-secondary btn-lg" href="{{ url_for('public.pricing') }}">
-        See pricing
-      </a>
+{# ------------------------------------------------------------------ #
+   Hero — the claim, and immediately the evidence for it.
+   ------------------------------------------------------------------ #}
+<section class="mk-hero">
+  <div class="mk-wrap mk-hero-grid">
+    <div class="mk-hero-copy">
+      <span class="mk-eyebrow">Rule-based market analysis</span>
+      <h1>Your trading decisions are backed by data.</h1>
+      <p class="mk-hero-lede">
+        Stop watching every market move. 3rader continuously analyses the
+        markets and brings your attention to qualifying setups when the
+        conditions are met.
+      </p>
+
+      <div class="mk-actions">
+        <a class="btn btn-primary btn-lg" href="{{ url_for('auth.register') }}">
+          Get started
+        </a>
+        <a class="btn btn-outline-secondary btn-lg" href="#how-it-works">
+          See how it works
+        </a>
+      </div>
+
+      <p class="mk-hero-note">
+        From {{ plans[0].price_display }} a month, billed monthly with no
+        auto-renewal — see <a href="{{ url_for('public.pricing') }}">pricing</a>.
+      </p>
+    </div>
+
+    {# The hero visual is the product's own vocabulary — the sessions the engine
+       runs, the states it walks, the counters it keeps — rather than a stock
+       photograph or a mock-up full of invented prices. #}
+    <div class="mk-hero-visual">
+      <div class="mk-panel">
+        <div class="mk-panel-bar">
+          <span class="mk-panel-title">Market monitor</span>
+          <span class="mk-panel-status">
+            <span class="mk-live-dot" aria-hidden="true"></span>Monitoring
+          </span>
+        </div>
+
+        <div class="mk-panel-body">
+          <div class="mk-readouts">
+            <div class="mk-readout">
+              <div class="mk-readout-value mk-mono">{{ '%02d' % figures.monitored_assets }}</div>
+              <div class="mk-readout-label">Instruments watched</div>
+            </div>
+            <div class="mk-readout">
+              <div class="mk-readout-value mk-mono">{{ '%02d' % figures.strategy_states }}</div>
+              <div class="mk-readout-label">States per instrument</div>
+            </div>
+            <div class="mk-readout">
+              <div class="mk-readout-value mk-mono">24/5</div>
+              <div class="mk-readout-label">Continuous coverage</div>
+            </div>
+          </div>
+
+          <div class="mk-panel-block">
+            <div class="mk-panel-block-head">Sessions covered</div>
+            <ul class="mk-chips">
+              {% for session in figures.session_names %}
+              <li class="mk-chip">{{ session }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+
+          <div class="mk-panel-block">
+            <div class="mk-panel-block-head">Model states, in the order they are checked</div>
+            <ol class="mk-track">
+              <li>Watching</li>
+              <li>Liquidity purge</li>
+              <li>CISD</li>
+              <li>Fair value gap</li>
+              <li>Retracement</li>
+              <li>Confirmation</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+
+      <p class="mk-caption">
+        Figures are read from the running engine, not written by hand. The panel
+        shows the shape of the monitor; no live signal is published here.
+      </p>
+    </div>
+  </div>
+</section>
+
+{# ------------------------------------------------------------------ #
+   1. The problem
+   ------------------------------------------------------------------ #}
+<section class="mk-section mk-reveal" id="problem">
+  <div class="mk-wrap mk-split">
+    <div class="mk-section-head">
+      <span class="mk-eyebrow">The problem</span>
+      <h2>The market moves whether you are watching or not.</h2>
+      <p>
+        Watching four sessions a day is a job in itself, and most of what happens
+        on a chart is noise. The setups worth acting on have to meet every
+        condition first — and none of them announce themselves in advance.
+      </p>
+    </div>
+
+    <ul class="mk-list">
+      <li>
+        <span class="mk-list-title">Setups arrive while you are away</span>
+        <span class="mk-list-note">
+          A window that qualifies at 03:00 does not wait until you open a chart.
+        </span>
+      </li>
+      <li>
+        <span class="mk-list-title">Hours spent on charts that never qualify</span>
+        <span class="mk-list-note">
+          Most instruments produce nothing on most sessions. Sitting through them
+          is the cost, and it is paid whether or not anything comes of it.
+        </span>
+      </li>
+      <li>
+        <span class="mk-list-title">Not knowing whether the rules were actually met</span>
+        <span class="mk-list-note">
+          A direction on its own cannot be checked. Without the conditions
+          behind it, you are taking someone's word for the part that matters.
+        </span>
+      </li>
+      <li>
+        <span class="mk-list-title">Second-guessing the ones you do take</span>
+        <span class="mk-list-note">
+          Judgement made in the moment is hard to repeat, and hard to review
+          afterwards.
+        </span>
+      </li>
+      <li>
+        <span class="mk-list-title">Losing the record of what happened</span>
+        <span class="mk-list-note">
+          Memory keeps the winners and edits the rest, which is a poor basis for
+          deciding what to change.
+        </span>
+      </li>
+    </ul>
+  </div>
+</section>
+
+{# ------------------------------------------------------------------ #
+   2. The solution
+   ------------------------------------------------------------------ #}
+<section class="mk-section mk-reveal" id="solution">
+  <div class="mk-wrap">
+    <div class="mk-statement">
+      <span class="mk-eyebrow">The approach</span>
+      <h2>3rader watches the market and brings qualifying setups to you.</h2>
+      <p>
+        The engine monitors every instrument continuously, works a fixed model on
+        each one, and publishes a setup only when the last condition in the
+        sequence is met and the risk gate approves it. You do not have to be
+        watching for that to happen — and you do not have to take the result on
+        trust, because the working is attached to it.
+      </p>
+    </div>
+
+    <div class="mk-grid">
+      <div class="mk-card">
+        <span class="mk-card-glyph">Continuous</span>
+        <h3>Monitored, not sampled</h3>
+        <p>
+          Every instrument is watched through every session the model is built
+          around, on one clock, so nothing depends on when you happened to look.
+        </p>
+      </div>
+      <div class="mk-card">
+        <span class="mk-card-glyph">Fixed rules</span>
+        <h3>The same method every time</h3>
+        <p>
+          A defined sequence of conditions, evaluated in the same order on every
+          instrument. What changes is the market, not the method.
+        </p>
+      </div>
+      <div class="mk-card">
+        <span class="mk-card-glyph">Qualified only</span>
+        <h3>Most of the time, nothing</h3>
+        <p>
+          A setup is published only when every condition is met and the risk gate
+          approves it. The platform says so rather than manufacturing activity to
+          look busy.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+{# ------------------------------------------------------------------ #
+   3. How it works
+   ------------------------------------------------------------------ #}
+<section class="mk-section mk-reveal" id="how-it-works">
+  <div class="mk-wrap">
+    <div class="mk-section-head">
+      <span class="mk-eyebrow">How it works</span>
+      <h2>From monitoring to a decision you can review</h2>
+      <p>
+        Six steps, the same every session. The engine does the first four; the
+        last two are yours.
+      </p>
+    </div>
+
+    <div class="mk-steps">
+      <div class="mk-step">
+        <h3>Monitor</h3>
+        <p>
+          Every monitored instrument is watched continuously through
+          {{ figures.session_names | join(', ') }}.
+        </p>
+      </div>
+      <div class="mk-step">
+        <h3>Analyse</h3>
+        <p>
+          Each instrument is measured against the model: liquidity, change in
+          state of delivery, imbalance, structure.
+        </p>
+      </div>
+      <div class="mk-step">
+        <h3>Validate</h3>
+        <p>
+          A candidate must clear every condition in order and pass the risk gate.
+          Most candidates do not, and are discarded.
+        </p>
+      </div>
+      <div class="mk-step">
+        <h3>Alert</h3>
+        <p>
+          A qualifying setup is published to your dashboard, with email and
+          Telegram delivery on the plans that include them.
+        </p>
+      </div>
+      <div class="mk-step">
+        <h3>Decide</h3>
+        <p>
+          You review the setup, its levels and the conditions behind it, and make
+          the call yourself.
+        </p>
+      </div>
+      <div class="mk-step">
+        <h3>Track</h3>
+        <p>
+          Every setup is recorded with its context, so you can review what the
+          model did, and when, rather than relying on memory.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+{# ------------------------------------------------------------------ #
+   4. What a setup looks like
+   ------------------------------------------------------------------ #}
+<section class="mk-section mk-reveal" id="platform">
+  <div class="mk-wrap mk-split">
+    <div class="mk-section-head">
+      <span class="mk-eyebrow">The platform</span>
+      <h2>What a confirmed setup carries</h2>
+      <p>
+        A direction with no working shown is not much use. Each setup arrives
+        with its levels, the ratio between them, and the condition checklist the
+        engine cleared to produce it — so you can disagree with one step rather
+        than with the whole thing.
+      </p>
+      <p class="mt-3">
+        Around it: a live market view of where each instrument has reached in the
+        model, a filterable record of everything produced, and an analysis
+        workspace for reviewing the strategy against history.
+      </p>
+    </div>
+
+    {# Fields as they appear on a confirmed setup. The values are deliberately
+       blank — the labels are the product's real vocabulary, and the numbers
+       belong to a setup, not to a brochure. #}
+    <div class="mk-setup-card">
+      <div class="mk-setup-head">
+        <span class="mk-setup-title">Setup</span>
+        <span class="mk-setup-tag">Field layout</span>
+      </div>
+
+      <dl class="mk-setup-rows">
+        <div class="mk-setup-row">
+          <dt>Direction</dt>
+          <dd>BUY / SELL</dd>
+        </div>
+        <div class="mk-setup-row">
+          <dt>Entry price</dt>
+          <dd class="is-empty mk-mono">—</dd>
+        </div>
+        <div class="mk-setup-row">
+          <dt>Stop loss</dt>
+          <dd class="is-empty mk-mono">—</dd>
+        </div>
+        <div class="mk-setup-row">
+          <dt>Take profit</dt>
+          <dd class="is-empty mk-mono">—</dd>
+        </div>
+        <div class="mk-setup-row">
+          <dt>Reward : risk</dt>
+          <dd class="is-empty mk-mono">—</dd>
+        </div>
+        <div class="mk-setup-row">
+          <dt>Risk gate</dt>
+          <dd>Approved / Not approved</dd>
+        </div>
+      </dl>
+
+      <div class="mk-setup-foot">
+        <div class="mk-panel-block-head">Condition checklist</div>
+        <ul class="mk-check">
+          <li>1H liquidity purge</li>
+          <li>5M change in state of delivery</li>
+          <li>1M fair value gap</li>
+          <li>Retracement into the gap</li>
+          <li>Confirmation, with the stop behind the liquidity-taking candle</li>
+        </ul>
+        <p class="mk-setup-note">
+          Fields as they appear on a confirmed setup, shown without values.
+          Nothing on this page is a live signal.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+{# ------------------------------------------------------------------ #
+   5. Signal mode — the user makes the call
+   ------------------------------------------------------------------ #}
+<section class="mk-section mk-reveal" id="control">
+  <div class="mk-wrap mk-split">
+    <div class="mk-section-head">
+      <span class="mk-eyebrow">Signal mode</span>
+      <h2>You stay in control of every decision.</h2>
+      <p>
+        3rader does not trade. It publishes what the model found — the direction,
+        the levels, the ratio between them and the conditions behind it — and
+        leaves the decision to you, where it belongs.
+      </p>
+    </div>
+
+    <ul class="mk-list">
+      <li>
+        <span class="mk-list-title">Nothing is executed on your behalf</span>
+        <span class="mk-list-note">
+          3rader does not connect to your broker, does not place orders and does
+          not manage money. There is no account of yours for it to act on.
+        </span>
+      </li>
+      <li>
+        <span class="mk-list-title">Every setup shows its working</span>
+        <span class="mk-list-note">
+          Direction, entry, stop, target, the ratio between them, and each
+          condition marked met or unmet with the levels it was judged against.
+        </span>
+      </li>
+      <li>
+        <span class="mk-list-title">You can disagree with a step, not the whole thing</span>
+        <span class="mk-list-note">
+          Because the reasoning is visible, a setup you reject tells you
+          something specific about why — which is what makes the record worth
+          keeping.
+        </span>
+      </li>
+    </ul>
+  </div>
+</section>
+
+{# ------------------------------------------------------------------ #
+   6. Data and transparency
+   ------------------------------------------------------------------ #}
+<section class="mk-section mk-reveal" id="data">
+  <div class="mk-wrap">
+    <div class="mk-section-head">
+      <span class="mk-eyebrow">Data and transparency</span>
+      <h2>Built on rules and records, not on claims</h2>
+      <p>
+        Every figure on this page is read from the running system: the registry
+        the engine actually reads, and the sessions the strategy is defined
+        around. There is no win rate, no return figure and no customer count
+        here, because none of them could be substantiated from what the platform
+        records — and an unverifiable number on a page like this is a claim about
+        your money.
+      </p>
     </div>
 
     <div class="mk-stats">
@@ -42,123 +423,77 @@
         <div class="mk-stat-label">Continuous monitoring</div>
       </div>
     </div>
+
+    <ul class="mk-list mt-4">
+      <li>
+        <span class="mk-list-title">The method is written down</span>
+        <span class="mk-list-note">
+          A defined sequence of conditions, evaluated in the same order on every
+          instrument. It can be checked, argued with and backtested against
+          history.
+        </span>
+      </li>
+      <li>
+        <span class="mk-list-title">The record is the evidence</span>
+        <span class="mk-list-note">
+          Setups are stored with the levels and conditions that produced them, so
+          a past decision can be reviewed rather than remembered.
+        </span>
+      </li>
+      <li>
+        <span class="mk-list-title">No outcome is promised</span>
+        <span class="mk-list-note">
+          Trading involves risk of loss. Applying a process consistently is a
+          different thing from guaranteeing a result, and the
+          <a href="{{ url_for('public.risk') }}">risk disclaimer</a> says so in
+          full.
+        </span>
+      </li>
+    </ul>
   </div>
 </section>
 
 {# ------------------------------------------------------------------ #
-   The strategy, stated plainly. Five conditions in the order the engine
-   evaluates them, so the marketing description and the product are the same
-   claim rather than two versions of it.
+   7. Who it is for
    ------------------------------------------------------------------ #}
-<section class="mk-section">
+<section class="mk-section mk-reveal" id="who">
   <div class="mk-wrap">
     <div class="mk-section-head">
-      <h2>What the engine actually looks for</h2>
+      <span class="mk-eyebrow">Who it is for</span>
+      <h2>For traders who want a process they can check</h2>
       <p>
-        Each instrument moves through the same state machine, once per session.
-        A setup is only published after the last step, and only if it also passes
-        the risk gate.
-      </p>
-    </div>
-
-    <div class="mk-steps">
-      <div class="mk-step">
-        <h3>Liquidity purge</h3>
-        <p>
-          A one-hour candle closes beyond a liquidity level — a previous high or
-          low where resting orders have built up.
-        </p>
-      </div>
-      <div class="mk-step">
-        <h3>Change in state of delivery</h3>
-        <p>
-          The five-minute series confirms the shift: the level that held before
-          the purge gives way.
-        </p>
-      </div>
-      <div class="mk-step">
-        <h3>Fair value gap</h3>
-        <p>
-          The first qualifying one-minute imbalance is marked. This is the zone
-          price is expected to return to.
-        </p>
-      </div>
-      <div class="mk-step">
-        <h3>Retracement</h3>
-        <p>
-          Price trades back into the gap. The setup is armed but not yet valid —
-          a retracement alone is not a signal.
-        </p>
-      </div>
-      <div class="mk-step">
-        <h3>Confirmation</h3>
-        <p>
-          The entry condition completes inside the gap. Only now is the setup
-          published, with its levels and its risk-to-reward.
-        </p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="mk-section">
-  <div class="mk-wrap">
-    <div class="mk-section-head">
-      <h2>What you get to work with</h2>
-      <p>
-        The platform shows its reasoning rather than just a direction. Every
-        setup carries the condition checklist that produced it.
+        3rader suits a particular approach rather than everyone. If any of the
+        following describes how you already work, it will fit.
       </p>
     </div>
 
     <div class="mk-grid">
       <div class="mk-card">
-        <span class="mk-card-glyph">Live</span>
-        <h3>Session state, per instrument</h3>
+        <h3>You cannot sit through every session</h3>
         <p>
-          Where each instrument has reached in the model right now — watching,
-          purged, CISD confirmed, waiting on a retracement — updated as the
-          engine moves.
+          Work, time zone or life gets in the way of watching four sessions a
+          day. The engine watches them all and holds what qualifies.
         </p>
       </div>
       <div class="mk-card">
-        <span class="mk-card-glyph">Setups</span>
-        <h3>Validated signals only</h3>
+        <h3>You want structure, not hunches</h3>
         <p>
-          Setups the engine reached full confirmation on and the risk gate
-          approved. Entry, stop, target and the ratio between them.
+          You would rather act on conditions that can be written down and
+          checked than on how a chart feels in the moment.
         </p>
       </div>
       <div class="mk-card">
-        <span class="mk-card-glyph">Detail</span>
-        <h3>The condition checklist</h3>
+        <h3>You want less noise</h3>
         <p>
-          Every step of the sequence, marked met or not, with the liquidity and
-          imbalance levels the decision was made against.
+          You are not looking for more alerts. You are looking for the few that
+          cleared every condition the model defines.
         </p>
       </div>
       <div class="mk-card">
-        <span class="mk-card-glyph">History</span>
-        <h3>A filterable record</h3>
+        <h3>You want to see the reasoning</h3>
         <p>
-          What the engine produced and when, filterable by instrument, session
-          and date. The useful half of a signal is often its context.
-        </p>
-      </div>
-      <div class="mk-card">
-        <span class="mk-card-glyph">Time</span>
-        <h3>One clock, consistently</h3>
-        <p>
-          Every time on the platform is New York local time, daylight-saving
-          aware. The session windows and your charts agree without conversion.
-        </p>
-      </div>
-      <div class="mk-card">
-        <span class="mk-card-glyph">Alerts</span>
-        <h3>Delivered where you are</h3>
-        <p>
-          Email on new confirmed setups, and in-app notifications for payment and
-          subscription events. Delivery options depend on your plan.
+          A signal you cannot interrogate is a signal you cannot learn from.
+          Every setup here arrives with the conditions behind it.
         </p>
       </div>
     </div>
@@ -166,62 +501,17 @@
 </section>
 
 {# ------------------------------------------------------------------ #
-   Product preview.
-   The panels are drawn from the same vocabulary the application uses, but no
-   live figures are shown: a screenshot of invented numbers on a marketing page
-   is a fabricated trading result, however small the print.
+   8. Plans — the same rows the checkout prices from.
    ------------------------------------------------------------------ #}
-<section class="mk-section">
+<section class="mk-section mk-reveal" id="pricing">
   <div class="mk-wrap">
     <div class="mk-section-head">
-      <h2>The platform</h2>
+      <span class="mk-eyebrow">Plans</span>
+      <h2>Choose how much of the platform you need</h2>
       <p>
-        A dashboard, a live market view, the setups feed, historical records and
-        an analysis workspace. What you can reach depends on your plan.
-      </p>
-    </div>
-
-    <div class="mk-preview">
-      <div class="mk-preview-bar">
-        <span class="mk-preview-dot"></span>
-        <span class="mk-preview-dot"></span>
-        <span class="mk-preview-dot"></span>
-        <span class="ms-2" style="font-size:.75rem;color:var(--c-text-faint);">
-          3rader — dashboard
-        </span>
-      </div>
-      <div class="mk-preview-body">
-        <div class="mk-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">
-          <div class="mk-card">
-            <span class="mk-card-glyph">Overview</span>
-            <h3>Session at a glance</h3>
-            <p>Engine status, the active session window and the count of
-               confirmed setups for the day.</p>
-          </div>
-          <div class="mk-card">
-            <span class="mk-card-glyph">Market</span>
-            <h3>Per-instrument state</h3>
-            <p>Where each instrument sits in the model, with its last traded
-               price and the condition it is waiting on.</p>
-          </div>
-          <div class="mk-card">
-            <span class="mk-card-glyph">Setups</span>
-            <h3>Confirmed setups</h3>
-            <p>Direction, entry, stop and target, with the checklist behind each
-               one.</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="mk-section">
-  <div class="mk-wrap">
-    <div class="mk-section-head">
-      <h2>Plans</h2>
-      <p>
-        Three tiers, billed monthly. Each one unlocks more of the platform.
+        Three tiers, billed monthly. The plans differ by which parts of the
+        platform you can reach, not by how good the analysis is — every plan sees
+        the same engine output.
       </p>
     </div>
 
@@ -246,15 +536,21 @@
 
     <p class="mk-price-note">
       Prices are in US dollars. Subscriptions run for 30 days and do not renew
-      automatically — see the <a href="{{ url_for('public.terms') }}">terms</a>.
+      automatically. Full detail on the
+      <a href="{{ url_for('public.pricing') }}">pricing page</a>; card payments
+      are handled by Flutterwave and 3rader never stores your card details.
     </p>
   </div>
 </section>
 
-<section class="mk-section">
+{# ------------------------------------------------------------------ #
+   9. Questions
+   ------------------------------------------------------------------ #}
+<section class="mk-section mk-reveal" id="faq">
   <div class="mk-wrap">
     <div class="mk-section-head">
-      <h2>Questions</h2>
+      <span class="mk-eyebrow">Questions</span>
+      <h2>Before you sign up</h2>
     </div>
 
     <div class="mk-faq">
@@ -294,6 +590,16 @@
       </details>
 
       <details>
+        <summary>How often does something qualify?</summary>
+        <p>
+          Rarely, and that is the point. A setup is published only when every
+          condition is met and the risk gate approves it. Most instruments
+          produce nothing on most sessions, and the platform shows an instrument
+          waiting rather than inventing something for it to show.
+        </p>
+      </details>
+
+      <details>
         <summary>How do I pay, and can I cancel?</summary>
         <p>
           Card payment is handled by Flutterwave; 3rader never sees or stores your
@@ -314,15 +620,18 @@
   </div>
 </section>
 
+{# ------------------------------------------------------------------ #
+   Final call to action
+   ------------------------------------------------------------------ #}
 <section class="mk-cta">
-  <h2>See what the engine is tracking now</h2>
+  <h2>Stop watching everything. Start focusing on what matters.</h2>
   <p>
     Create an account and choose a plan. The dashboard shows every monitored
     instrument, its current state in the model, and every setup the engine has
     confirmed.
   </p>
   <a class="btn btn-primary btn-lg" href="{{ url_for('auth.register') }}">
-    Create an account
+    Get started
   </a>
 </section>
 {% endblock %}

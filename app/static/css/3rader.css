@@ -273,27 +273,85 @@ a:hover {
    Self-contained: the public site shares the token layer above but none of the
    application's component classes, so a change to a dashboard card can never
    move something on the homepage.
+
+   Two rules hold throughout:
+
+     * Every figure rendered here is read from the running engine (see
+       app/public.py). Nothing is a marketing number, so nothing on these pages
+       can drift from the software or imply a result it does not produce.
+     * The page works with scripting disabled. landing.js adds the collapsed
+       mobile menu and the section reveals; without it the navigation stays a
+       row the reader can scroll and every section is simply visible, because
+       the reveal styles are scoped to `.js`.
    -------------------------------------------------------------------------- */
 .mk-body {
   background: var(--c-bg);
   color: var(--c-text);
+  -webkit-font-smoothing: antialiased;
 }
 
+/* An anchored section lands below the sticky header rather than under it. */
+.mk-body [id] { scroll-margin-top: 5.5rem; }
+
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+
+/* Section reveal, scoped to `.js` so content is never hidden from a reader
+   whose browser did not run the script. */
+.js .mk-reveal {
+  opacity: 0;
+  transform: translateY(14px);
+}
+.js .mk-reveal.is-in {
+  opacity: 1;
+  transform: none;
+  transition: opacity .55s ease, transform .55s ease;
+}
+
+/* Keyboard users reach the content without tabbing the whole navigation. */
+.mk-skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 60;
+  padding: 0.65rem 1rem;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-sm);
+  color: var(--c-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+.mk-skip:focus { left: 1rem; top: 1rem; }
+
+/* --------------------------------------------------------------------------
+   Navigation
+   One layout at every width would fail on a phone; the row the reader scrolls
+   without scripting becomes a panel the button opens with it.
+   -------------------------------------------------------------------------- */
 .mk-nav {
   position: sticky;
   top: 0;
   z-index: 20;
-  background: rgba(11, 15, 20, .88);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--c-line);
+  background: rgba(11, 15, 20, .80);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--c-line-soft);
+  transition: background-color .2s ease, border-color .2s ease;
 }
+.mk-nav.is-scrolled {
+  background: rgba(11, 15, 20, .95);
+  border-bottom-color: var(--c-line);
+}
+
 .mk-nav-inner {
-  max-width: 1140px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 0.9rem 1.25rem;
+  padding: 0.85rem 1.25rem;
   display: flex;
   align-items: center;
-  gap: 1.5rem;
+  gap: 1.25rem;
 }
 .mk-brand {
   display: flex;
@@ -307,13 +365,21 @@ a:hover {
 }
 .mk-brand:hover { color: var(--c-text); }
 
+.mk-nav-menu {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+  margin-left: auto;
+}
+
 .mk-links {
   display: flex;
   align-items: center;
-  gap: 1.25rem;
-  margin-left: auto;
+  gap: 1.5rem;
 }
 .mk-links a {
+  position: relative;
+  padding: 0.35rem 0;
   color: var(--c-text-dim);
   text-decoration: none;
   font-size: 0.9rem;
@@ -322,55 +388,192 @@ a:hover {
 .mk-links a:hover,
 .mk-links a.is-active { color: var(--c-text); }
 
-.mk-nav-toggle { display: none; }
+/* The current/hovered item is marked by a rule under the word rather than a
+   filled pill: quieter, and it does not move the row when it appears. */
+.mk-links a::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1.5px;
+  border-radius: 2px;
+  background: var(--c-accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform .18s ease;
+}
+.mk-links a:hover::after,
+.mk-links a.is-active::after { transform: scaleX(1); }
+
+.mk-nav-auth {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+.mk-signin {
+  color: var(--c-text-dim);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+.mk-signin:hover { color: var(--c-text); }
+
+/* The collapsing control. Hidden unless scripting is on — the row below is the
+   fallback, and it is a real navigation rather than a menu that never opens. */
+.mk-nav-toggle {
+  display: none;
+  margin-left: auto;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-sm);
+  color: var(--c-text);
+  cursor: pointer;
+}
+.mk-nav-toggle:hover {
+  border-color: rgba(var(--rgb-accent), .5);
+  color: var(--c-accent-soft);
+}
+.mk-nav-toggle:focus-visible {
+  outline: 2px solid var(--bs-focus-ring-color);
+  outline-offset: 2px;
+}
+.mk-burger {
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.mk-burger::before,
+.mk-burger::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 18px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.mk-burger::before { top: -6px; }
+.mk-burger::after { top: 6px; }
 
 @media (max-width: 860px) {
-  /* The links collapse to one row that scrolls rather than a JavaScript menu:
-     the whole public site then works with scripting disabled, which also means
-     it works for a crawler and for anyone on a locked-down browser. */
   .mk-nav-inner { flex-wrap: wrap; gap: 0.75rem; }
-  .mk-links {
+
+  /* Without scripting: one row, scrolling sideways, nothing hidden. */
+  .mk-nav-menu {
     order: 3;
     width: 100%;
     margin-left: 0;
+    gap: 1.25rem;
     overflow-x: auto;
     padding-bottom: 0.15rem;
     scrollbar-width: none;
   }
-  .mk-links::-webkit-scrollbar { display: none; }
+  .mk-nav-menu::-webkit-scrollbar { display: none; }
+  .mk-links { gap: 1.25rem; }
+  .mk-nav-auth { margin-left: auto; }
+
+  /* With scripting: a panel, so neither call to action sits behind a sideways
+     scroll the reader has no reason to suspect is there. */
+  .js .mk-nav-toggle { display: inline-flex; }
+  .js .mk-nav-menu { display: none; }
+  .js .mk-nav-menu.is-open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1rem;
+    overflow: visible;
+    padding: 0.5rem 0 0.75rem 0;
+    border-top: 1px solid var(--c-line-soft);
+  }
+  .js .mk-links {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.15rem;
+  }
+  .js .mk-links a { padding: 0.7rem 0; font-size: 1rem; }
+  .js .mk-links a::after { display: none; }
+  .js .mk-nav-auth {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    margin-left: 0;
+  }
+  .js .mk-nav-auth .btn,
+  .js .mk-signin {
+    width: 100%;
+    padding: 0.7rem 1rem;
+    text-align: center;
+  }
 }
 
 .mk-wrap {
-  max-width: 1140px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 0 1.25rem;
 }
 
+/* --------------------------------------------------------------------------
+   Hero
+   Copy and the monitoring panel side by side, so the first thing a visitor
+   reads is the claim and the second is what backs it.
+   -------------------------------------------------------------------------- */
 .mk-hero {
-  padding: 4.5rem 0 3.5rem 0;
+  position: relative;
+  overflow: hidden;
+  padding: 4.5rem 0 3.75rem 0;
 }
+
+/* The one gradient on the site: a single wash behind the hero at the blue end
+   of the palette. Everything below it is flat surface. */
+.mk-hero::before {
+  content: "";
+  position: absolute;
+  inset: -20% 0 auto 0;
+  height: 520px;
+  background: radial-gradient(60% 100% at 20% 0%,
+              rgba(var(--rgb-accent), .10), transparent 70%);
+  pointer-events: none;
+}
+
+.mk-hero-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr);
+  gap: 3rem;
+  align-items: center;
+}
+
 .mk-eyebrow {
   display: inline-block;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--c-accent);
   margin-bottom: 1rem;
 }
 .mk-hero h1 {
-  font-size: clamp(2rem, 5vw, 3.1rem);
+  font-size: clamp(2.1rem, 4.6vw, 3.4rem);
   font-weight: 750;
-  line-height: 1.12;
-  letter-spacing: -0.03em;
-  margin: 0 0 1.1rem 0;
-  max-width: 20ch;
+  line-height: 1.08;
+  letter-spacing: -0.035em;
+  margin: 0 0 1.15rem 0;
+  max-width: 22ch;
 }
 .mk-hero-lede {
-  font-size: 1.05rem;
+  font-size: 1.06rem;
+  line-height: 1.65;
   color: var(--c-text-dim);
-  max-width: 60ch;
-  margin: 0 0 1.75rem 0;
+  max-width: 54ch;
+  margin: 0 0 1.9rem 0;
 }
 
 .mk-actions {
@@ -380,43 +583,229 @@ a:hover {
   align-items: center;
 }
 
+.mk-hero-note {
+  margin: 1.1rem 0 0 0;
+  font-size: 0.83rem;
+  color: var(--c-text-faint);
+}
+.mk-hero-note a {
+  color: var(--c-text-dim);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.mk-hero-note a:hover { color: var(--c-text); }
+
+/* --- The monitoring panel ------------------------------------------------
+   The hero visual is the product's own vocabulary — the sessions the engine
+   runs, the states it walks and the counters it keeps — rather than a stock
+   photograph or a screenshot of invented figures. */
+.mk-panel {
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  background: var(--c-surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.mk-panel-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+}
+.mk-panel-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+}
+.mk-panel-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-pos);
+}
+.mk-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--c-pos);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-pos), .16);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mk-live-dot { animation: mk-pulse 2.6s ease-in-out infinite; }
+  @keyframes mk-pulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(var(--rgb-pos), .16); }
+    50%      { box-shadow: 0 0 0 6px rgba(var(--rgb-pos), .07); }
+  }
+}
+.mk-panel-body { padding: 1.1rem; }
+
+.mk-readouts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.1rem;
+}
+.mk-readout {
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+}
+.mk-readout-value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--c-text);
+}
+.mk-readout-label {
+  margin-top: 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  color: var(--c-text-faint);
+}
+
+/* Prices, ratios and counts get tabular figures so they line up in a column
+   and do not shimmer as they change. Used sparingly: this is not a terminal. */
+.mk-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.mk-panel-block { margin-top: 1rem; }
+.mk-panel-block-head {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+  margin-bottom: 0.6rem;
+}
+
+.mk-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.mk-chip {
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface-2);
+  color: var(--c-text-dim);
+  font-size: 0.76rem;
+  font-weight: 500;
+}
+
+/* The state machine, drawn as the sequence the engine actually walks. */
+.mk-track {
+  counter-reset: mk-track;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.mk-track li {
+  counter-increment: mk-track;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.32rem 0.6rem;
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  color: var(--c-text-dim);
+  font-size: 0.74rem;
+  font-weight: 500;
+}
+.mk-track li::before {
+  content: counter(mk-track);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--c-accent);
+}
+
+.mk-caption {
+  margin: 0.85rem 0 0 0;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--c-text-faint);
+}
+
+/* --- Figures -------------------------------------------------------------
+   Read from the registry and the strategy's own session definitions. */
 .mk-stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 1rem;
-  margin-top: 3rem;
+  margin-top: 2rem;
   padding-top: 1.75rem;
   border-top: 1px solid var(--c-line);
 }
 .mk-stat-value {
-  font-size: 1.6rem;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 1.7rem;
   font-weight: 700;
   line-height: 1.1;
+  color: var(--c-text);
 }
 .mk-stat-label {
-  font-size: 0.78rem;
+  font-size: 0.76rem;
+  line-height: 1.4;
   color: var(--c-text-faint);
-  margin-top: 0.25rem;
+  margin-top: 0.3rem;
 }
 
+/* --------------------------------------------------------------------------
+   Sections
+   -------------------------------------------------------------------------- */
 .mk-section {
-  padding: 3.5rem 0;
-  border-top: 1px solid var(--c-line);
+  padding: 4rem 0;
+  border-top: 1px solid var(--c-line-soft);
 }
 .mk-section-head {
-  margin-bottom: 2rem;
-  max-width: 62ch;
+  margin-bottom: 2.25rem;
+  max-width: 64ch;
 }
+.mk-section-head .mk-eyebrow { margin-bottom: 0.7rem; }
 .mk-section-head h2 {
-  font-size: clamp(1.4rem, 3vw, 1.85rem);
+  font-size: clamp(1.45rem, 3vw, 2rem);
   font-weight: 700;
-  letter-spacing: -0.02em;
-  margin: 0 0 0.6rem 0;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+  margin: 0 0 0.65rem 0;
 }
 .mk-section-head p {
   color: var(--c-text-dim);
+  line-height: 1.65;
   margin: 0;
 }
+
+/* Heading beside its supporting list, for the sections that argue a point
+   rather than lay out a set of equals. Stacks below 1024px. */
+.mk-split {
+  display: grid;
+  grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr);
+  gap: 3rem;
+  align-items: start;
+}
+.mk-split .mk-section-head { margin-bottom: 0; }
 
 .mk-grid {
   display: grid;
@@ -427,33 +816,97 @@ a:hover {
   background: var(--c-surface);
   border: 1px solid var(--c-line);
   border-radius: var(--radius);
-  padding: 1.35rem;
+  padding: 1.4rem;
+  transition: border-color .18s ease, transform .18s ease;
+}
+.mk-card:hover { border-color: rgba(var(--rgb-accent), .35); }
+@media (prefers-reduced-motion: no-preference) {
+  .mk-card:hover { transform: translateY(-2px); }
 }
 .mk-card h3 {
-  font-size: 0.98rem;
+  font-size: 1rem;
   font-weight: 650;
+  letter-spacing: -0.01em;
   margin: 0 0 0.5rem 0;
 }
 .mk-card p {
   color: var(--c-text-dim);
   font-size: 0.88rem;
+  line-height: 1.6;
   margin: 0;
 }
 .mk-card-glyph {
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--c-accent);
-  display: block;
   margin-bottom: 0.7rem;
+}
+
+/* A stated claim and the points behind it. */
+.mk-statement {
+  max-width: 66ch;
+  margin-bottom: 2.25rem;
+}
+.mk-statement h2 {
+  font-size: clamp(1.6rem, 3.4vw, 2.3rem);
+  font-weight: 700;
+  line-height: 1.18;
+  letter-spacing: -0.03em;
+  margin: 0 0 0.85rem 0;
+}
+.mk-statement p {
+  color: var(--c-text-dim);
+  font-size: 1.02rem;
+  line-height: 1.7;
+  margin: 0;
+}
+
+/* Titled points — used where a set of short cards would read as filler. */
+.mk-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 1.1rem;
+}
+.mk-list li {
+  position: relative;
+  padding-left: 1.6rem;
+}
+.mk-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.45em;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--c-accent);
+  opacity: .85;
+}
+.mk-list-title {
+  display: block;
+  font-size: 0.97rem;
+  font-weight: 600;
+  color: var(--c-text);
+  margin-bottom: 0.25rem;
+}
+.mk-list-note {
+  display: block;
+  font-size: 0.87rem;
+  line-height: 1.6;
+  color: var(--c-text-dim);
 }
 
 .mk-steps {
   counter-reset: mk-step;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 1.25rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1.5rem 1.25rem;
 }
 .mk-step {
   counter-increment: mk-step;
@@ -463,10 +916,11 @@ a:hover {
 .mk-step::before {
   content: counter(mk-step, decimal-leading-zero);
   display: block;
-  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
   font-weight: 700;
   color: var(--c-accent);
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.55rem;
 }
 .mk-step h3 {
   font-size: 0.95rem;
@@ -476,10 +930,113 @@ a:hover {
 .mk-step p {
   color: var(--c-text-dim);
   font-size: 0.86rem;
+  line-height: 1.6;
   margin: 0;
 }
 
-/* Pricing cards on the public page reuse the subscription card, so a price
+/* --- Setup preview -------------------------------------------------------
+   The fields a confirmed setup carries, laid out as they appear in the
+   platform. Values stay blank: a marketing page carrying invented entry and
+   target prices would be publishing a trading result, however small the print. */
+.mk-setup-card {
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  background: var(--c-surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.mk-setup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+}
+.mk-setup-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+}
+.mk-setup-tag {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-pill);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-text-faint);
+}
+.mk-setup-rows {
+  margin: 0;
+  padding: 0.35rem 1.1rem 0.6rem 1.1rem;
+}
+.mk-setup-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px dashed var(--c-line-soft);
+}
+.mk-setup-row:last-child { border-bottom: 0; }
+.mk-setup-row dt {
+  font-size: 0.83rem;
+  font-weight: 500;
+  color: var(--c-text-faint);
+}
+.mk-setup-row dd {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--c-text);
+  text-align: right;
+}
+.mk-setup-row dd.is-empty {
+  color: var(--c-text-faint);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+.mk-setup-foot {
+  padding: 0.95rem 1.1rem 1.1rem 1.1rem;
+  border-top: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+}
+.mk-check {
+  list-style: none;
+  padding: 0;
+  margin: 0.7rem 0 0 0;
+  display: grid;
+  gap: 0.45rem;
+}
+.mk-check li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.82rem;
+  color: var(--c-text-dim);
+}
+.mk-check li::before {
+  content: "";
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--c-line);
+  border-radius: 4px;
+}
+.mk-setup-note {
+  margin: 0.9rem 0 0 0;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--c-text-faint);
+}
+
+/* --- Pricing note --------------------------------------------------------
+   The pricing cards themselves are the subscription card (above), so a price
    cannot be laid out one way on /pricing and another inside the product. */
 .mk-price-note {
   margin-top: 0.75rem;
@@ -507,85 +1064,144 @@ a:hover {
   font-weight: 700;
 }
 .mk-faq details[open] summary::before { content: "–"; }
+.mk-faq summary:focus-visible {
+  outline: 2px solid var(--bs-focus-ring-color);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
 .mk-faq p {
   color: var(--c-text-dim);
   font-size: 0.88rem;
+  line-height: 1.65;
   margin: 0.6rem 0 0 1.1rem;
 }
 
-.mk-preview {
-  border: 1px solid var(--c-line);
-  border-radius: var(--radius);
-  background: var(--c-surface);
-  overflow: hidden;
-}
-.mk-preview-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.6rem 0.9rem;
-  border-bottom: 1px solid var(--c-line);
-  background: var(--c-surface-2);
-}
-.mk-preview-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--c-line);
-}
-.mk-preview-body { padding: 1.25rem; }
-
 .mk-cta {
   text-align: center;
-  padding: 3.5rem 1.25rem;
-  border-top: 1px solid var(--c-line);
+  padding: 4rem 1.25rem;
+  border-top: 1px solid var(--c-line-soft);
 }
 .mk-cta h2 {
-  font-size: clamp(1.4rem, 3vw, 1.9rem);
+  font-size: clamp(1.5rem, 3.4vw, 2.15rem);
   font-weight: 700;
-  letter-spacing: -0.02em;
-  margin: 0 0 0.6rem 0;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+  margin: 0 0 0.75rem 0;
 }
 .mk-cta p {
   color: var(--c-text-dim);
+  font-size: 1rem;
+  line-height: 1.65;
   max-width: 56ch;
-  margin: 0 auto 1.5rem auto;
+  margin: 0 auto 1.75rem auto;
 }
 
+/* --------------------------------------------------------------------------
+   Footer
+   The risk warning is not decoration and is never abbreviated; only its
+   typography is set here.
+   -------------------------------------------------------------------------- */
 .mk-foot {
   border-top: 1px solid var(--c-line);
-  padding: 2.5rem 0 3rem 0;
+  padding: 3rem 0 3.5rem 0;
   color: var(--c-text-faint);
   font-size: 0.83rem;
 }
 .mk-foot-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 1.5rem;
-  margin-bottom: 2rem;
+  grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr));
+  gap: 2.5rem 1.5rem;
+  margin-bottom: 2.5rem;
 }
-.mk-foot h4 {
-  font-size: 0.75rem;
+.mk-foot-brand p {
+  margin: 0;
+  max-width: 34ch;
+  line-height: 1.6;
+}
+.mk-foot-title {
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--c-text-dim);
-  margin: 0 0 0.7rem 0;
+  margin: 0 0 0.8rem 0;
 }
 .mk-foot ul {
   list-style: none;
   padding: 0;
   margin: 0;
 }
-.mk-foot li { margin-bottom: 0.45rem; }
-.mk-foot a { color: var(--c-text-dim); text-decoration: none; }
-.mk-foot a:hover { color: var(--c-accent); }
+.mk-foot li { margin-bottom: 0.5rem; }
+.mk-foot a {
+  color: var(--c-text-dim);
+  text-decoration: none;
+}
+.mk-foot a:hover { color: var(--c-accent-soft); }
+.mk-foot a:focus-visible {
+  outline: 2px solid var(--bs-focus-ring-color);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
 
 .mk-disclaimer {
   border-top: 1px solid var(--c-line);
-  padding-top: 1.5rem;
-  line-height: 1.65;
+  padding-top: 1.75rem;
+  line-height: 1.7;
   max-width: 90ch;
+}
+.mk-disclaimer strong { color: var(--c-text-dim); }
+
+/* --------------------------------------------------------------------------
+   Responsive
+   Breakpoints sit where the layout actually runs out of room, and each one
+   changes the arrangement rather than shrinking it: the hero stacks, the
+   two-column arguments become one, and the panel is redrawn for a phone.
+   -------------------------------------------------------------------------- */
+@media (max-width: 1024px) {
+  .mk-hero-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2.5rem;
+  }
+  .mk-hero h1 { max-width: 24ch; }
+  .mk-split {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2rem;
+  }
+  .mk-foot-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2rem 1.5rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .mk-hero { padding: 2.75rem 0; }
+  .mk-section { padding: 2.75rem 0; }
+  .mk-hero-lede { font-size: 1rem; }
+  .mk-hero h1 { max-width: none; }
+
+  /* Full-width buttons: on a phone a half-width primary control reads as the
+     lesser of the two. */
+  .mk-actions { flex-direction: column; align-items: stretch; }
+  .mk-actions .btn { width: 100%; }
+
+  .mk-readouts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mk-readout:last-child { grid-column: 1 / -1; }
+
+  .mk-panel-body { padding: 0.9rem; }
+  .mk-setup-head,
+  .mk-setup-foot { padding-left: 0.9rem; padding-right: 0.9rem; }
+  .mk-setup-rows { padding-left: 0.9rem; padding-right: 0.9rem; }
+  .mk-setup-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+  }
+  .mk-setup-row dd { text-align: left; }
+
+  .mk-cta { padding: 2.75rem 1.25rem; }
+  .mk-cta .btn { width: 100%; }
+
+  .mk-foot-grid { grid-template-columns: minmax(0, 1fr); gap: 1.75rem; }
 }
 
 /* Legal documents: a readable measure, and headings that do not shout. */

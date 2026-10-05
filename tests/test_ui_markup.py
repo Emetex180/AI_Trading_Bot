@@ -27,8 +27,10 @@ from test_web import _FakeJobs, _repo, _sign_in
 
 # The narrow-screen pairing check is one implementation, shared with the client
 # and admin suites: the rule it enforces belongs to the stylesheet, not to any
-# one area of the application.
-from test_client_pages import column_marker_problems, table_by_id
+# one area of the application. ``cell_classes`` is shared for the same reason,
+# and doubles as the reader for the JavaScript-built rows below.
+from test_client_pages import (HIDE_MARKERS, cell_classes,
+                               column_marker_problems, table_by_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -416,4 +418,72 @@ def test_the_console_trade_table_drops_its_columns_in_pairs(dashboard):
     problems = column_marker_problems(table_by_id(body, "trade-rows"), "trade-rows")
 
     assert not problems, "; ".join(problems)
+
+
+# --------------------------------------------------------------------------- #
+# The tables the browser builds
+# --------------------------------------------------------------------------- #
+#: The assets page's two tables whose rows the browser writes, each naming the
+#: table's id in the template and the dashboard.js function that fills it.
+JS_BUILT_TABLES = [
+    ("registry-table", "renderRegistry"),
+    ("broker-table", "renderCatalog"),
+]
+
+DASHBOARD_JS = (Path(__file__).resolve().parents[1]
+                / "app" / "static" / "js" / "dashboard.js")
+
+
+def _function_body(source: str, name: str) -> str:
+    """One top-level function's source, cut at the next one.
+
+    Read as text rather than executed: what has to be right is the file the
+    browser is served, and running the script to find out would need a DOM and
+    would prove a different thing.
+    """
+    start = source.index(f"function {name}(")
+    following = source.find("\n  function ", start + 1)
+    return source[start:] if following == -1 else source[start:following]
+
+
+def _js_row_cells(source: str, name: str) -> list[set[str]]:
+    """The cells one browser-built row emits, in document order.
+
+    Empty-state rows are dropped. They are a single colspan'd cell that never
+    appears beside a real row, and leaving one in would shift every cell that
+    follows it under the wrong heading.
+    """
+    cells = cell_classes(_function_body(source, name), "td")
+    return [classes for classes in cells if "empty-state" not in classes]
+
+
+@pytest.mark.parametrize("table_id,function_name", JS_BUILT_TABLES)
+def test_a_browser_built_row_carries_the_same_markers_as_its_headings(
+        dashboard, table_id, function_name):
+    """A marker in the template but not in the script survives until the poll.
+
+    Both of these tbodies are replaced wholesale by dashboard.js — the registry
+    on every refresh and every enable/disable toggle, the broker catalogue on
+    every scan. A ``table-hide-*`` class written only into the template
+    therefore renders correctly once and then disappears on the first refresh,
+    with nothing raised and nothing logged anywhere.
+
+    The heading and the cell it belongs to live in different files, so the two
+    are the only pair that can be compared, and that is what this does.
+    """
+    headings = cell_classes(table_by_id(dashboard["html"]["assets"], table_id), "th")
+    cells = _js_row_cells(DASHBOARD_JS.read_text(encoding="utf-8"), function_name)
+
+    assert len(cells) == len(headings), (
+        f"{function_name} writes {len(cells)} cells "
+        f"under {len(headings)} headings")
+
+    mismatched = [
+        f"column {index}: heading carries "
+        f"{sorted(heading & HIDE_MARKERS) or 'no marker'}, script writes "
+        f"{sorted(cell & HIDE_MARKERS) or 'no marker'}"
+        for index, (heading, cell) in enumerate(zip(headings, cells))
+        if (heading & HIDE_MARKERS) != (cell & HIDE_MARKERS)
+    ]
+    assert not mismatched, f"{table_id} " + "; ".join(mismatched)
 
