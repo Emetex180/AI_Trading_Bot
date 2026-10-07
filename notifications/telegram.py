@@ -30,6 +30,8 @@ import requests  # type: ignore
 
 from config import Settings, get_settings
 from trading.liquidity import LEVEL_LABELS
+from trading.model2 import MODEL_2, is_model_2, model_meta
+from trading.model2_sessions import MODEL_2_SESSION_INDEX
 from trading.risk_manager import risk_reward_points
 from trading.sessions import SESSION_INDEX
 from trading.signal_engine import Signal
@@ -95,14 +97,65 @@ def _hm(ts) -> str:
 
 
 def _session_label(key: str) -> str:
-    """Session key -> the name a trader reads ("ny_am" → "NY AM")."""
-    window = SESSION_INDEX.get(key)
+    """Session key -> the name a trader reads ("ny_am" → "NY AM").
+
+    Both models' tables are consulted because a signal's session key comes from
+    whichever engine produced it. The lookup order is harmless: the two key
+    namespaces are disjoint (Model 2's are all ``m2_``-prefixed), so a Model 1 key
+    always resolves in the first table and its label is unchanged.
+    """
+    window = SESSION_INDEX.get(key) or MODEL_2_SESSION_INDEX.get(key)
     return window.label if window else (key or "-")
 
 
 def _level_label(kind: str) -> str:
     """Liquidity kind -> its display name ("PDL" → "Previous Day Low")."""
     return LEVEL_LABELS.get(kind, kind.replace("_", " ").title()) if kind else "-"
+
+
+def _model2_sequence(signal: Signal) -> list[str]:
+    """A Model 2 alert's purge → break lineage, in place of Model 1's.
+
+    Reads the model's own provenance out of ``model_meta`` — the level that was
+    taken, which session and day it came from, and the purge candle's extremes —
+    so the alert says exactly what the engine decided on rather than making the
+    reader infer it from the entry and stop.
+    """
+    meta = model_meta(signal)
+    d = signal.digits
+
+    def _seq(label: str, value: str) -> str:
+        return f"  {label:<19}{value}"
+
+    side = meta.get("liquidity_side")
+    source = meta.get("liquidity_source_session_label") or "-"
+    source_date = meta.get("liquidity_source_date") or "-"
+    level = meta.get("liquidity_level")
+    high = meta.get("purge_candle_high")
+    low = meta.get("purge_candle_low")
+    timeframe = meta.get("timeframe") or "M15"
+
+    # The boundary that fills the trade is the far side of the purge candle from
+    # the stop; naming it makes the entry condition auditable after the fact.
+    if signal.direction == "sell":
+        trigger = f"trades below {_price(low, d)}"
+        anchor = f"purge candle high {_price(high, d)}"
+    else:
+        trigger = f"trades above {_price(high, d)}"
+        anchor = f"purge candle low {_price(low, d)}"
+
+    return [
+        "",
+        "Sequence (Model 2):",
+        _seq(f"Purge ({timeframe}):",
+             f"{source} {'High' if side == 'BUYSIDE' else 'Low'} @ "
+             f"{_price(level, d)}  ({source_date})"),
+        _seq("Purge candle:",
+             f"H {_price(high, d)} / L {_price(low, d)}  "
+             f"({_hm(signal.purge_time_ny)} NY)"),
+        _seq("Entry trigger:", trigger),
+        _seq("Stop anchor:", anchor),
+    ]
 
 
 def format_signal_alert(signal: Signal) -> str:
@@ -157,20 +210,29 @@ def format_signal_alert(signal: Signal) -> str:
     def _seq(label: str, value: str) -> str:
         return f"  {label:<19}{value}"
 
-    lines += [
-        "",
-        "Sequence:",
-        _seq("Purge (1H):",
-             f"{_level_label(signal.liquidity_type)} @ "
-             f"{_price(signal.liquidity_price, d)}"
-             f"{purge_grade}  ({_hm(signal.purge_time_ny)} NY)"),
-        _seq(f"CISD ({signal.cisd_tf or '-'}):",
-             f"confirmed {_hm(signal.cisd_confirm_time_ny)} NY"),
-        _seq("FVG (1M):",
-             f"{signal.fvg_direction or '-'} "
-             f"[{_price(signal.fvg_lower, d)}, {_price(signal.fvg_upper, d)}]"
-             f"  ({_hm(signal.fvg_formation_time_ny)} NY)"),
-    ]
+    if is_model_2(signal):
+        # Model 2 has no CISD and no FVG, so it gets its own sequence block
+        # rather than three lines describing steps the model never took. A
+        # "Model:" header is added for the same reason: the reader has to be able
+        # to tell which engine produced what is in front of them. Model 1's alert
+        # takes the branch below and is unchanged, header and all.
+        lines.insert(3, f"Model:               {MODEL_2}")
+        lines += _model2_sequence(signal)
+    else:
+        lines += [
+            "",
+            "Sequence:",
+            _seq("Purge (1H):",
+                 f"{_level_label(signal.liquidity_type)} @ "
+                 f"{_price(signal.liquidity_price, d)}"
+                 f"{purge_grade}  ({_hm(signal.purge_time_ny)} NY)"),
+            _seq(f"CISD ({signal.cisd_tf or '-'}):",
+                 f"confirmed {_hm(signal.cisd_confirm_time_ny)} NY"),
+            _seq("FVG (1M):",
+                 f"{signal.fvg_direction or '-'} "
+                 f"[{_price(signal.fvg_lower, d)}, {_price(signal.fvg_upper, d)}]"
+                 f"  ({_hm(signal.fvg_formation_time_ny)} NY)"),
+        ]
 
     if signal.silver_bullet:
         lines.append("")

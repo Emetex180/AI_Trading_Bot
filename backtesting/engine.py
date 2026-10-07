@@ -429,18 +429,31 @@ def simulate(signal, following: list[Candle], max_hold_m1: int) -> BacktestTrade
 # Runner
 # --------------------------------------------------------------------------- #
 class BacktestRunner:
-    """Replay M1 closed candles through a real ICTStrategy and price exits."""
+    """Replay M1 closed candles through a real ICTStrategy and price exits.
+
+    ``strategy_factory`` optionally supplies a *different* engine to replay —
+    Model 2's, for instance — built from the same asset with this runner's
+    overrides applied. Everything else about the run is unchanged, because the
+    contract the runner needs is one method: ``feed(closed_m1) -> list[Signal]``.
+    Leaving it out replays Model 1, which is what every existing caller does.
+    """
 
     def __init__(self, asset: Asset, *, max_hold_m1: int = DEFAULT_MAX_HOLD_M1,
-                 extra_params: dict[str, Any] | None = None):
+                 extra_params: dict[str, Any] | None = None,
+                 strategy_factory: Callable[[Asset], Any] | None = None,
+                 model: str = ""):
         self.asset = asset
         self.max_hold_m1 = max_hold_m1
         self.extra_params = dict(extra_params or {})
+        #: The model this run replayed, for the summary's params block.
+        self.model = model
         overrides = dict(asset.overrides)
         overrides.update(self.extra_params)
-        self.strategy = ICTStrategy(Asset(
+        engine_asset = Asset(
             name=asset.name, broker_symbol=asset.broker_symbol,
-            enabled=True, digits=asset.digits, overrides=overrides))
+            enabled=True, digits=asset.digits, overrides=overrides)
+        self.strategy = (strategy_factory(engine_asset) if strategy_factory
+                         else ICTStrategy(engine_asset))
 
     # ------------------------------------------------------------------ #
     def run(self, m1_candles: list[Candle], name: str = "") -> tuple[BacktestSummary,
@@ -470,6 +483,7 @@ class BacktestRunner:
             "max_hold_m1": self.max_hold_m1,
             "asset_overrides": dict(self.asset.overrides),
             "extra": self.extra_params,
+            "model": self.model or "MODEL_1",
         }
         return summary, trades
 

@@ -86,6 +86,25 @@ class Signal(Base):
     # Deterministic setup identity and the state the engine settled in.
     setup_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     state: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    # Which model produced this signal — MODEL_1 (the ICT sequence) or MODEL_2
+    # (the session-liquidity purge model). Defaults to MODEL_1 so every row that
+    # already exists keeps its meaning when the column is added.
+    # ``server_default`` as well as ``default``: the Python-side default only
+    # applies to ORM inserts, so a database built by ``create_all`` would carry
+    # ``NOT NULL`` with no SQL default at all and reject any insert that does not
+    # name the column — which is what a legacy row or a hand-written INSERT does.
+    # Emitting it in the DDL also makes a fresh database identical to one the
+    # additive migration upgraded, which is the property the migration promises.
+    model: Mapped[str] = mapped_column(String(16), nullable=False,
+                                       default="MODEL_1", server_default="MODEL_1",
+                                       index=True)
+    # The producing model's own provenance payload, as a JSON string. Model 2
+    # records the purged session level, its source session and date, and the
+    # purge candle's extremes there. Text rather than the JSON type so SQLite and
+    # PostgreSQL store it identically and the additive ALTER TABLE needs no
+    # dialect-specific type.
+    model_meta: Mapped[str] = mapped_column(Text, nullable=False, default="{}",
+                                            server_default="{}")
     # Price precision of the instrument, so the dashboard can format the levels
     # in an alert without re-reading the asset registry.
     digits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

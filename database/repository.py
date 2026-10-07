@@ -89,6 +89,11 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("signals", "setup_id", "VARCHAR(64)"),
     ("signals", "state", "VARCHAR(32)"),
     ("signals", "digits", "INTEGER"),
+    # Which model produced a signal, and that model's own provenance payload.
+    # Additive: every existing row is back-filled with the Model 1 default by the
+    # DDL itself, so nothing that was already stored changes meaning.
+    ("signals", "model", "VARCHAR(16) NOT NULL DEFAULT 'MODEL_1'"),
+    ("signals", "model_meta", "TEXT NOT NULL DEFAULT '{}'"),
     # 3rader account fields. Added to an existing ``users`` table by ALTER, so
     # each carries a default an existing row can be given without a rewrite.
     # ``updated_at``/``deleted_at`` are nullable for the same reason — NULL is
@@ -106,6 +111,10 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
 # understood by both SQLite and PostgreSQL.
 _ENSURED_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("ix_backtests_batch_id", "backtests", "batch_id"),
+    # Added with the ``model`` column: a database created before it existed gets
+    # the column by ALTER, and this gives it the same index a fresh
+    # ``create_all`` would have built, so filtering by model is fast either way.
+    ("ix_signals_model", "signals", "model"),
 )
 
 

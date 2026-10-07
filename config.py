@@ -271,6 +271,23 @@ class Settings:
     efficiency_weight_liquidity: float = 0.3
     efficiency_weight_distance: float = 0.2
 
+    # --- Model 2: session-liquidity purge (15M) ------------------------------
+    # A second, independent model that runs alongside the ICT sequence above
+    # rather than replacing it (see ``trading.model2``). Off by default: enabling
+    # it adds signals, so it is an operator's deliberate choice, not something a
+    # deploy switches on.
+    #
+    # Model 2 answers to the same MIN_RR / RISK_PERCENT / TRADING_DAYS policy as
+    # Model 1 and shares its scanner, signal schema, dedupe, alerts and
+    # repository. Only the two facts below are its own. Both are overridable per
+    # asset via ``ASSET_<NAME>_MODEL_2_ENABLED`` /
+    # ``ASSET_<NAME>_MODEL_2_LOOKBACK_DAYS``.
+    model_2_enabled: bool = False
+    # Trading days of session history the liquidity pool looks back over, in
+    # addition to the current day. 3 is the model's own value: the sessions of
+    # the previous three trading days plus today.
+    model_2_lookback_days: int = 3
+
     extra: dict[str, Any] = field(default_factory=dict)
 
     # --- Runtime overrides ----------------------------------------------------
@@ -495,6 +512,9 @@ def _build_settings() -> Settings:
         efficiency_weight_rr=_env_float("EFFICIENCY_WEIGHT_RR", 0.5),
         efficiency_weight_liquidity=_env_float("EFFICIENCY_WEIGHT_LIQUIDITY", 0.3),
         efficiency_weight_distance=_env_float("EFFICIENCY_WEIGHT_DISTANCE", 0.2),
+        # --- Model 2: session-liquidity purge ------------------------------ #
+        model_2_enabled=_env_bool("MODEL_2_ENABLED", default=False),
+        model_2_lookback_days=_env_int("MODEL_2_LOOKBACK_DAYS", 3),
         # --- Web platform -------------------------------------------------- #
         flask_secret_key=_env_str("FLASK_SECRET_KEY"),
         session_cookie_secure=_env_bool("SESSION_COOKIE_SECURE", default=False),

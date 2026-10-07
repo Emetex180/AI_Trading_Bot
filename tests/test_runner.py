@@ -236,6 +236,13 @@ def _env(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'runner.db'}")
     monkeypatch.setenv("SESSION_GATE_ENABLED", "false")
+    # Model 2 is pinned off for the same reason the gate is: it is an operator's
+    # ``.env`` choice, and ``reload_settings`` below reads the real one — so a
+    # developer who enabled Model 2 would otherwise have every live test here
+    # build a second, real engine per asset through the default factory. The
+    # tests that care opt it in explicitly with
+    # ``replace(settings, model_2_enabled=True)``.
+    monkeypatch.setenv("MODEL_2_ENABLED", "false")
     # The live loop fails closed while the broker clock is unverified (see
     # Runner._retry_broker_clock), so a session under test has to look like a
     # verified one: publish the offset discovery would have produced. The
@@ -1081,6 +1088,73 @@ def test_a_scanner_that_cannot_report_state_does_not_break_the_session(
 
 
 # --------------------------------------------------------------------------- #
+# Model 2 — the second engine, beside Model 1 rather than instead of it
+#
+# ``MODEL_2_ENABLED`` is what turns this on, read once from ``.env`` into
+# ``settings.model_2_enabled``. These pin both halves of that: the live loop
+# builds the extra scanner and feeds it, and the gate wakes for Model 2's own
+# sessions — without either, enabling the setting would produce no signals.
+# --------------------------------------------------------------------------- #
+def test_model_2_scanners_run_beside_model_1_on_one_market_poll(
+        tmp_path, monkeypatch):
+    """Two scanners per asset, two engines, one market read between them.
+
+    Model 2 must never replace Model 1: every enabled asset keeps its Model 1
+    scanner *and* gains a Model 2 one, warmed from the same history, and both
+    are fed the same closed candles from a single poll — so a disagreement
+    between them can only ever come from their rules, never from their data.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    market = _FakeMarket()
+    # A short poll interval, so "both engines step on more than one poll" is
+    # observed in milliseconds rather than across several real 5s intervals.
+    jobs = _jobs(replace(settings, model_2_enabled=True,
+                         scanner_poll_interval_ms=50), maker,
+                 market_factory=lambda c, s: market,
+                 model2_scanner_factory=lambda a, s, r, eq: _FakeScanner(a, r))
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+
+    # One scanner per model, both for the one enabled asset.
+    assert _wait_for(lambda: len(_FakeScanner.instances) == 2), \
+        len(_FakeScanner.instances)
+    model_1, model_2 = _FakeScanner.instances
+    assert {sc.asset.name for sc in (model_1, model_2)} == {"TEST"}
+    # Both engines were warmed from the same history.
+    assert model_1.warmed == model_2.warmed == 3
+
+    # Both step on every poll, so both are live and running concurrently.
+    assert _wait_for(lambda: model_1.steps >= 2 and model_2.steps >= 2)
+    # Published under a key of its own, so Model 2's state can never be read as
+    # Model 1's — and Model 1's is still there beside it.
+    assert _wait_for(lambda: "TEST @ Model 2" in jobs.live_state()["setups"])
+    assert "TEST" in jobs.live_state()["setups"]
+
+    # Counts are frozen once the loop has unwound, so these can be compared
+    # without a poll landing between the reads.
+    jobs.stop_live(timeout=5)
+    assert model_1.steps == model_2.steps == market.polls
+    assert model_1.steps >= 2
+
+
+def test_model_2_is_never_built_unless_the_setting_is_on(tmp_path, monkeypatch):
+    """The disabled default is one scanner per asset — Model 1, untouched."""
+    settings, maker = _env(tmp_path, monkeypatch)
+    built = []
+    jobs = _jobs(settings, maker,                    # model_2_enabled is False
+                 model2_scanner_factory=lambda a, s, r, eq: built.append(a))
+
+    assert jobs.start_live()["ok"] is True
+    assert _wait_for(lambda: jobs.live_state()["state"] == LIVE_RUNNING)
+    assert _wait_for(lambda: bool(_FakeScanner.instances))
+
+    jobs.stop_live(timeout=5)
+    assert built == []                       # the Model 2 factory never ran
+    assert len(_FakeScanner.instances) == 1
+
+
+# --------------------------------------------------------------------------- #
 # Session-hours gate
 #
 # The loop stays up around the clock but only works inside a tradeable session
@@ -1204,6 +1278,35 @@ def test_the_gate_can_be_switched_off(tmp_path, monkeypatch):
     jobs = _jobs(settings, maker)
 
     assert jobs._session_gate() == (True, "gate_disabled", None)
+
+
+def test_the_gate_wakes_for_a_model_2_window_model_1_has_none_for(
+        tmp_path, monkeypatch):
+    """Model 2's Lunch must not be slept through.
+
+    At 11:30 NY Model 1 has no window at all — NY AM ended at 11:00 and NY PM
+    opens at 13:00 — so with Model 2 off the loop correctly sleeps. With it on
+    the loop has to stay awake for Model 2's own Lunch run (11:00-12:59), or
+    the model would only ever scan inside Model 1's hours and most of its
+    sessions would never be evaluated.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    clock = _Clock(datetime(2026, 9, 14, 11, 30))    # Monday, NY Lunch
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    gated = dict(session_gate_enabled=True,
+                 valid_entry_sessions=list(ALL_ENTRY_SESSIONS))
+
+    off = _jobs(replace(settings, **gated), maker)
+    assert off._session_gate()[0] is False
+
+    on = _jobs(replace(settings, model_2_enabled=True, **gated), maker)
+    active, activity, next_open = on._session_gate()
+    # Awake for Model 2's own Lunch run, with no next-open to report — which is
+    # what "awake now" means here. The label's separator is not pinned, only
+    # that the reason is Model 2's and names the right window.
+    assert (active, next_open) == (True, None)
+    assert activity.startswith("Model 2") and "Lunch" in activity
 
 
 def test_backfill_plan_widens_the_request_to_span_a_sleep(tmp_path, monkeypatch):

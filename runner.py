@@ -40,6 +40,7 @@ from uuid import uuid4
 
 from config import Settings, get_settings
 from database.repository import Repository, init_db
+from trading import model2_sessions as m2_sessions
 from trading import sessions as sess
 from trading import time_utils as tu
 from trading.instrument import prepare_asset
@@ -147,6 +148,19 @@ def _default_scanner_factory(asset, settings: Settings, repo: Repository,
 
     return AssetScanner(asset, settings=settings, repo=repo,
                         equity_provider=equity_provider)
+
+
+def _default_model2_scanner_factory(asset, settings: Settings, repo: Repository,
+                                    equity_provider):
+    """A Model 2 scanner for one asset — same pipeline, different engine.
+
+    Built lazily like every other factory here, so importing this module never
+    pulls in a strategy. Only reached when ``MODEL_2_ENABLED`` is on.
+    """
+    from trading.model2_scanner import Model2Scanner
+
+    return Model2Scanner(asset, settings=settings, repo=repo,
+                         equity_provider=equity_provider)
 
 
 def _default_backtest_factory(asset, max_hold_m1: int):
@@ -322,6 +336,7 @@ class JobManager:
                  client_factory: Callable | None = None,
                  market_factory: Callable | None = None,
                  scanner_factory: Callable | None = None,
+                 model2_scanner_factory: Callable | None = None,
                  backtest_factory: Callable | None = None,
                  manager_factory: Callable | None = None,
                  repo_factory: Callable | None = None):
@@ -330,6 +345,15 @@ class JobManager:
         self._client_factory = client_factory or _default_client_factory
         self._market_factory = market_factory or _default_market_factory
         self._scanner_factory = scanner_factory or _default_scanner_factory
+        #: Model 2's own scanner, built only when the model is enabled. A
+        #: separate factory rather than a flag on the one above, so that turning
+        #: Model 2 on is an explicit act at both the settings and the injection
+        #: site. It is never called while ``MODEL_2_ENABLED`` is false (the
+        #: default), so an existing caller that injects a fake ``scanner_factory``
+        #: to avoid MT5 is unaffected unless it opts Model 2 in — in which case it
+        #: injects this one too.
+        self._model2_scanner_factory = (model2_scanner_factory
+                                        or _default_model2_scanner_factory)
         self._backtest_factory = backtest_factory or _default_backtest_factory
         self._manager_factory = manager_factory or (lambda cfg: _asset_manager(cfg))
         self._repo_factory = repo_factory or (lambda: Repository(settings=self.settings))
@@ -799,8 +823,28 @@ class JobManager:
                                                  days=days)
         if active:
             return True, activity, None
-        return False, activity, sess.next_activity_start_utc(
-            now_ny, allowed_sessions=allowed, days=days)
+
+        # Model 2's windows are not Model 1's, so with the model on the loop also
+        # has to be awake for them — otherwise it would sleep straight through a
+        # Model 2 session Model 1 has no reason to wake for (Model 1's London
+        # opens at 02:00, Model 2's at 01:00; Model 1 has no window at all for
+        # Model 2's Lunch).
+        #
+        # Completely inert when the model is off: not one extra call, not one
+        # changed value, so an operator who has not opted in sees Model 1's gate
+        # behaving exactly as it always has.
+        next_open = sess.next_activity_start_utc(now_ny, allowed_sessions=allowed,
+                                                 days=days)
+        if not getattr(self.settings, "model_2_enabled", False):
+            return False, activity, next_open
+
+        m2_active, m2_reason = m2_sessions.awake_at(now_ny, days)
+        if m2_active:
+            return True, m2_reason, None
+        m2_next = m2_sessions.next_session_start_utc(now_ny, days)
+        if m2_next is not None and (next_open is None or m2_next < next_open):
+            next_open = m2_next
+        return False, activity, next_open
 
     def _backfill_plan(self, sc) -> tuple[int, int]:
         """``(lookback, missing_minutes)`` for this scanner's next poll.
@@ -888,6 +932,12 @@ class JobManager:
 
                 warm_count = self.settings.warmup_m1_bars
                 scanners: dict[str, Any] = {}
+                # Model 2 runs *alongside* Model 1 over the same symbols and the
+                # same candles, never instead of it. Two scanners per asset, two
+                # independent engines, one market-data poll between them.
+                model2_enabled = bool(getattr(self.settings, "model_2_enabled",
+                                              False))
+                model2_scanners: dict[str, Any] = {}
                 for asset in assets:
                     if self._stop_event.is_set():
                         break
@@ -914,6 +964,32 @@ class JobManager:
                               f"{resolved.name} warmed ({len(warm)} M1)")
                     self._emit(f"[scan] {resolved.name} ({resolved.broker_symbol}) "
                                f"warmed with {len(warm)} M1 candles.")
+
+                    if not model2_enabled:
+                        continue
+                    # The same warm-up candles, replayed through Model 2's own
+                    # engine: the two models keep separate streams and separate
+                    # state machines, so neither can see the other's history.
+                    try:
+                        m2 = self._model2_scanner_factory(resolved, self.settings,
+                                                          repo, equity)
+                        self._attach_console(m2)
+                        m2.warm(warm)
+                    except Exception as exc:
+                        # A Model 2 failure must never take Model 1 down with it.
+                        # The model is dropped for this session and the reason is
+                        # recorded; Model 1 carries on scanning.
+                        self._log(repo, "ERROR", "scanner",
+                                  f"{resolved.name}: Model 2 not started — "
+                                  f"{type(exc).__name__}: {exc}")
+                        self._emit(f"[scan] {resolved.name}: Model 2 could not "
+                                   f"start — {exc}")
+                        continue
+                    model2_scanners[resolved.name] = m2
+                    self._log(repo, "INFO", "scanner",
+                              f"{resolved.name} warmed for Model 2 ({len(warm)} M1)")
+                    self._emit(f"[scan] {resolved.name} Model 2 warmed with "
+                               f"{len(warm)} M1 candles.")
 
                 with self._state_lock:
                     self._live.assets = list(scanners)
@@ -1035,6 +1111,14 @@ class JobManager:
                         candles = market.poll_closed_candles(sc.symbol,
                                                              lookback=lookback)
                         handled = sc.feed_new(candles)
+                        # Model 2 is fed the *same* poll, not its own: one market
+                        # read per asset per poll, and both engines see exactly
+                        # the same closed candles, so a disagreement between them
+                        # can only ever come from their rules and never from
+                        # their data.
+                        m2 = model2_scanners.get(name)
+                        if m2 is not None:
+                            handled += m2.feed_new(candles)
                         # The live quote, read in the terminal session this
                         # worker already owns — never a second connection. Kept
                         # beside the candle poll because both describe the same
@@ -1060,6 +1144,15 @@ class JobManager:
                         self._live.setups = {
                             name: self._setup_states(sc)
                             for name, sc in scanners.items()}
+                        # Model 2's setup states, under keys of their own. A
+                        # distinct key rather than a nested shape: the published
+                        # contract is ``asset -> {direction: state}`` and the
+                        # console renders it as such, so widening it would change
+                        # a contract Model 1 already relies on. Suffixing keeps
+                        # every existing key meaning exactly what it meant.
+                        self._live.setups.update({
+                            f"{name} @ Model 2": self._setup_states(sc)
+                            for name, sc in model2_scanners.items()})
                         # Same pass, same lock: the price table and the setup
                         # table are read together by the dashboard, so publishing
                         # them under one lock keeps them from disagreeing about

@@ -26,6 +26,14 @@ from . import sessions as sess
 from . import time_utils as tu
 from .risk_manager import RiskDecision, RiskManager, compute_rr
 
+# Which model produced a signal. Model 1 is the ICT sequence the bot has always
+# run; MODEL_2 is the session-liquidity purge model (see :mod:`trading.model2`).
+# The two are independent engines that share this schema, so every signal has to
+# say which one it came from — the column is what makes that visible in the
+# database, on the dashboard and in an alert.
+MODEL_1 = "MODEL_1"
+MODEL_2 = "MODEL_2"
+
 # Signal lifecycle states.
 PENDING = "PENDING"            # deterministic rules + risk passed, awaiting AI
 AI_UNAVAILABLE = "AI_UNAVAILABLE"
@@ -37,17 +45,27 @@ SENT = "SENT"
 def build_setup_id(asset: str, direction: str,
                    purge_time_utc: datetime | None,
                    cisd_time_utc: datetime | None,
-                   fvg_time_utc: datetime | None) -> str:
+                   fvg_time_utc: datetime | None,
+                   model: str = "") -> str:
     """Deterministic id for one setup, from the candles that define it.
 
     Symbol + direction + liquidity-purge candle + CISD candle + FVG candle. Two
     evaluations of the same setup collapse to the same id; a genuinely new setup
     (a different purge, a different CISD, a different FVG) never does.
+
+    ``model`` optionally namespaces the id. It is empty for Model 1 and is
+    prepended **only when given**, so every id Model 1 has already stored is
+    reproduced byte for byte — an old signal's fingerprint cannot change under
+    it. Model 2 passes its tag, which keeps the two models' id spaces disjoint
+    even in the (impossible with the current rules, but cheap to rule out)
+    event that both keys collide on the same three candle times.
     """
     parts = [asset, direction]
     for stamp in (purge_time_utc, cisd_time_utc, fvg_time_utc):
         parts.append(stamp.strftime("%Y-%m-%dT%H:%M") if stamp else "-")
     raw = "|".join(str(p) for p in parts)
+    if model:
+        raw = f"{model}|{raw}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
@@ -90,6 +108,11 @@ class SetupCandidate:
     setup_id: str = ""
     state: str = ""
     digits: int = 0
+    # Which engine produced this setup, and the model's own provenance payload
+    # (a JSON object; empty for Model 1). Appended last so any positional
+    # construction keeps its meaning.
+    model: str = MODEL_1
+    model_meta: str = ""
 
 
 @dataclass
@@ -138,6 +161,12 @@ class Signal:
     ai_risks: list[str] = field(default_factory=list)
     alert_only: bool = True
     risk_approved: bool = False
+    # Which engine produced this signal, and that model's provenance payload as
+    # a JSON string (Model 2 records the purged level, its session and date, and
+    # the purge candle's extremes there; Model 1 leaves it empty). Appended last
+    # so the existing positional field order is untouched.
+    model: str = MODEL_1
+    model_meta: str = ""
 
     def fingerprint(self) -> str:
         """Deterministic unique key used to prevent duplicate alerts/trades.
@@ -237,6 +266,8 @@ def candidate_to_signal(cand: SetupCandidate, valid_entry_sessions: list[str],
         state=cand.state,
         digits=cand.digits,
         rr=rr,
+        model=cand.model,
+        model_meta=cand.model_meta,
     )
     if problems:
         signal.status = REJECTED
