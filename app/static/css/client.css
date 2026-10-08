@@ -67,6 +67,17 @@
   text-align: center;
 }
 
+/* The sign-in footer is two links on one row — "Forgot your password?" and
+   "Create an account" — and at 320px they are wider than the card, which
+   clips: `.auth-card` is `overflow: hidden`, so the second link would be cut
+   off at the right edge with no way to reach it rather than pushing the page
+   wide. The padding comes in and the row is allowed to wrap, which costs a
+   second line only on the widths where one line does not fit. */
+@media (max-width: 40rem) {
+  .auth-foot { padding-inline: 1rem; }
+  .auth-foot > div { flex-wrap: wrap; gap: .25rem .75rem; }
+}
+
 .auth-note {
   margin: 1.25rem 0 0;
   text-align: center;
@@ -100,8 +111,32 @@
   overflow-y: auto;
 }
 
+/* The wordmark and, below 992px, the disclosure that opens the section list.
+   A row rather than a block so the two share an edge on the collapsed bar;
+   on the rail the button is not rendered, so this is the brand alone. */
+.sidebar-head {
+  display: flex;
+  align-items: flex-start;
+  gap: .5rem;
+}
+
+/* The nav groups, held in one wrapper so the disclosure has a single thing to
+   show and hide. The gap here is the one the rail used to put between the two
+   groups when they were its own direct children, so the rail is unchanged. */
+.sidebar-nav-region {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* The disclosure itself. Hidden at every width where the rail is shown, which
+   is what keeps the desktop shell byte-for-byte the navigation it was. */
+.sidebar-menu { display: none; }
+
 .sidebar-brand {
   display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
   /* Column, not row: the wordmark is ~109px at its sidebar height, and the
      "New York sessions" line beside it would not fit the 216px of usable rail.
      Stacked, both stay left-aligned on the same edge as the nav below. */
@@ -296,14 +331,60 @@
   .sidebar-brand { padding: 0 0.5rem 0.5rem; }
   .sidebar-brand-sub { display: none; }
 
-  /* The nav becomes a horizontal scroller so the product still fits a phone
-     without hiding half the sections behind a hamburger. */
-  .sidebar-nav {
-    flex-direction: row;
-    overflow-x: auto;
-    padding-bottom: .25rem;
+  /* Centred rather than top-aligned: on the bar the wordmark and the control
+     are one row of chrome, and the mark's own bottom padding would otherwise
+     push it off the button's centre line. */
+  .sidebar-head { align-items: center; }
+
+  /* The section list becomes a disclosure. The product carries seven sections
+     and an operator thirteen, which is more than any phone row holds — and the
+     strip they used to sit in scrolled with its scrollbar suppressed, so the
+     reader could not tell how much of the navigation was off the edge. A bar
+     with one control in it says what the bar holds.
+
+     Both the control and the collapsed state are gated on `.js`, which
+     client/base.html's head sets. A browser that did not run the script has
+     nothing to reopen the list with, and is left with all of it visible rather
+     than a control that does nothing. */
+  .js .sidebar-menu {
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+    /* 2.75rem is the comfortable touch target. This is the one control that
+       opens the navigation, so it is not the place to save a few pixels. */
+    min-height: 2.75rem;
+    padding-inline: .85rem;
+    border: 1px solid var(--c-line);
+    border-radius: var(--radius-sm);
+    background: var(--c-surface-2);
+    color: var(--c-text-dim);
+    font-size: .8125rem;
+    font-weight: 600;
+    white-space: nowrap;
   }
-  .sidebar-link { white-space: nowrap; }
+  .js .sidebar-menu[aria-expanded="true"] {
+    background: var(--c-surface-3);
+    color: var(--c-text);
+  }
+
+  /* Three rules drawn in CSS rather than the ☰ character, which is a different
+     width in every font the stack can land on. */
+  .sidebar-menu-bars {
+    width: 14px;
+    height: 10px;
+    background:
+      linear-gradient(currentColor, currentColor) top left / 100% 1.5px no-repeat,
+      linear-gradient(currentColor, currentColor) center left / 100% 1.5px no-repeat,
+      linear-gradient(currentColor, currentColor) bottom left / 100% 1.5px no-repeat;
+  }
+
+  .js .sidebar-nav-region { display: none; }
+  .js .sidebar.nav-open .sidebar-nav-region { display: flex; }
+
+  /* The links keep the rail's column layout — a drawer is read top to bottom —
+     and gain the row height a finger needs, where the rail's 34px is sized for
+     a mouse. */
+  .sidebar-link { padding-block: .65rem; }
 
   /* The account block repeats the topbar's account chip — the same picture and
      the same name, two rows further down — so on the bar it is a whole row of

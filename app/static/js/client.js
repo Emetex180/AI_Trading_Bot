@@ -348,6 +348,47 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Mobile navigation                                                   */
+  /* ------------------------------------------------------------------ */
+  /* Below 992px the rail becomes a bar across the top and the section list
+   * goes behind the disclosure in it (client.css §2). This is the one thing in
+   * this file that is not a poller: no data, no state that outlives the click,
+   * and the stylesheet alone decides whether the list starts open or shut.
+   *
+   * Nothing here is load-bearing. The rules that collapse the list are gated on
+   * the `.js` class the page's head sets, so a browser that never runs this
+   * file keeps every link on the page — the failure mode is a taller bar, not
+   * navigation nobody can open. */
+  (function () {
+    var sidebar = document.getElementById("sidebar");
+    var button = document.getElementById("sidebar-menu");
+    if (!sidebar || !button) { return; }
+
+    function isOpen() { return sidebar.classList.contains("nav-open"); }
+    function setOpen(open) {
+      sidebar.classList.toggle("nav-open", open);
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    button.addEventListener("click", function () { setOpen(!isOpen()); });
+
+    /* Escape closes it: a disclosure a keyboard cannot back out of is a trap at
+     * a phone-sized viewport, which is the only viewport it exists for. */
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && isOpen()) { setOpen(false); }
+    });
+
+    /* Following a link closes it. The list sits above the page it has just
+     * navigated to, and left open it covers the top of that page — the reader
+     * would land somewhere new with the menu still in the way. The button
+     * itself is caught here too, but matches no <a> and so is left alone. */
+    sidebar.addEventListener("click", function (event) {
+      var target = event.target;
+      if (target && target.closest && target.closest("a")) { setOpen(false); }
+    });
+  })();
+
+  /* ------------------------------------------------------------------ */
   /* Start                                                               */
   /* ------------------------------------------------------------------ */
   tickClock();

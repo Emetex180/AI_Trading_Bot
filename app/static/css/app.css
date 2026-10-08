@@ -208,6 +208,15 @@ input[type="number"] {
   padding-inline: var(--gutter);
 }
 
+/* The gutter is sized for a desk. On a 320px phone the same 1.5rem is 15% of the
+   viewport spent on margin, and it comes off the width every table, card and
+   price has to fit into. Trimming the token rather than each call site is what
+   keeps the topbar, the client shell's content padding and the console's page
+   edge on the same line — they all read this one value, so they move together. */
+@media (max-width: 40rem) {
+  :root { --gutter: 1rem; }
+}
+
 .page {
   position: relative;
   z-index: 1;
@@ -301,6 +310,15 @@ input[type="number"] {
 @media (max-width: 860px) {
   .topbar-inner { flex-wrap: wrap; min-height: 0; padding-block: .5rem; }
   .topbar-status { width: 100%; margin-left: 0; }
+
+  /* The console's four sections need ~330px in one row, which a 320px phone
+     cannot give once the shell's own padding is taken. `.topbar-nav` scrolls
+     sideways by default and hides its scrollbar, so the remainder would be
+     reachable only by a swipe nobody can see is available. Wrapping instead
+     puts every section on the bar, one below the other, and costs the two rows
+     of chrome that would otherwise be spent hiding two of them. */
+  .topbar-nav { flex-wrap: wrap; overflow-x: visible; row-gap: .15rem; }
+  .topbar-link { padding-inline: .6rem; }
 }
 
 /* --------------------------------------------------------------------------
@@ -605,6 +623,15 @@ input[type="number"] {
      ones are no longer taking. The header keeps its own padding-block from the
      rule above; only the inline padding moves here. */
   .table > :not(caption) > * > * { padding: 0.6rem 0.7rem; }
+
+  /* A card header is one row: a title on the left and whatever controls that
+     card carries on the right. The row does not wrap, and the dashboard's
+     account card puts a full timestamp ("as of 2026-01-05 03:12") beside a
+     Refresh button — together wider than a 320px card before the title is
+     counted, which would make the card the thing that widens the page. Wrapping
+     costs a second line only on the headers that need one; the rest are
+     unchanged. */
+  .card-header { flex-wrap: wrap; }
 }
 
 /* A narrow-column list that can outgrow its card — the dashboard's asset list

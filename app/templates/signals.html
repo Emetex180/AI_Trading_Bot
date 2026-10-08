@@ -38,10 +38,26 @@
 
 <div class="card">
   <div class="table-responsive table-scroll">
-  <table class="table table-hover">
+  <table class="table table-hover" id="signals-table">
+    {# Twelve columns, which is the widest table in the console and four more
+       than a laptop needs to scroll. The levels, the ratio, the direction and
+       the status are what a signal *is*, so they survive every width; what goes
+       first is the restating detail behind them — the entry timestamp, the
+       session and the confirmation timeframe are all columns that qualify a row
+       rather than carry it, and the AI verdict is an advisory note whose full
+       text lives on the signal's own page, which every row links to.
+
+       The `#` keeps its column at every width. It is the row's identity, and
+       app.css pins the first column to the left edge so that a reader panning
+       the levels on a phone can still see which row they are reading. #}
     <thead>
-      <tr><th>#</th><th>Asset</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th>
-          <th>RR</th><th>Entry (NY)</th><th>Session</th><th>CISD</th><th>AI</th><th>Status</th></tr>
+      <tr><th>#</th><th>Asset</th><th>Dir</th><th>Entry</th>
+          <th class="text-end">SL</th><th class="text-end">TP</th>
+          <th class="text-end">RR</th>
+          <th class="table-hide-md">Entry (NY)</th>
+          <th class="table-hide-md">Session</th>
+          <th class="table-hide-sm">CISD</th>
+          <th class="table-hide-md">AI</th><th>Status</th></tr>
     </thead>
     <tbody>
     {% for s in rows %}
@@ -50,13 +66,13 @@
         <td class="fw-semibold">{{ s.asset }}</td>
         <td>{{ dir_badge(s.direction) }}</td>
         <td class="mono">{{ s.entry | price(s.asset) }}</td>
-        <td class="mono text-muted">{{ s.sl | price(s.asset) }}</td>
-        <td class="mono text-muted">{{ s.tp | price(s.asset) }}</td>
-        <td class="mono">{{ '%.2f' | format(s.rr) }}</td>
-        <td class="mono text-muted">{{ s.entry_time_utc | ny }}</td>
-        <td class="text-muted">{{ s.session_primary or '-' }}</td>
-        <td class="text-muted">{{ s.cisd_tf or '-' }}</td>
-        <td>{% if s.ai_status %}<span class="badge tone-info">{{ s.ai_status }}</span>{% else %}<span class="text-muted">-</span>{% endif %}</td>
+        <td class="text-end mono text-muted">{{ s.sl | price(s.asset) }}</td>
+        <td class="text-end mono text-muted">{{ s.tp | price(s.asset) }}</td>
+        <td class="text-end mono">{{ '%.2f' | format(s.rr) }}</td>
+        <td class="mono text-muted table-hide-md">{{ s.entry_time_utc | ny }}</td>
+        <td class="text-muted table-hide-md">{{ s.session_primary or '-' }}</td>
+        <td class="text-muted table-hide-sm">{{ s.cisd_tf or '-' }}</td>
+        <td class="table-hide-md">{% if s.ai_status %}<span class="badge tone-info">{{ s.ai_status }}</span>{% else %}<span class="text-muted">-</span>{% endif %}</td>
         <td>{{ status_badge(s.status) }}</td>
       </tr>
     {% else %}

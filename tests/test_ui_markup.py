@@ -406,18 +406,59 @@ def test_the_scroll_box_scrolls_both_ways_and_pins_its_first_column(css):
     assert "left: 0" in block
 
 
-def test_the_console_trade_table_drops_its_columns_in_pairs(dashboard):
-    """The replay's eleven-column trade table holds the same contract.
+# --------------------------------------------------------------------------- #
+# The console tables that drop columns on a narrow screen
+# --------------------------------------------------------------------------- #
+#: The console's wide tables, each with the page it renders on. The markers
+#: these carry are defined in app.css, so this is the console's half of the
+#: contract the client and admin suites keep in test_client_pages and
+#: test_admin_pages rather than a third implementation free to drift.
+#:
+#: Every one of these renders at least one real row in the fixture above. That
+#: is the point rather than incidental: a table whose only body row is an empty
+#: state compares its headings against a single colspan'd cell, and would pass
+#: while proving nothing.
+CONSOLE_RESPONSIVE_TABLES = [
+    ("recent-signals", "dashboard"),
+    ("signals-table", "signals"),
+    ("backtest-runs", "backtests"),
+    ("batch-ranking", "batch"),
+    ("trade-rows", "backtest_detail"),
+]
 
-    It is the widest table in the console and the only one there carrying the
-    markers, so it is checked against its own rendered markup — the fixture's
-    replay produced a trade, which means the row under the headings is a real
-    one rather than an empty state that would pass while proving nothing.
+
+@pytest.mark.parametrize("table_id,page", CONSOLE_RESPONSIVE_TABLES)
+def test_a_console_column_is_dropped_from_its_heading_and_its_cells(
+        dashboard, table_id, page):
+    """A column hidden on a narrow screen must be hidden in both rows.
+
+    The marker sits on the <th> and on the <td> beneath it. When only one side
+    carries it, the surviving cells stay where they are while the headings move
+    left — and every value in the table is then read under the wrong heading.
+    On a page of prices that is a wrong number, not a cosmetic slip. The widest
+    of these is the replay's eleven-column trade table, which is also the one
+    the fixture makes sure produces a trade.
     """
-    body = dashboard["html"]["backtest_detail"]
-    problems = column_marker_problems(table_by_id(body, "trade-rows"), "trade-rows")
+    body = dashboard["html"][page]
+    problems = column_marker_problems(table_by_id(body, table_id), table_id)
 
     assert not problems, "; ".join(problems)
+
+
+@pytest.mark.parametrize("table_id,page", CONSOLE_RESPONSIVE_TABLES)
+def test_a_narrow_console_table_keeps_its_identity_column(dashboard, table_id, page):
+    """The first column survives at every width.
+
+    It is the row's identity — the signal id, the run's timestamp, the rank —
+    and app.css pins it to the left edge so it stays put while the levels pan
+    beneath it on a phone. Dropping it would leave a reader scrolling through
+    prices with nothing to anchor them to.
+    """
+    headings = cell_classes(table_by_id(dashboard["html"][page], table_id), "th")
+
+    assert headings, f"{table_id} rendered no headings"
+    assert not (headings[0] & HIDE_MARKERS), (
+        f"{table_id} drops its first column at a narrow width")
 
 
 # --------------------------------------------------------------------------- #

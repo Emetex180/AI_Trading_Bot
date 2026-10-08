@@ -30,6 +30,13 @@
      nothing here can break by being re-coloured. #}
   <link href="{{ url_for('static', filename='css/3rader.css') }}" rel="stylesheet">
   {{ brand_icons() }}
+  {# Marks that scripting is available, so client.css can collapse the section
+     list into a disclosure below 992px. Set here rather than in client.js — a
+     script at the end of the body would run after the first paint, and the list
+     would be seen expanded and then snap shut. Without this class the list is
+     left as it is, which is what keeps every link reachable with scripting off:
+     nothing in this shell depends on JavaScript to be usable. #}
+  <script>document.documentElement.classList.add("js");</script>
 </head>
 <body>
 {% set u = current_user %}
@@ -37,17 +44,36 @@
 
 <div class="app-shell">
 
-  <aside class="sidebar">
-    <a class="sidebar-brand" href="{{ url_for('root') }}">
-      {{ brand_logo() }}
-      <span class="sidebar-brand-sub">New York sessions</span>
-    </a>
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <a class="sidebar-brand" href="{{ url_for('root') }}">
+        {{ brand_logo() }}
+        <span class="sidebar-brand-sub">New York sessions</span>
+      </a>
 
+      {# The rail's section list sits behind this below 992px, where the rail
+         becomes a bar across the top of the page. The product carries seven
+         sections and an operator carrying thirteen; that is more than any phone
+         row holds, and the strip they used to sit in scrolled silently, so the
+         reader could not tell how much of the navigation was off the edge.
+         Shown only when scripting can open it again — see client.css §2. #}
+      <button type="button" class="sidebar-menu" id="sidebar-menu"
+              aria-controls="sidebar-nav-region" aria-expanded="false">
+        <span class="sidebar-menu-bars" aria-hidden="true"></span>
+        <span class="sidebar-menu-text">Menu</span>
+      </button>
+    </div>
+
+    {# One wrapper around both nav groups, so the disclosure has a single thing
+       to show and hide. The product block remains a block: the admin area
+       replaces it with its own section and calls super() for these links, so
+       both groups land inside this wrapper either way. #}
+    <div class="sidebar-nav-region" id="sidebar-nav-region">
     {# The product navigation. A block so the admin area can prepend its own
        section and keep these links underneath — an operator needs to move
        between the two surfaces without going through the URL bar. #}
     {% block sidebar_nav %}
-    <div>
+    <div class="sidebar-group">
       <div class="sidebar-section">Analysis</div>
       <nav class="sidebar-nav">
         <a class="sidebar-link {{ 'active' if nav == 'overview' }}"
@@ -91,7 +117,7 @@
     {% if u and u.is_admin %}
     {# Admins get the operator surfaces too. A client never renders this block,
        and the routes behind it refuse them regardless of what renders. #}
-    <div>
+    <div class="sidebar-group">
       <div class="sidebar-section">Operator</div>
       <nav class="sidebar-nav">
         <a class="sidebar-link" href="{{ url_for('admin.index') }}">
@@ -103,6 +129,7 @@
       </nav>
     </div>
     {% endif %}
+    </div>
 
     <div class="sidebar-foot">
       <div class="sidebar-user">

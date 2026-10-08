@@ -65,13 +65,27 @@
 {# ---------------------------------------------------------------- #}
 <div class="card mb-4">
   <div class="card-header">Ranked by expectancy (average R per closed trade)</div>
-  <div class="table-responsive">
-  <table class="table table-hover">
+  {# Eleven columns, eight below a laptop and seven on a phone. The card ranks
+     assets by expectancy, so the figures that *are* the ranking — trades, win
+     rate, expectancy, total R — stay at every width, as does the link into the
+     asset's own trade list. The signal count, the still-open count and the
+     two tail-risk columns (profit factor, max drawdown) qualify the result
+     rather than carry it, and they are what gives way first.
+
+     The `#` survives at every width: it is the row's identity, and app.css
+     pins the first column to the left edge so the rank stays readable while
+     the figures pan beneath it. #}
+  <div class="table-responsive table-scroll">
+  <table class="table table-hover" id="batch-ranking">
     <thead>
       <tr>
-        <th>#</th><th>Asset</th><th>Signals</th><th>Trades</th><th>Open</th>
+        <th>#</th><th>Asset</th>
+        <th class="table-hide-md">Signals</th>
+        <th>Trades</th>
+        <th class="table-hide-sm">Open</th>
         <th>Win rate</th><th>Expectancy (R)</th><th>Total R</th>
-        <th>Profit factor</th><th>Max DD (R)</th><th></th>
+        <th class="table-hide-md">Profit factor</th>
+        <th class="table-hide-md">Max DD (R)</th><th></th>
       </tr>
     </thead>
     <tbody>
@@ -83,16 +97,16 @@
           {% if c.symbol %}<span class="text-muted small mono ms-1">{{ c.symbol }}</span>{% endif %}
           {% if not c.tested %}<span class="badge tone-secondary ms-1">no trades</span>{% endif %}
         </td>
-        <td class="mono">{{ c.n_signals }}</td>
+        <td class="mono table-hide-md">{{ c.n_signals }}</td>
         <td class="mono">{{ c.n_trades }}</td>
-        <td class="mono text-muted">{{ c.n_open }}</td>
+        <td class="mono text-muted table-hide-sm">{{ c.n_open }}</td>
         <td class="mono">{{ '%.1f%%' | format(c.win_rate * 100) }}</td>
         <td class="mono fw-semibold {{ 'text-pos' if c.expectancy > 0 else ('text-neg' if c.expectancy < 0 else 'text-muted') }}">
           {{ '%.2f' | format(c.expectancy) }}</td>
         <td class="mono {{ 'text-pos' if c.total_r > 0 else ('text-neg' if c.total_r < 0 else '') }}">
           {{ '%.2f' | format(c.total_r) }}</td>
-        <td class="mono">{{ c.profit_factor | pf }}</td>
-        <td class="mono text-muted">{{ '%.2f' | format(c.max_drawdown_r) }}</td>
+        <td class="mono table-hide-md">{{ c.profit_factor | pf }}</td>
+        <td class="mono text-muted table-hide-md">{{ '%.2f' | format(c.max_drawdown_r) }}</td>
         <td>
           {% if c.backtest_id %}
           <a class="small" href="{{ url_for('backtest_detail', bt_id=c.backtest_id) }}">trades →</a>

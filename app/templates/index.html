@@ -216,11 +216,21 @@
         <span>Recent signals</span>
         <a class="small" href="{{ url_for('signals_page') }}">view all</a>
       </div>
-      <div class="table-responsive">
-      <table class="table table-hover">
+      {# Nine columns, trimmed to six on anything narrower than a laptop. What a
+         reader opens this card for is what the engine found and whether risk
+         took it, so the identity, the levels, the ratio and the status all
+         stay; the timestamp, the confirmation timeframe and the session are
+         detail behind them, and every row links to the page that carries the
+         whole record. The `#` stays at every width because it is the row's
+         identity and the stylesheet pins the first column to the left edge
+         while the rest pans under it. #}
+      <div class="table-responsive table-scroll">
+      <table class="table table-hover" id="recent-signals">
         <thead>
           <tr><th>#</th><th>Asset</th><th>Dir</th><th>Entry</th><th>RR</th>
-              <th>Entry (NY)</th><th>CISD</th><th>Session</th><th>Status</th></tr>
+              <th class="table-hide-md">Entry (NY)</th>
+              <th class="table-hide-md">CISD</th>
+              <th class="table-hide-sm">Session</th><th>Status</th></tr>
         </thead>
         <tbody>
         {% for s in recent_signals %}
@@ -230,9 +240,9 @@
             <td>{{ dir_badge(s.direction) }}</td>
             <td class="mono">{{ s.entry | price(s.asset) }}</td>
             <td class="mono">{{ '%.2f' | format(s.rr) }}</td>
-            <td class="mono text-muted">{{ s.entry_time_utc | ny }}</td>
-            <td class="text-muted">{{ s.cisd_tf or '-' }}</td>
-            <td class="text-muted">{{ s.session_primary or '-' }}</td>
+            <td class="mono text-muted table-hide-md">{{ s.entry_time_utc | ny }}</td>
+            <td class="text-muted table-hide-md">{{ s.cisd_tf or '-' }}</td>
+            <td class="text-muted table-hide-sm">{{ s.session_primary or '-' }}</td>
             <td>{{ status_badge(s.status) }}</td>
           </tr>
         {% else %}
