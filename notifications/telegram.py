@@ -35,6 +35,7 @@ from trading.model2_sessions import MODEL_2_SESSION_INDEX
 from trading.risk_manager import risk_reward_points
 from trading.sessions import SESSION_INDEX
 from trading.signal_engine import Signal
+from trading.time_utils import (FMT_CLOCK_12H, FMT_DATETIME_12H, strftime_12h)
 
 log = logging.getLogger(__name__)
 
@@ -89,11 +90,18 @@ def _points(value: float | None, digits: int) -> str:
 
 
 def _ny(ts) -> str:
-    return ts.strftime("%Y-%m-%d %H:%M") if ts else "-"
+    """A New York datetime on the operator's clock (``2026-10-14 1:45 PM``).
+
+    These are the stored ``*_ny`` wall clocks, so they are formatted directly
+    rather than converted — and by the shared formatter, so an alert states a
+    session time the same way the dashboard and the engine log do.
+    """
+    return strftime_12h(ts, FMT_DATETIME_12H) if ts else "-"
 
 
 def _hm(ts) -> str:
-    return ts.strftime("%H:%M") if ts else "-"
+    """The time of day of a New York datetime (``1:45 PM``)."""
+    return strftime_12h(ts, FMT_CLOCK_12H) if ts else "-"
 
 
 def _session_label(key: str) -> str:
@@ -106,6 +114,20 @@ def _session_label(key: str) -> str:
     """
     window = SESSION_INDEX.get(key) or MODEL_2_SESSION_INDEX.get(key)
     return window.label if window else (key or "-")
+
+
+def _session_with_hours(key: str) -> str:
+    """Session key -> ``NY AM (7:00 AM – 10:59 AM NY)``.
+
+    The label alone does not say *when* the session ran, and a trader checking an
+    alert against the clock needs that. The bounds come from the same window
+    table that classified the setup, in the operator's 12-hour form, so the alert
+    cannot quote hours the engine was not using.
+    """
+    window = SESSION_INDEX.get(key) or MODEL_2_SESSION_INDEX.get(key)
+    if window is None:
+        return _session_label(key)
+    return f"{window.label} ({window.range_12h} NY)"
 
 
 def _level_label(kind: str) -> str:
@@ -187,7 +209,7 @@ def format_signal_alert(signal: Signal) -> str:
         f"{emoji} — {signal.asset}",
         f"Symbol:              {signal.asset}",
         f"Direction:           {signal.direction.upper()}",
-        f"Session:             {_session_label(signal.session_primary) if signal.session_primary else ', '.join(_session_label(k) for k in signal.session_keys) or '-'}",
+        f"Session:             {_session_with_hours(signal.session_primary) if signal.session_primary else ', '.join(_session_with_hours(k) for k in signal.session_keys) or '-'}",
         f"Time (NY):           {_ny(signal.entry_time_ny)}",
         "",
         f"Entry:               {_price(signal.entry, d)}",

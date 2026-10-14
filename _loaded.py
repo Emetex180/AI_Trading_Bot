@@ -60,7 +60,7 @@ ADVISORY = dict(
 
 EVENTS = [
     ("info", "scanner", "Scanner started, 17 assets registered from the terminal."),
-    ("info", "scanner", "Session window open: ny_am 09:30-11:00 NY."),
+    ("info", "scanner", "Session window open: NY AM 7:00 AM-10:59 AM NY."),
     ("info", "setup", "USTEC: 1H liquidity purge below PDL 100.00 confirmed."),
     ("info", "setup", "USTEC: M15 CISD confirmed, FVG 101.40-101.55 recorded."),
     ("info", "risk", "USTEC: risk approved at 0.5% of equity, R:R 2.0."),

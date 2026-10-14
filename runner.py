@@ -824,15 +824,16 @@ class JobManager:
         if active:
             return True, activity, None
 
-        # Model 2's windows are not Model 1's, so with the model on the loop also
-        # has to be awake for them — otherwise it would sleep straight through a
-        # Model 2 session Model 1 has no reason to wake for (Model 1's London
-        # opens at 02:00, Model 2's at 01:00; Model 1 has no window at all for
-        # Model 2's Lunch).
+        # Model 2's windows are the bot's windows now, but the allow-list still
+        # separates the two gates: `session_activity` above will not wake the
+        # loop for a window the operator excluded from `VALID_ENTRY_SESSIONS`,
+        # while a running Model 2 evaluates all five regardless. Without this the
+        # loop would sleep through, say, Lunch for an operator who had narrowed
+        # Model 1 to London and NY PM — and the model would only ever scan inside
+        # Model 1's configured hours.
         #
         # Completely inert when the model is off: not one extra call, not one
-        # changed value, so an operator who has not opted in sees Model 1's gate
-        # behaving exactly as it always has.
+        # changed value.
         next_open = sess.next_activity_start_utc(now_ny, allowed_sessions=allowed,
                                                  days=days)
         if not getattr(self.settings, "model_2_enabled", False):
@@ -878,11 +879,16 @@ class JobManager:
 
     @staticmethod
     def _format_open(next_open_utc: datetime | None) -> str:
-        """A UTC instant as ``Mon 02:00 NY``, for the log and the dashboard."""
+        """A UTC instant as ``Mon 1:00 AM NY``, for the log and the dashboard.
+
+        12-hour, matching every other session time the operator sees; the
+        weekday is kept because the next open can be days away and a bare
+        ``1:00 AM`` would not say which day.
+        """
         if next_open_utc is None:
             return "—"
         ny = tu.utc_to_ny(next_open_utc)
-        return f"{ny.strftime('%a %H:%M')} NY"
+        return f"{ny.strftime('%a')} {tu.format_ny_12h(ny)} NY"
 
     def _live_worker(self) -> None:
         repo: Repository | None = None

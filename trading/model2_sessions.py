@@ -1,68 +1,89 @@
 """Model 2's trading-session table (New York clock).
 
-Deliberately a **separate table** from :mod:`trading.sessions`. Model 2's
-windows are not Model 1's, and the two must not be able to influence one
-another:
+Model 2's windows are the **bot's** windows. Since the session schedule was
+centralized, the times live in exactly one place — :data:`trading.sessions.CORE_SESSIONS`
+— and this module no longer states them a second time. What it keeps is Model 2's
+own *key namespace*:
 
-===========  ==================  ==================
-Session      Model 2 (this file) Model 1 (sessions)
-===========  ==================  ==================
-Asian        20:00 - 23:59       19:00 - 24:00
-London       01:00 - 05:59       02:00 - 05:00
-NY AM        07:00 - 10:59       07:00 - 11:00
-Lunch        11:00 - 12:59       (no window)
-NY PM        13:00 - 16:59       13:00 - 15:00 + 15:00 - 16:00
-===========  ==================  ==================
+===========  ====================  ==================
+Session      Model 2 key           Shared key
+===========  ====================  ==================
+Asian        m2_asian              asian_range
+London       m2_london             london_open
+NY AM        m2_ny_am              ny_am
+Lunch        m2_lunch              ny_lunch
+NY PM        m2_ny_pm              ny_pm
+===========  ====================  ==================
+
+The two names exist because Model 2's keys are persisted — a stored setup records
+``m2_london`` as the session it purged in, and :data:`MODEL_2_SESSION_INDEX` has
+to keep resolving it. The *windows* are shared; the names are not, and
+:func:`trading.sessions.normalize_session_keys` is the bridge for callers that
+speak the shared names.
 
 Every window is New York **local clock** time, resolved through
-:mod:`trading.time_utils` (``America/New_York``), so 07:00 means 7 AM in New
+:mod:`trading.time_utils` (``America/New_York``), so 7:00 AM means 7 AM in New
 York whether the zone is on EDT (UTC-4) or EST (UTC-5). No fixed UTC offset is
 used anywhere, and no new timezone machinery is introduced — this module only
 names windows and asks the shared :class:`trading.sessions.Window` whether a
 minute falls inside one.
 
-The spec states each window with an **inclusive** last minute ("20:00 - 23:59").
-Minutes-of-day are half-open here (``start <= m < end``), exactly as in
-:mod:`trading.sessions`, so the spec's ``23:59`` is expressed as an exclusive
-``24:00`` — the same interval, spelled in the representation the shared
-:class:`Window` understands. The conversions live in :data:`_SPEC` so the
-spec's own wording stays visible next to the value it produces.
+Because the times are read from the shared table rather than restated, a window
+cannot be moved for one model without moving it for all of them, which is the
+property the centralization is for. The operator's schedule, as stored (end
+exclusive, half-open) and as stated (12-hour, last minute inclusive):
+
+    Asian      20:00 - 24:00    8:00 PM - 11:59 PM
+    London     01:00 - 06:00    1:00 AM -  5:59 AM
+    NY AM      07:00 - 11:00    7:00 AM - 10:59 AM
+    Lunch      11:00 - 13:00   11:00 AM - 12:59 PM
+    NY PM      13:00 - 17:00    1:00 PM -  4:59 PM
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, time as _time, timedelta
 
 from . import time_utils as tu
 from .sessions import (DAY_MINUTES, OUTSIDE_SESSION_REASON, WEEKEND_REASON,
-                       Window, hm_to_minutes, is_trading_day)
+                       SESSION_INDEX, Window, is_trading_day)
 
 # --------------------------------------------------------------------------- #
-# Definitions (the spec's five windows, verbatim)
+# Definitions
+#
+# The times and labels are *borrowed*, not restated: each window below is the
+# shared window under Model 2's own key. `replace` copies start/end/label/trade
+# and swaps only the key, so there is no arithmetic here that could drift from
+# the shared table.
 # --------------------------------------------------------------------------- #
-#: ``(key, label, first minute, last minute)`` — the bounds exactly as the
-#: specification writes them, inclusive at both ends. The exclusive end used by
-#: :class:`Window` is derived one minute past ``last``.
-_SPEC: tuple[tuple[str, str, str, str], ...] = (
-    ("m2_asian", "Asian", "20:00", "23:59"),
-    ("m2_london", "London", "01:00", "05:59"),
-    ("m2_ny_am", "NY AM", "07:00", "10:59"),
-    ("m2_lunch", "Lunch", "11:00", "12:59"),
-    ("m2_ny_pm", "NY PM", "13:00", "16:59"),
+#: ``(shared key, Model 2 key)`` — the whole of the two tables' relationship.
+_KEY_MAP: tuple[tuple[str, str], ...] = (
+    ("asian_range", "m2_asian"),
+    ("london_open", "m2_london"),
+    ("ny_am", "m2_ny_am"),
+    ("ny_lunch", "m2_lunch"),
+    ("ny_pm", "m2_ny_pm"),
 )
 
+#: The same mapping the other way round, for lookups.
+_M2_KEY_FOR_SHARED: dict[str, str] = dict(_KEY_MAP)
 
-def _inclusive_window(key: str, label: str, start_hm: str, last_hm: str) -> Window:
-    """A :class:`Window` from the spec's inclusive ``start``-``last`` bounds."""
-    start = hm_to_minutes(start_hm)
-    end = hm_to_minutes(last_hm) + 1
-    return Window(key=key, label=label, start=start, end=end)
+
+def _model_2_window(shared_key: str) -> Window:
+    """The shared window, re-keyed for Model 2.
+
+    Raises ``KeyError`` — loudly, at import — if the shared table ever loses a
+    window Model 2 names. A silent skip would leave the model scanning a
+    five-session schedule with four sessions in it.
+    """
+    return replace(SESSION_INDEX[shared_key], key=_M2_KEY_FOR_SHARED[shared_key])
 
 
 #: The five Model 2 sessions, in clock order. Every one of them permits an
-#: entry — unlike Model 1, Model 2 has no no-trade window; the only thing that
-#: blocks an entry is being *outside* all five.
+#: entry — Model 2 has no no-trade window; the only thing that blocks an entry
+#: is being *outside* all five.
 MODEL_2_SESSIONS: tuple[Window, ...] = tuple(
-    _inclusive_window(*spec) for spec in _SPEC
+    _model_2_window(shared_key) for shared_key, _ in _KEY_MAP
 )
 
 MODEL_2_SESSION_INDEX: dict[str, Window] = {w.key: w for w in MODEL_2_SESSIONS}
@@ -106,9 +127,10 @@ def session_bounds_ny(day: date, window: Window) -> tuple[datetime, datetime]:
     """``(open, close)`` NY instants of one session on one NY calendar day.
 
     ``close`` is exclusive and is the instant the session stops being valid for
-    an entry. Every Model 2 window ends on the same NY day it starts, including
-    the Asian one (which the spec closes at 23:59, i.e. before midnight), so no
-    window needs the wrap-around handling a spanning window would.
+    an entry. Every window in the shared table ends on the same NY day it starts
+    — the Asian one closes at the day boundary, ``24:00``, rather than crossing
+    midnight — so no window needs the wrap-around handling a spanning window
+    would.
     """
     midnight = datetime.combine(day, _time(0, 0))
     return (midnight + timedelta(minutes=window.start),
@@ -130,15 +152,19 @@ def session_closed_by(window: Window, day: date, as_of_ny: datetime) -> bool:
 # --------------------------------------------------------------------------- #
 # Activity
 #
-# Model 2's windows are not Model 1's, so the live loop's sleep/wake gate has to
-# consult this table as well or it would sleep straight through part of a Model 2
-# session. The two functions below are the Model 2 counterparts of
-# :func:`trading.sessions.session_activity` and
-# :func:`trading.sessions.next_activity_start_utc`, and follow them for the same
-# reason: the calendar comes first, and the "next open" search steps the **UTC**
-# timeline a minute at a time rather than adding minutes to a naive NY clock —
-# wall-clock arithmetic silently skips or repeats an hour across a DST
-# transition, and would wake the bot an hour late twice a year.
+# These are now belt-and-braces. The shared table is Model 2's schedule, so
+# :func:`trading.sessions.session_activity` already answers correctly for every
+# Model 2 window and the live loop no longer needs a second opinion to avoid
+# sleeping through one. They are kept because they are the model's own contract
+# — `awake_at` is Model 2's statement of when it may act, and reading it does
+# not depend on the shared table continuing to match — and because removing them
+# would change the live loop's structure rather than its behaviour.
+#
+# Both follow :func:`trading.sessions.session_activity` for the same reason: the
+# calendar comes first, and the "next open" search steps the **UTC** timeline a
+# minute at a time rather than adding minutes to a naive NY clock — wall-clock
+# arithmetic silently skips or repeats an hour across a DST transition, and
+# would wake the bot an hour late twice a year.
 # --------------------------------------------------------------------------- #
 #: Prefix on the awake reason. The live loop renders the reason into its own
 #: ``[SESSION]`` line, so this is what tells an operator the bot is awake for

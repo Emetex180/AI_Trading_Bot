@@ -86,6 +86,7 @@ from .risk_manager import (EfficiencyWeights, RiskManager, compute_rr,
                            efficiency_score, risk_reward_points)
 from .signal_engine import (APPROVED, MODEL_1, MODEL_2, Signal, build_setup_id)
 from .sessions import is_trading_day, parse_trading_days
+from . import time_utils as tu
 from .stream import BarsStream
 
 # --------------------------------------------------------------------------- #
@@ -498,7 +499,7 @@ class Model2Strategy:
             # direction holds at most one live premise and a cascade of purges
             # cannot become a flurry of entries.
             self._log(f"a {level.label} level was purged while a {direction} "
-                      f"setup from {existing.purge_time_ny:%H:%M} NY was still "
+                      f"setup from {tu.format_ny_12h(existing.purge_time_ny)} NY was still "
                       f"pending — replacing it")
 
         setup = _Setup(
@@ -739,7 +740,7 @@ class Model2Strategy:
         self._log(
             f"PURGE — {setup.level.label} @ {self._fmt(setup.level.price)} "
             f"({setup.level.side})\n"
-            f"  M15 purge candle: {setup.purge_time_ny:%Y-%m-%d %H:%M} NY  "
+            f"  M15 purge candle: {tu.format_ny_stamp(setup.purge_time_ny)} NY  "
             f"H {self._fmt(setup.purge_high)} / L {self._fmt(setup.purge_low)}\n"
             f"  Session: {window.label}\n"
             f"  Expected: {setup.direction.upper()} on a break of "
@@ -751,7 +752,7 @@ class Model2Strategy:
         anchor = "high" if setup.direction == "sell" else "low"
         self._log(
             f"ENTRY — {setup.direction.upper()} {self._fmt(entry)} at "
-            f"{candle.t_ny:%Y-%m-%d %H:%M} NY\n"
+            f"{tu.format_ny_stamp(candle.t_ny)} NY\n"
             f"  Stop loss {self._fmt(sl)} (purge candle {anchor})\n"
             f"  Take profit {self._fmt(tp)} ({target.kind})\n"
             f"  RR {rr:.2f}  |  Efficiency {score:.0f}%")

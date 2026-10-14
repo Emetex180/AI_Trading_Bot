@@ -88,7 +88,7 @@
             <span class="condition-mark">{{ '✓' if w.key == status.session_key else '·' }}</span>
             <span>
               {{ w.label }}
-              <span class="setup-meta mono">{{ w.start_hhmm }}–{{ w.end_hhmm }}</span>
+              <span class="setup-meta mono">{{ w.range_12h }} NY</span>
               {% if w.key == status.session_key %}<span class="setup-meta">← now</span>{% endif %}
             </span>
           </div>

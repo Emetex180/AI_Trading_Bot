@@ -22,7 +22,7 @@ from datetime import datetime
 
 import pytest
 
-from app.display import ny_str
+from app.display import ny_str, ny_time_s
 from app.web import create_app
 from config import get_settings
 from database import models as m
@@ -148,8 +148,14 @@ def test_the_shell_reports_the_auto_trading_state():
 
     The pill's *text* is written by client.js from the status poll, so the
     server-rendered half of the contract is the element and its starting tone.
+
+    ``auto_trading`` is stated rather than inherited. These helpers build their
+    settings with ``replace(get_settings(), ...)``, so an unstated switch is
+    whatever the developer's own ``.env`` says — and the moment the operator
+    turns auto-trading on, a test about the *off* pill would start asserting the
+    opposite of what it means to.
     """
-    body = _body(_client(_repo()))
+    body = _body(_client(_repo(), auto_trading=False))
 
     assert 'id="nav-auto"' in body
     assert 'id="nav-scanner"' in body
@@ -553,12 +559,71 @@ def test_the_session_status_is_read_from_the_ny_clock(monkeypatch):
     assert open_now["session_status"] == "ACTIVE"
     assert open_now["session_label"] == "NY AM"
 
-    # 2026-07-15 17:30 UTC = 13:30 NY: NY PM, the lunch gap is 12:00-13:00.
+    # 12:30 NY is the Lunch session, which is a window like any other — the
+    # midday hours are no longer a gap between two NY halves.
     monkeypatch.setattr(time_utils, "now_ny", lambda: datetime(2026, 7, 15, 12, 30))
+    lunch = _status_of(_client(_seeded()))
+
+    assert lunch["session_open"] is True
+    assert lunch["session_label"] == "Lunch"
+
+    # 18:00 NY is genuinely outside every window: NY PM closed at 17:00 and the
+    # Asian range does not open until 20:00.
+    monkeypatch.setattr(time_utils, "now_ny", lambda: datetime(2026, 7, 15, 18, 0))
     closed_now = _status_of(_client(_seeded()))
 
     assert closed_now["session_open"] is False
     assert closed_now["session_status"] == "CLOSED"
+
+
+def test_the_session_window_is_shown_on_the_operators_12_hour_clock(monkeypatch):
+    """The card quotes the window's hours, not just its name.
+
+    A trader checking the dashboard against the clock needs "1:00 PM – 4:59 PM",
+    and the string has to come from the window table the gate uses so the panel
+    cannot advertise hours the engine is not running on.
+    """
+    from trading import time_utils
+
+    monkeypatch.setattr(time_utils, "now_ny", lambda: datetime(2026, 7, 15, 14, 30))
+
+    status = _status_of(_client(_seeded()))
+
+    assert status["session_label"] == "NY PM"
+    assert status["session_window"] == "1:00 PM – 4:59 PM"
+    # Nothing on the panel may fall back to the stored 24-hour form.
+    assert "13:00" not in status["session_window"]
+    assert "17:00" not in status["session_window"]
+
+    # Outside every window there are no hours to quote, and the field is empty
+    # rather than a stale or invented range.
+    monkeypatch.setattr(time_utils, "now_ny", lambda: datetime(2026, 7, 15, 18, 0))
+    assert _status_of(_client(_seeded()))["session_window"] == ""
+
+
+def test_the_next_window_is_announced_on_the_twelve_hour_clock():
+    """The wake-up time is a *session* time, so it reads like the others.
+
+    Three client pages say "the next window opens at ...". It used to render the
+    lease's raw NY stamp (``2026-09-14 01:00``), which is the one place a session
+    time was not written the way the operator states it — and the engine's own
+    wake-up log says ``Mon 1:00 AM`` for the same instant, so the two could be
+    read side by side and disagree in form.
+    """
+    repo = _repo()
+    repo.upsert_asset("USTEC", "USTEC", enabled=True, digits=2)
+    jobs = _FakeJobs()
+    # Monday 05:00 UTC is 01:00 NY (EDT) — the London open.
+    jobs.lease = _lease(active=False, activity="outside_session",
+                        next_open_utc=datetime(2026, 9, 14, 5, 0))
+
+    status = _status_of(_client(repo, jobs))
+
+    assert status["next_open_ny"] == "Mon 1:00 AM"
+    assert "01:00" not in status["next_open_ny"]
+    # ...and with nothing to wait for the field stays empty rather than "None".
+    jobs.lease = _lease(active=True, activity="ny_am", next_open_utc=None)
+    assert _status_of(_client(repo, jobs))["next_open_ny"] == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -786,8 +851,9 @@ def test_the_feed_carries_a_utc_timestamp_it_does_not_invent():
     line = next(f for f in payload["feed"] if f["message"] == "a real decision line")
 
     assert line["id"] == row.id
-    # The rendered strings are derived from the stored instant, not from "now".
-    assert line["time_short"] == ny_str(row.event_time_utc, "%H:%M:%S")
+    # The rendered strings are derived from the stored instant, not from "now",
+    # and written on the operator's 12-hour clock like every other NY time here.
+    assert line["time_short"] == ny_time_s(row.event_time_utc)
     assert line["date_ny"] == ny_str(row.event_time_utc, "%Y-%m-%d")
 
 
@@ -862,13 +928,38 @@ def test_the_scanner_state_is_reported_separately_from_the_session():
 
 
 def test_the_session_window_matches_the_strategy_definition():
-    """The five windows are read from trading/sessions.py, not restated."""
+    """The five windows are read from trading/sessions.py, not restated.
+
+    The page shows each window's *hours* as well as its name — on the operator's
+    12-hour clock, rendered from the same window object the gate consults, so the
+    panel cannot advertise a schedule the engine is not running on.
+    """
     from trading import sessions as sess
 
     body = _body(_client(_seeded()), "/analysis")
 
     for window in sess.CORE_SESSIONS:
         assert window.label in body, window.label
+        assert f"{window.range_12h} NY" in body, window.key
+
+
+def test_the_session_list_on_the_analysis_page_is_twelve_hour():
+    """No stored 24-hour range may be rendered in the window list.
+
+    Scoped to the panel itself: a 24-hour clock is still the right form for a
+    timestamp (a setup's entry time), so this is about the *session window* list
+    and not about the page as a whole. The check is on the rendered range rather
+    than on the stored bound, because ``11:00`` is both Lunch's 24-hour start and
+    a legitimate 12-hour opening — only the full range is unambiguous.
+    """
+    from trading import sessions as sess
+
+    body = _body(_client(_seeded()), "/analysis")
+    listed = body.split("Session windows (New York)", 1)[1]
+
+    for window in sess.CORE_SESSIONS:
+        assert f"{window.range_12h} NY" in listed, window.key
+        assert f"{window.start_hhmm}–{window.end_hhmm}" not in listed, window.key
 
 
 def test_the_platform_reports_the_ny_session_for_a_known_clock(monkeypatch):
@@ -883,5 +974,8 @@ def test_the_platform_reports_the_ny_session_for_a_known_clock(monkeypatch):
 
     assert status["session_key"] == sess.get_trading_session(
         datetime(2026, 7, 15, 9, 30)).key
-    assert status["ny_time"].startswith("09:30")
+    # 09:30 NY on the operator's 12-hour clock, and the greeting's hour comes
+    # from the numeric field rather than off the front of this string.
+    assert status["ny_time"] == "9:30:00 AM"
+    assert status["ny_hour"] == 9
     assert status["ny_date"] == "Wednesday 15 July 2026"

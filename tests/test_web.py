@@ -219,14 +219,14 @@ def test_backtest_detail_states_the_window_and_analyses_it_by_period():
     text = _client(repo).get(f"/console/backtests/{bt.id}").get_data(as_text=True)
 
     # The window, in full: both ends, the duration and the bar count. The seeded
-    # row spans 2026-01-01T00:00Z to 2026-01-02T00:00Z, i.e. 2025-12-31 19:00 to
-    # 2026-01-01 19:00 on the NY clock (January is EST, UTC-5).
+    # row spans 2026-01-01T00:00Z to 2026-01-02T00:00Z, i.e. 2025-12-31 7:00 PM to
+    # 2026-01-01 7:00 PM on the NY clock (January is EST, UTC-5).
     assert "Replay window" in text
-    assert "2025-12-31 19:00" in text
-    assert "2026-01-01 19:00" in text
+    assert "2025-12-31 7:00 PM" in text
+    assert "2026-01-01 7:00 PM" in text
     assert "1 day, 0 h" in text
     assert "1,440" in text                     # n_bars, thousands-separated
-    assert "2026-01-01 08:10" in text          # first entry, NY clock (EST)
+    assert "2026-01-01 8:10 AM" in text        # first entry, NY clock (EST)
 
     # The analysis, with all four granularities present and the seeded bucket
     # rendered -- into the table *and* into the chart's data.
@@ -237,8 +237,9 @@ def test_backtest_detail_states_the_window_and_analyses_it_by_period():
     assert '"bucket": "2026-01"' in text
 
     # The trades table is filterable, which needs a machine-readable entry time
-    # on each row and the controls that read it.
-    assert 'data-entry="2026-01-01 08:10"' in text
+    # on each row and the controls that read it. The filter reads the *date*
+    # (``.slice(0, 10)``), which the 12-hour clock leaves at the front unchanged.
+    assert 'data-entry="2026-01-01 8:10 AM"' in text
     assert 'data-pnl="2.0000"' in text
     assert 'id="trade-from"' in text and 'id="trade-to"' in text
 
@@ -507,17 +508,29 @@ def test_status_endpoint_shape():
 
 
 def test_status_timestamps_use_the_ny_key_the_ui_reads():
-    """The dashboard JS reads ``*_ny``; keep the API contract pinned."""
+    """The dashboard JS reads ``*_ny``; keep the API contract pinned.
+
+    Every New York time in this payload is written on the operator's 12-hour
+    clock — the instants and the session time alike, so a page never quotes one
+    instant two ways. The session time is the convention the engine's own
+    wake-up log uses (``Mon 1:00 AM``); the instants carry the date as well.
+    """
     jobs = _FakeJobs()
     jobs.live["started_at_utc"] = datetime(2026, 1, 5, 14, 30)
     jobs.live["last_candle_utc"] = datetime(2026, 1, 5, 14, 31)
+    jobs.live["next_open_utc"] = datetime(2026, 9, 14, 5, 0)
     jobs.backtest["finished_at_utc"] = datetime(2026, 1, 5, 15, 0)
 
     payload = _api_client(_repo(), jobs).get("/api/status").get_json()
 
-    assert payload["live"]["started_at_ny"] == "2026-01-05 09:30"   # EST, UTC-5
-    assert payload["live"]["last_candle_ny"] == "2026-01-05 09:31"
-    assert payload["backtest"]["finished_at_ny"] == "2026-01-05 10:00"
+    assert payload["live"]["started_at_ny"] == "2026-01-05 9:30 AM"   # EST, UTC-5
+    assert payload["live"]["last_candle_ny"] == "2026-01-05 9:31 AM"
+    assert payload["backtest"]["finished_at_ny"] == "2026-01-05 10:00 AM"
+    # Monday 1:00 AM New York (EDT, UTC-4) — a session time, on the 12-hour clock.
+    assert payload["live"]["next_open_ny"] == "Mon 1:00 AM"
+    assert "01:00" not in payload["live"]["next_open_ny"]
+    # The dashboard only ever prints these; it never parses them back.
+    assert "AM" in payload["live"]["started_at_ny"]
 
 
 def test_status_reports_new_signals_after_id():
@@ -696,7 +709,7 @@ def test_the_account_tile_paints_the_snapshot_it_was_given(registry_cfg):
     assert "9,842.15" in body
     assert "USD" in body
     assert "12345" in body
-    assert "as of 2026-01-06 13:32" in body      # project NY clock, as elsewhere
+    assert "as of 2026-01-06 1:32 PM" in body    # project NY clock, as elsewhere
 
 
 def test_backtests_page_renders_run_form():
@@ -1108,9 +1121,9 @@ def test_status_carries_the_account_and_its_ny_read_time(registry_cfg):
 
     assert payload["account"]["balance"] == 10_000.0
     assert payload["account"]["currency"] == "USD"
-    # 18:32 UTC is 13:32 on the project's NY clock in January (EST), which the
+    # 18:32 UTC is 1:32 PM on the project's NY clock in January (EST), which the
     # tile displays.
-    assert payload["account"]["fetched_at_ny"] == "2026-01-06 13:32"
+    assert payload["account"]["fetched_at_ny"] == "2026-01-06 1:32 PM"
 
 
 def test_an_unread_account_reports_none_rather_than_a_zero_balance(registry_cfg):

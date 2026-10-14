@@ -408,7 +408,7 @@ class ICTStrategy:
             self._log(f"1H {_side_label(direction)} liquidity purged "
                       f"({level.label} @ {level.price}) — ignored: the "
                       f"{current.cisd_tf} setup purged at "
-                      f"{current.purge_time_ny:%H:%M} NY already has its FVG "
+                      f"{tu.format_ny_12h(current.purge_time_ny)} NY already has its FVG "
                       "and has not been invalidated")
             return
         # The purge candle is only ever offered to this method once it has
@@ -435,7 +435,7 @@ class ICTStrategy:
         self._log_purge_block(episode, h1_candle)
         self._log(f"1H {_side_label(direction)} liquidity purged "
                   f"({level.label} @ {level.price}) — the purge candle has "
-                  f"closed ({tu.utc_to_ny(episode.purge_close_utc):%H:%M} NY), "
+                  f"closed ({tu.format_ny_12h(tu.utc_to_ny(episode.purge_close_utc))} NY), "
                   f"so the {episode.cisd_tf} CISD search now begins")
 
     # ------------------------------------------------------------------ #
@@ -450,18 +450,15 @@ class ICTStrategy:
             if episode is None:
                 continue
 
-            # A pending setup may not survive dead time. The Asian range is a
-            # range-building block, and the hours outside every window are a
-            # closed market; both are non-entry time, so a setup that reaches
-            # either is dropped rather than carried forward.
+            # A pending setup may not survive dead time. Under the bot's current
+            # five-session table there is no NO-trade window left — every session
+            # permits an entry — so in practice this fires for the gaps *between*
+            # the five, which are a closed market rather than a blocked session.
             #
-            # Treating the closed hours the same as a defined NO-trade window
-            # preserves the rule's original effect under the five-session table.
-            # The old table had an explicit NY Lunch (11:30-13:30) here; its
-            # successor is the 11:00-13:00 gap, and without this the very same
-            # setup would survive the gap and could enter on an FVG that is by
-            # then ~90 minutes stale. The rule only ever *cancels* setups, so
-            # widening it cannot manufacture an entry.
+            # The NO-trade branch is kept because it is a property of the table,
+            # not of this schedule: a range-building window added back to
+            # `CORE_SESSIONS` would be honoured here without a code change. The
+            # rule only ever *cancels* setups, so it cannot manufacture an entry.
             if self.enforce_sessions and self.invalidate_on_no_trade_session:
                 mode = sess.session_trade_mode(minute)
                 if mode in (sess.TRADE_NO, sess.TRADE_CLOSED):
@@ -904,7 +901,7 @@ class ICTStrategy:
 
     def _log_purge_block(self, episode: _Episode, h1_candle) -> None:
         self._log("PURGE:\n"
-                  f"  1H time: {h1_candle.t_ny:%Y-%m-%d %H:%M} NY\n"
+                  f"  1H time: {tu.format_ny_stamp(h1_candle.t_ny)} NY\n"
                   f"  Liquidity level: {episode.purge_kind} "
                   f"({episode.purge_grade}) @ {self._fmt(episode.purge_price)}\n"
                   f"  Sweep price: {self._fmt(episode.purge_sweep_price)}\n"
@@ -916,16 +913,16 @@ class ICTStrategy:
         # the series to candles opening at/after the purge close — so "after the
         # completed purge" is structurally true here, not an assumption.
         self._log("CISD:\n"
-                  f"  {episode.cisd_tf} time: {confirm_candle.t_ny:%H:%M} NY\n"
+                  f"  {episode.cisd_tf} time: {tu.format_ny_12h(confirm_candle.t_ny)} NY\n"
                   f"  CISD level: {self._fmt(episode.purge_price)}\n"
                   f"  CISD close: {self._fmt(confirm_candle.close)}\n"
                   f"  CISD after completed purge: {self._yn(True)}\n"
                   f"  Purge candle closed: "
-                  f"{tu.utc_to_ny(episode.purge_close_utc):%H:%M} NY")
+                  f"{tu.format_ny_12h(tu.utc_to_ny(episode.purge_close_utc))} NY")
 
     def _log_fvg_block(self, formed: FVG, min_depth: float, *, valid: bool) -> None:
         self._log("FVG:\n"
-                  f"  1M formation time: {formed.formation_time_ny:%H:%M} NY\n"
+                  f"  1M formation time: {tu.format_ny_12h(formed.formation_time_ny)} NY\n"
                   f"  FVG low: {self._fmt(formed.lower)}\n"
                   f"  FVG high: {self._fmt(formed.upper)}\n"
                   f"  FVG size: {self._fmt(formed.depth())}\n"
@@ -935,7 +932,7 @@ class ICTStrategy:
 
     def _log_retrace_block(self, episode: _Episode, candle, *, entered: bool) -> None:
         self._log("RETRACEMENT:\n"
-                  f"  Retracement candle: {candle.t_ny:%H:%M} NY\n"
+                  f"  Retracement candle: {tu.format_ny_12h(candle.t_ny)} NY\n"
                   f"  Retracement "
                   f"{'low' if episode.direction == 'buy' else 'high'}: "
                   f"{self._fmt(episode.retrace_extreme)}\n"
@@ -946,7 +943,7 @@ class ICTStrategy:
     def _log_entry_block(self, episode: _Episode, candle, entry: float,
                          *, entry_inside: bool) -> None:
         self._log("ENTRY:\n"
-                  f"  Entry time: {candle.t_ny:%H:%M} NY\n"
+                  f"  Entry time: {tu.format_ny_12h(candle.t_ny)} NY\n"
                   f"  Entry price: {self._fmt(entry)}\n"
                   f"  FVG zone: [{self._fmt(episode.fvg.lower)}, "
                   f"{self._fmt(episode.fvg.upper)}]\n"

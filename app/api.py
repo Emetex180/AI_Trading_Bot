@@ -28,6 +28,7 @@ from config import Settings
 from trading import time_utils as tu
 
 from .auth import admin_required
+from .display import ny_open_str
 
 # Bounds for the backtest form, so a typo cannot ask MT5 for 10 million bars.
 MIN_BACKTEST_BARS = 100
@@ -178,7 +179,7 @@ def _signal_json(row) -> dict:
         "tp": row.tp,
         "rr": row.rr,
         "status": row.status,
-        "entry_time_ny": (tu.utc_to_ny(row.entry_time_utc).strftime("%Y-%m-%d %H:%M")
+        "entry_time_ny": (tu.strftime_12h(tu.utc_to_ny(row.entry_time_utc))
                           if row.entry_time_utc else ""),
         "session": row.session_primary or "",
         "cisd_tf": row.cisd_tf or "",
@@ -187,11 +188,16 @@ def _signal_json(row) -> dict:
 
 
 def _add_ny_times(job: dict, keys: tuple[str, ...]) -> dict:
-    """Add NY-clock renderings of the job's UTC timestamps for the UI."""
+    """Add NY-clock renderings of the job's UTC timestamps for the UI.
+
+    On the operator's 12-hour clock, via the one formatter — these strings go
+    straight into the console's job panel, so a 24-hour value here would be the
+    only place on that page written differently from the rest of it.
+    """
     for key in keys:
         value = job.get(key)
         job[key.replace("_utc", "_ny")] = (
-            tu.utc_to_ny(value).strftime("%Y-%m-%d %H:%M") if value else "")
+            tu.strftime_12h(tu.utc_to_ny(value)) if value else "")
     return job
 
 
@@ -625,10 +631,15 @@ def register_api(app) -> None:
     @admin_required
     def api_status():
         payload = jobs.status()
-        live = _add_ny_times(payload["live"], ("started_at_utc", "stopped_at_utc",
-                                               "next_open_utc"))
+        live = _add_ny_times(payload["live"], ("started_at_utc", "stopped_at_utc"))
+        # The next window open is a *session* time, so it is rendered on the
+        # operator's 12-hour clock ("Mon 1:00 AM") rather than as the 24-hour NY
+        # timestamp the lines above are: sessions are read in AM/PM everywhere
+        # else in the UI, and the client pages and the engine's own wake-up log
+        # already quote this instant that way. One instant, one wording.
+        live["next_open_ny"] = ny_open_str(payload["live"].get("next_open_utc"))
         last_candle = live.get("last_candle_utc")
-        live["last_candle_ny"] = (tu.utc_to_ny(last_candle).strftime("%Y-%m-%d %H:%M")
+        live["last_candle_ny"] = (tu.strftime_12h(tu.utc_to_ny(last_candle))
                                   if last_candle else "")
         # The window travels with the job state so the page can say *what* is
         # being replayed, not just that something is. ``mode``/``bars`` already

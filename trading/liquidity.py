@@ -287,8 +287,11 @@ def last_completed_session(candles: list, window: Window, ref_ny: datetime,
     """Extremes of the most recent *completed* instance of ``window``.
 
     A session only counts once its closing instant is at or before ``ref_ny``,
-    so the Asian range taken at 09:00 NY is *yesterday's* (20:00-24:00), and a
-    London range read at 09:00 NY is that same morning's (02:00-05:00). Returns
+    so the Asian range taken at 09:00 NY is *yesterday's* (8:00 PM – 11:59 PM),
+    and a London range read at 09:00 NY is that same morning's
+    (1:00 AM – 5:59 AM). Both hours are the shared table's, in the operator's
+    12-hour form; ``window`` is one of its windows, so this is a description of
+    the passed window rather than a second copy of its bounds. Returns
     ``(ny_date, (high, low))`` or ``None``.
     """
     for offset in range(0, lookback_days + 1):

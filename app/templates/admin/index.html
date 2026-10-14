@@ -125,7 +125,7 @@
           <div><span class="section-label">Last candle (NY)</span>
             <div class="mono">{{ (live.last_candle_utc | ny) or '—' }}</div></div>
           <div><span class="section-label">Next window (NY)</span>
-            <div class="mono">{{ (live.next_open_utc | ny) or '—' }}</div></div>
+            <div class="mono">{{ live.next_open_ny or '—' }}</div></div>
         </div>
         {% if live.activity %}
         <p class="setup-meta mt-3 mb-0">{{ live.activity }}</p>

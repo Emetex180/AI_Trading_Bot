@@ -12,9 +12,10 @@ from datetime import datetime, timedelta
 from trading import sessions as sess
 from trading import time_utils as tu
 
-# Every session the spec marks tradeable, pinned so the result does not depend
-# on this machine's .env.
-ALLOW = ["london_open", "ny_am", "ny_pm", "power_hour"]
+# The three sessions this machine's allow-list selects, pinned so the result
+# does not depend on its .env. (Lunch and the Asian range are tradeable too;
+# they are left out here so the spans below stay separated and legible.)
+ALLOW = ["london_open", "ny_am", "ny_pm"]
 
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -32,25 +33,27 @@ def check(ok: bool, message: str) -> None:
         failures.append(message)
 
 
+def spans_for_day(day: datetime, allowed) -> list[tuple[int, int]]:
+    """Contiguous awake spans on ``day``, as minutes-of-NY-day."""
+    spans: list[tuple[int, int]] = []
+    start = None
+    for minute in range(sess.DAY_MINUTES):
+        ny = day.replace(hour=minute // 60, minute=minute % 60)
+        active, _ = sess.session_activity(ny, allowed_sessions=allowed)
+        if active and start is None:
+            start = minute
+        elif not active and start is not None:
+            spans.append((start, minute))
+            start = None
+    if start is not None:
+        spans.append((start, sess.DAY_MINUTES))
+    return spans
+
+
 def spans_for_week(monday: datetime) -> dict[str, list[tuple[int, int]]]:
     """Contiguous awake spans per day name, as minutes-of-day."""
-    out: dict[str, list[tuple[int, int]]] = {}
-    for day in range(7):
-        date = monday + timedelta(days=day)
-        spans: list[tuple[int, int]] = []
-        start = None
-        for minute in range(sess.DAY_MINUTES):
-            ny = date.replace(hour=minute // 60, minute=minute % 60)
-            active, _ = sess.session_activity(ny, allowed_sessions=ALLOW)
-            if active and start is None:
-                start = minute
-            elif not active and start is not None:
-                spans.append((start, minute))
-                start = None
-        if start is not None:
-            spans.append((start, sess.DAY_MINUTES))
-        out[DAYS[day]] = spans
-    return out
+    return {DAYS[day]: spans_for_day(monday + timedelta(days=day), ALLOW)
+            for day in range(7)}
 
 
 def fmt(spans: list[tuple[int, int]]) -> str:
@@ -58,20 +61,23 @@ def fmt(spans: list[tuple[int, int]]) -> str:
                      for s, e in spans) or "asleep all day"
 
 
-EXPECTED_WEEKDAY = [(120, 300), (420, 660), (780, 960), (1140, 1440)]
-# 02:00-05:00 London, 07:00-11:00 NY AM, and 13:00-16:00 NY PM + Power Hour (the
-# two abut, so they merge into one span), plus 19:00-24:00 Asian — awake to build
-# the range, though nothing can be entered.
+EXPECTED_WEEKDAY = [(60, 360), (420, 660), (780, 1020)]
+# 01:00-06:00 London, 07:00-11:00 NY AM, 13:00-17:00 NY PM. The three do not
+# touch, because the Lunch window between NY AM and NY PM is not in ALLOW; list
+# it and the middle two would merge into one 07:00-17:00 span.
 
 print("Walking a simulated week of NY minutes per season...\n")
 spans_by_season = {}
 for label, monday in WEEKS.items():
     spans_by_season[label] = spans_for_week(monday)
 
-for label, spans in spans_by_season.items():
+for label, monday in WEEKS.items():
+    # Read the week's own start date from WEEKS, not from the loop above: the
+    # leaked variable would print the summer date under the winter heading and
+    # hide a DST-dependent span.
     print(f"{label} week starting {monday.strftime('%Y-%m-%d')}:")
     for day in DAYS:
-        print(f"    {day}  {fmt(spans[day])}")
+        print(f"    {day}  {fmt(spans_by_season[label][day])}")
     print()
 
 print("Checks:")
@@ -80,8 +86,8 @@ for label, spans in spans_by_season.items():
           f"{label}: the weekend is silent")
     for day in ("Mon", "Tue", "Wed", "Thu", "Fri"):
         check(spans[day] == EXPECTED_WEEKDAY,
-              f"{label}: {day} awake exactly 02:00-05:00, 07:00-11:00, "
-              "13:00-16:00, 19:00-24:00")
+              f"{label}: {day} awake exactly 01:00-06:00, 07:00-11:00, "
+              "13:00-17:00")
 
     # The gate is defined on the NY wall clock, so the spans must not move with
     # the season. This is what would break if a fixed UTC-4 were hard-coded.
@@ -95,8 +101,8 @@ for label, start in (("winter", datetime(2026, 3, 1, 12, 0)),
                      ("summer", datetime(2026, 3, 8, 12, 0))):
     nxt = sess.next_activity_start_utc(start, allowed_sessions=ALLOW)
     ny = tu.utc_to_ny(nxt)
-    check(ny.hour == 2 and ny.minute == 0 and ny.weekday() == 0,
-          f"{label} start {start:%Y-%m-%d}: next open is Monday 02:00 NY "
+    check(ny.hour == 1 and ny.minute == 0 and ny.weekday() == 0,
+          f"{label} start {start:%Y-%m-%d}: next open is Monday 01:00 NY "
           f"(= {nxt:%Y-%m-%d %H:%M} UTC)")
 
 print("\nThe regression the whole change exists for:")
@@ -105,6 +111,33 @@ check(sess.session_trade_mode(180) == sess.TRADE_YES,
 check(sess.session_activity(datetime(2026, 9, 12, 3, 0), allowed_sessions=ALLOW)
       == (False, "market_closed_weekend"),
       "the calendar refuses Saturday 03:00 anyway")
+
+# --------------------------------------------------------------------------- #
+# All five windows, not the three above
+# --------------------------------------------------------------------------- #
+# ALLOW is a reading aid -- three spans that do not touch. This is the other
+# half of the claim: with the deployment's real allow-list, the gate must wake
+# for every window the shared table permits, Lunch and the Asian range included.
+# Neither appears above, so without this a silently dead Lunch or Asian window
+# would leave every check passing.
+print("\nEvery window the shared table permits, with the deployment's allow-list:")
+FULL = list(sess.DEFAULT_ENTRY_SESSIONS)
+# NY AM + Lunch + NY PM are contiguous, so they merge into the middle span:
+# 01:00-06:00 London, 07:00-17:00 the New York block, 20:00-24:00 Asian.
+EXPECTED_WEDNESDAY_FULL = [(60, 360), (420, 1020), (1200, 1440)]
+wednesday = spans_for_day(datetime(2026, 1, 7), FULL)
+check(wednesday == EXPECTED_WEDNESDAY_FULL,
+      "a Wednesday is awake exactly 01:00-06:00, 07:00-17:00, 20:00-24:00")
+check(len(FULL) == len(sess.CORE_SESSIONS),
+      f"the allow-list names all {len(sess.CORE_SESSIONS)} sessions ({len(FULL)})")
+for window in sess.CORE_SESSIONS:
+    opens = sess.get_trading_session_key(
+        datetime(2026, 1, 7) + timedelta(minutes=window.start))
+    wake = sess.session_activity(
+        datetime(2026, 1, 7) + timedelta(minutes=window.start),
+        allowed_sessions=FULL)[0]
+    check(window.key in FULL and opens == window.key and wake,
+          f"{window.key} ({window.range_12h} NY) is allowed, detected and awake")
 
 print()
 if failures:

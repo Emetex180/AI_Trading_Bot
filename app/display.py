@@ -77,21 +77,96 @@ def ratio(value, digits: int = 2):
 
 # --------------------------------------------------------------------------- #
 # New York time
+#
+# Every New York time this project shows a person is on the operator's 12-hour
+# clock, and every one of them comes through here — the Jinja filters, the client
+# page view models, the JSON API and the admin tables all call these functions,
+# so a page cannot format its own clock differently from the page beside it.
+#
+# The formats themselves live in :mod:`trading.time_utils` beside the session
+# windows, because the dashboard's "7:00 AM" and a window's "7:00 AM – 10:59 AM"
+# are the same convention and must not be able to drift apart.
 # --------------------------------------------------------------------------- #
-def ny_str(naive_utc, fmt: str = "%Y-%m-%d %H:%M"):
-    """Render a naive-UTC datetime on the New York clock (DST-aware)."""
+def ny_str(naive_utc, fmt: str = tu.FMT_DATETIME_12H):
+    """Render a naive-UTC datetime on the New York clock (DST-aware).
+
+    Defaults to the 12-hour date+time form (``2026-10-14 1:45 PM``); the pad is
+    stripped by :func:`trading.time_utils.strftime_12h`, which is what makes the
+    default printable on Windows.
+
+    ``fmt`` is still taken for the date-only callers (``"%Y-%m-%d"``), where the
+    clock convention cannot arise. A caller wanting the time of day should pass
+    one of the ``FMT_*`` constants from :mod:`trading.time_utils` rather than
+    writing ``"%H:%M"``, which would put a 24-hour clock back on the screen.
+    """
     if naive_utc is None:
         return ""
-    return tu.utc_to_ny(naive_utc).strftime(fmt)
+    return tu.strftime_12h(tu.utc_to_ny(naive_utc), fmt)
 
 
-def ny_time(naive_utc, fmt: str = "%H:%M"):
-    """New York time of day, for tables where the date is implied."""
+def ny_time(naive_utc, fmt: str = tu.FMT_CLOCK_12H):
+    """New York time of day, for tables where the date is implied (``1:45 PM``)."""
     return ny_str(naive_utc, fmt)
+
+
+def ny_time_s(naive_utc):
+    """New York time of day including seconds (``1:45:07 PM``)."""
+    return ny_str(naive_utc, tu.FMT_CLOCK_12H_SECONDS)
+
+
+def ny_datetime_s(naive_utc):
+    """New York date and time including seconds (``2026-10-14 1:45:07 PM``)."""
+    return ny_str(naive_utc, tu.FMT_DATETIME_12H_SECONDS)
 
 
 def ny_date(naive_utc, fmt: str = "%Y-%m-%d"):
     return ny_str(naive_utc, fmt)
+
+
+def ny_clock(ny_dt):
+    """A datetime *already on the NY clock*, as ``1:45 PM``.
+
+    The mirror of :func:`ny_str` for the stored NY wall clocks (``purge_time_ny``,
+    ``t_ny``), which must not be converted a second time. Callers used to reach
+    for ``strftime("%H:%M")`` here; this is the same value on the operator's
+    clock, from the one formatter.
+    """
+    if ny_dt is None:
+        return ""
+    return tu.strftime_12h(ny_dt, tu.FMT_CLOCK_12H)
+
+
+def ny_stamp(ny_dt):
+    """A datetime already on the NY clock, as ``2026-10-14 1:45 PM``.
+
+    The date+clock counterpart of :func:`ny_clock`, for the same stored NY
+    columns. :func:`ny_str` must not be used on those: it converts *from* UTC,
+    so a stored NY value would be shifted by the NY offset a second time — a
+    09:10 NY purge shown as 04:10 in winter. Which columns are which is exactly
+    the distinction these two functions exist to make unmissable.
+    """
+    if ny_dt is None:
+        return ""
+    return tu.strftime_12h(ny_dt, tu.FMT_DATETIME_12H)
+
+
+def ny_open_str(naive_utc) -> str:
+    """A session open on the operator's clock, e.g. ``Mon 1:00 AM``.
+
+    Used for "the next window opens at ...". 12-hour, like every other session
+    time a trader reads, and from :func:`trading.time_utils.format_ny_12h` — the
+    same formatter the engine's own ``[SESSION]`` line and wake-up log use, so
+    the dashboard and the log can never quote different hours for one event.
+
+    The weekday is kept: the next open can be days away, and a bare ``1:00 AM``
+    would not say which day. Rendered as ``Mon 1:00 AM`` rather than
+    ``2026-09-14 01:00`` for that same reason — the date's *part in the week* is
+    what the operator is waiting on.
+    """
+    if naive_utc is None:
+        return ""
+    ny = tu.utc_to_ny(naive_utc)
+    return f"{ny:%a} {tu.format_ny_12h(ny)}"
 
 
 def ny_zone_label(naive_utc=None) -> str:

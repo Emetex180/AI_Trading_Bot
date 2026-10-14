@@ -8,8 +8,11 @@
 <div class="client-hero">
   <div>
     {# The hour comes off the same NY clock the rest of the page is denominated
-       in, so the greeting cannot disagree with the timestamps below it. #}
-    {% set hour = status.ny_time[:2] | int %}
+       in, so the greeting cannot disagree with the timestamps below it. It is
+       published as a number rather than sliced out of `ny_time`, which is now
+       written the way an operator reads it ("9:30 AM") and no longer starts
+       with a zero-padded hour. #}
+    {% set hour = status.ny_hour %}
     <h1>Good {{ 'morning' if hour < 12 else ('afternoon' if hour < 17 else 'evening') }},
         {{ current_user.display_name or current_user.username }}</h1>
     <p>{{ status.ny_date }} · {{ status.ny_time }} New York ({{ status.ny_zone }})</p>

@@ -40,6 +40,7 @@ import time
 
 from config import Settings, get_settings
 from database.repository import Repository, init_db
+from trading import time_utils as tu
 
 # --------------------------------------------------------------------------- #
 # Live scanner
@@ -426,12 +427,14 @@ def run_user(settings: Settings, action: str | None, username: str | None,
                       "`python run.py user add --username NAME --role admin`.")
                 return 0
             print(f"{'id':>4}  {'username':<20} {'role':<8} {'status':<10} "
-                  f"{'last login':<17} name")
+                  f"{'last login':<21} name")
             for u in rows:
-                last = (u.last_login_at.strftime("%Y-%m-%d %H:%M")
+                # The operator's 12-hour clock, as everywhere else a New York
+                # time is shown — this listing is a report a person reads.
+                last = (tu.strftime_12h(tu.utc_to_ny(u.last_login_at))
                         if u.last_login_at else "never")
                 print(f"{u.id:>4}  {u.username:<20} {u.role:<8} {u.status:<10} "
-                      f"{last:<17} {u.display_name or ''}")
+                      f"{last:<21} {u.display_name or ''}")
             print(f"\n{len(rows)} account(s).")
             return 0
 

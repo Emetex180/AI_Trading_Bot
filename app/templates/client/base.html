@@ -150,9 +150,11 @@
 
     <div class="client-topbar">
       <div class="client-topbar-clocks">
-        {# Served values paint the first byte; client.js ticks them after that. #}
+        {# Served values paint the first byte; client.js ticks them after that.
+           The placeholder is the shape both of them produce — 12-hour with the
+           hour unpadded — so the chip does not reflow when the tick lands. #}
         <span class="clock-chip">
-          <span class="clock-time" id="ny-clock">{{ status.ny_time if status else '--:--:--' }}</span>
+          <span class="clock-time" id="ny-clock">{{ status.ny_time if status else '--:--:-- --' }}</span>
           <span class="clock-zone">New York <span id="ny-zone">{{ status.ny_zone if status else '' }}</span></span>
         </span>
 

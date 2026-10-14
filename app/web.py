@@ -68,7 +68,10 @@ from .display import iso_dt as _iso_dt
 from .display import money as _money
 from .display import num as _num
 from .display import ny_date as _ny_date
+from .display import ny_datetime_s as _ny_datetime_s
 from .display import ny_str as _ny_str
+from .display import ny_time as _ny_time
+from .display import ny_time_s as _ny_time_s
 from .display import price as _price
 from .display import profit_factor as _profit_factor
 from .display import span as _span
@@ -308,6 +311,14 @@ def create_app(settings: Settings | None = None,
     # calendar dates, where the minute is noise; both come from the same NY
     # conversion, so a date can never disagree with the timestamp beside it.
     app.jinja_env.filters["ny_date"] = _ny_date
+    # Clock-only counterparts, for tables where the date is implied — a feed or
+    # an audit trail. Registered rather than left to a literal format string in
+    # the template: ``| ny('%H:%M')`` is how a 24-hour clock gets back onto a
+    # page, and a template cannot reach the 12-hour formatter by accident if the
+    # named filter is what it uses.
+    app.jinja_env.filters["ny_time"] = _ny_time
+    app.jinja_env.filters["ny_time_s"] = _ny_time_s
+    app.jinja_env.filters["ny_datetime_s"] = _ny_datetime_s
     app.jinja_env.filters["num"] = _num
     app.jinja_env.filters["money"] = _money
     app.jinja_env.filters["price"] = _price

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from notifications.telegram import (ALERT_ONLY_TAG, TelegramNotifier,
                                     SendResult, format_signal_alert)
-from trading.signal_engine import Signal
+from trading.signal_engine import MODEL_2, Signal
 
 
 def _signal(**kw):
@@ -114,6 +114,34 @@ def test_alert_names_levels_and_sessions_in_readable_form():
     assert "Previous Day High" in text          # not the raw "PDH"
     assert "Previous Day Low" in text
     assert "NY AM" in text                      # not the raw "ny_am"
+
+
+def test_alert_states_the_session_hours_on_the_twelve_hour_clock():
+    """A session name alone does not say *when* it ran.
+
+    A trader reading the alert against the clock needs the hours, and they come
+    from the session table in the operator's 12-hour form — so the alert cannot
+    quote a window the engine was not using.
+    """
+    text = format_signal_alert(_ict_signal())
+
+    assert "NY AM (7:00 AM – 10:59 AM NY)" in text
+    # The stored 24-hour bounds must not reach the message.
+    assert "07:00" not in text and "11:00" not in text
+
+
+def test_a_model_2_alert_states_its_own_session_hours():
+    """Model 2's keys are its own, and they resolve to the same shared hours.
+
+    ``m2_lunch`` is not in Model 1's index at all, so this also pins that the
+    alert's session lookup consults both tables — the label and the hours have to
+    resolve for whichever engine produced the signal.
+    """
+    text = format_signal_alert(_signal(model=MODEL_2, session_keys=["m2_lunch"],
+                                       session_primary="m2_lunch",
+                                       model_meta=""))
+
+    assert "Lunch (11:00 AM – 12:59 PM NY)" in text
 
 
 def test_alert_prints_prices_at_the_symbol_precision():

@@ -39,6 +39,7 @@ import os
 from flask import (Blueprint, current_app, g, jsonify, render_template,
                    request, url_for)
 
+from trading import model2_sessions as m2_sessions
 from trading import sessions as sess
 from trading import time_utils as tu
 from trading.strategy import (CISD_CONFIRMED, FVG_FOUND, INVALIDATED,
@@ -50,7 +51,8 @@ from .access import (FEATURE_ANALYSIS, FEATURE_DASHBOARD, FEATURE_HISTORY,
                      require_feature)
 from .api import asset_choices
 from .auth import current_user, login_required
-from .display import digits_for, ny_str, price, ratio
+from .display import (digits_for, ny_clock, ny_open_str, ny_stamp, ny_str,
+                      ny_time, ny_time_s, price, ratio)
 
 client_bp = Blueprint("client", __name__)
 
@@ -109,9 +111,18 @@ def state_info(state: str | None) -> dict:
 
 
 def session_label(key: str | None) -> str:
-    """Display label for a session key (``ny_am`` -> ``NY AM``)."""
-    window = sess.SESSION_INDEX.get((key or "").strip())
-    return window.label if window else (key or "").replace("_", " ").upper()
+    """Display label for a session key (``ny_am`` -> ``NY AM``).
+
+    Both models' tables are consulted, as in
+    :func:`notifications.telegram._session_label`. Model 2 persists its own key
+    (``m2_ny_am``) because a stored setup has to keep resolving it, so a Model 2
+    card would otherwise read "M2 NY AM" beside a Model 1 card reading "NY AM"
+    for the very same window on the very same clock — two names for one session,
+    which is the confusion the shared table exists to remove.
+    """
+    key = (key or "").strip()
+    window = sess.SESSION_INDEX.get(key) or m2_sessions.MODEL_2_SESSION_INDEX.get(key)
+    return window.label if window else key.replace("_", " ").upper()
 
 
 def _jobs():
@@ -144,15 +155,15 @@ def setup_conditions(s) -> list[dict]:
         {
             "label": "1H liquidity purge",
             "met": bool(s.liquidity_type and s.purge_time_ny),
-            "detail": (f"{s.liquidity_type} at {ny_str(s.purge_time_ny, '%H:%M')}"
+            "detail": (f"{s.liquidity_type} at {ny_clock(s.purge_time_ny)}"
                        + (f" (grade {s.purge_grade})" if s.purge_grade else "")
-                       + f" · {ny_str(s.purge_time_ny)} NY"
+                       + f" · {ny_stamp(s.purge_time_ny)} NY"
                        if s.liquidity_type and s.purge_time_ny else ""),
         },
         {
             "label": f"{s.cisd_tf or '5M'} CISD",
             "met": bool(s.cisd_tf and s.cisd_confirm_time_ny),
-            "detail": (f"confirmed {ny_str(s.cisd_confirm_time_ny)} NY"
+            "detail": (f"confirmed {ny_stamp(s.cisd_confirm_time_ny)} NY"
                        if s.cisd_confirm_time_ny else ""),
         },
         {
@@ -172,7 +183,7 @@ def setup_conditions(s) -> list[dict]:
             "label": "SL from the M5 liquidity-taking candle",
             "met": bool(s.structure_extreme_price),
             "detail": (f"anchor {price(s.structure_extreme_price, s.asset)}"
-                       + (f" · {ny_str(s.structure_time_ny)} NY"
+                       + (f" · {ny_stamp(s.structure_time_ny)} NY"
                           if s.structure_time_ny else "")
                        if s.structure_extreme_price else ""),
         },
@@ -227,7 +238,7 @@ def setup_card(s, *, detail: bool = False) -> dict:
         "risk_approved": bool(s.risk_approved),
         "entry_time_utc": s.entry_time_utc,
         "entry_time_ny": ny_str(s.entry_time_utc),
-        "entry_time_short": ny_str(s.entry_time_utc, "%H:%M"),
+        "entry_time_short": ny_time(s.entry_time_utc),
         "entry_date_ny": ny_str(s.entry_time_utc, "%Y-%m-%d"),
         "created_at": s.created_at,
         "conditions": conditions if detail else conditions[:7],
@@ -331,6 +342,7 @@ def live_view(jobs, repo=None) -> dict:
         # simply stops the in-process path from throwing it away.
         live["pid"] = os.getpid()
         live["age_seconds"] = _age_seconds(live.get("heartbeat_utc"))
+        live["next_open_ny"] = ny_open_str(live.get("next_open_utc"))
         return live
 
     lease = jobs.engine_lease() if jobs is not None else {"alive": False}
@@ -346,6 +358,7 @@ def live_view(jobs, repo=None) -> dict:
             "active": bool(lease.get("active")),
             "activity": lease.get("activity") or "",
             "next_open_utc": lease.get("next_open_utc"),
+            "next_open_ny": ny_open_str(lease.get("next_open_utc")),
             "last_candle_utc": lease.get("last_candle_utc"),
             "signals_session": int(lease.get("signals_session") or 0),
             "last_error": "",
@@ -362,6 +375,7 @@ def live_view(jobs, repo=None) -> dict:
         "state": _state_of_a_dead_lease(lease.get("state")),
         "assets": [], "setups": {}, "prices": {}, "price_times": {}, "quotes": {},
         "active": False, "activity": "", "next_open_utc": None,
+        "next_open_ny": "",
         "last_candle_utc": None, "signals_session": 0,
         "last_error": lease.get("last_error") or "",
         "source": "none", "alive": False,
@@ -522,21 +536,31 @@ def platform_status(cfg, jobs, repo=None) -> dict:
 
     awake = bool(live.get("active"))
     return {
-        "ny_time": now_ny.strftime("%H:%M:%S"),
+        "ny_time": tu.strftime_12h(now_ny, tu.FMT_CLOCK_12H_SECONDS),
+        # The greeting is the one thing on the page that needs the hour as a
+        # *number* rather than as text, so it is published as its own field
+        # instead of being sliced back out of the display string above. That
+        # slice read the first two characters of "09:30:00", which stops meaning
+        # anything the moment the clock is written the way an operator reads it.
+        "ny_hour": now_ny.hour,
         "ny_date": now_ny.strftime("%A %d %B %Y"),
         "ny_zone": tu.ny_zone_abbr(),
         "ny_offset_hours": tu.ny_offset_hours(),
         "session_key": window.key if window else "",
         "session_label": window.label if window else "Outside session",
-        "session_window": (f"{window.start_hhmm}–{window.end_hhmm}"
-                           if window else ""),
+        # 12-hour, the operator's own wording ("7:00 AM – 10:59 AM"), rendered
+        # from the window table so the dashboard cannot drift from the clock the
+        # gate actually uses.
+        "session_window": window.range_12h if window else "",
         "session_trade": window.trade if window else sess.TRADE_CLOSED,
         "session_accepts_entries": bool(window and window.trade != sess.TRADE_NO),
         # Whether a configured window covers *now*. Different from
-        # ``session_accepts_entries`` above, which is about permission: the Asian
-        # range is a window the engine is awake for and may not enter. Collapsing
-        # them would either claim entries are possible in the Asian range or
-        # report the engine as asleep while it is working.
+        # ``session_accepts_entries`` above, which is about permission: a
+        # ``no``-trade window would be watched without being entered. Both hold
+        # the same value under the current table, because every window in it
+        # permits an entry — the two fields are kept distinct so a table that
+        # reintroduces a range-building window is reported correctly rather than
+        # claiming entries are possible in it.
         "session_open": window is not None,
         "session_status": "ACTIVE" if window is not None else "CLOSED",
         "scanner_state": live.get("state") or "",
@@ -544,8 +568,9 @@ def platform_status(cfg, jobs, repo=None) -> dict:
         "scanner_active": awake,
         "scanner_activity": live.get("activity") or "",
         "next_open_utc": live.get("next_open_utc"),
-        "next_open_ny": (ny_str(live.get("next_open_utc"))
-                         if live.get("next_open_utc") else ""),
+        # A *session* time, so it is written on the operator's 12-hour clock
+        # ("Mon 1:00 AM"), from the same formatter the engine's wake-up log uses.
+        "next_open_ny": ny_open_str(live.get("next_open_utc")),
         "last_candle_utc": live.get("last_candle_utc"),
         "last_candle_ny": (ny_str(live.get("last_candle_utc"))
                            if live.get("last_candle_utc") else ""),
@@ -616,7 +641,7 @@ def analysis_feed(repo, jobs, limit: int = 60) -> list[dict]:
         "id": r.id,
         "time_utc": r.event_time_utc,
         "time_ny": ny_str(r.event_time_utc),
-        "time_short": ny_str(r.event_time_utc, "%H:%M:%S"),
+        "time_short": ny_time_s(r.event_time_utc),
         "date_ny": ny_str(r.event_time_utc, "%Y-%m-%d"),
         "level": r.level,
         "source": r.source,
@@ -796,8 +821,11 @@ def analysis():
         # restated here. They are shown so a reader can tell "the engine found
         # nothing" apart from "the engine is not looking right now" — and so the
         # New York clock the page runs on is visibly the one the windows use.
+        # Times are the operator's 12-hour form; `range_12h` is built from the
+        # stored minutes, so the list is the table rather than a copy of it.
         session_windows=[{
             "key": w.key, "label": w.label,
+            "range_12h": w.range_12h,
             "start_hhmm": w.start_hhmm, "end_hhmm": w.end_hhmm,
             "trade": w.trade,
         } for w in sess.CORE_SESSIONS],

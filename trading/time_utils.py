@@ -44,6 +44,7 @@ arithmetic on a guessed offset.
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -290,6 +291,89 @@ def ny_date_key(ny_dt: datetime) -> str:
     return ny_dt.strftime("%Y-%m-%d")
 
 
+#: Minutes in a day — the exclusive end of a window that closes at midnight.
+DAY_MINUTES = 24 * 60
+
+
+def minute_of_day_to_12h(minute: int) -> str:
+    """A minute of the NY day as a 12-hour clock label, e.g. ``7:00 AM``.
+
+    This is a *display* formatter, and the only one the project uses for session
+    times. Nothing computes with its output: window bounds stay whole minutes of
+    the NY day (`trading.sessions.Window.start`/``.end``) and every comparison,
+    DST conversion and boundary decision is taken on those integers. Formatting
+    and arithmetic are deliberately kept apart so that a change of display
+    convention cannot move a session boundary.
+
+    ``minute`` is 0..1440. 1440 is the exclusive end of a window closing at
+    midnight, and wraps to ``12:00 AM`` — the next day's first minute, which is
+    the same instant the window stops being valid.
+    """
+    hour24, minute_part = divmod(minute % DAY_MINUTES, 60)
+    meridiem = "AM" if hour24 < 12 else "PM"
+    hour12 = hour24 % 12 or 12
+    return f"{hour12}:{minute_part:02d} {meridiem}"
+
+
+def format_ny_12h(ny_dt: datetime) -> str:
+    """The time of day of a NY instant as ``7:00 AM`` (never 24-hour)."""
+    return minute_of_day_to_12h(minute_of_day(ny_dt))
+
+
+def format_ny_stamp(ny_dt: datetime) -> str:
+    """A NY datetime as ``2026-10-14 1:45 PM`` — date, on the operator's clock.
+
+    The date-and-clock form the engine's own log lines and the console's job
+    panel use. Kept here beside :func:`format_ny_12h` so a log line cannot
+    invent a third way of writing a New York time.
+    """
+    return strftime_12h(ny_dt, FMT_DATETIME_12H)
+
+
+# --------------------------------------------------------------------------- #
+# Display formats — one clock, the operator's
+#
+# Every New York time the bot *shows* a person — dashboard, console log, Telegram
+# alert, admin report — is written on the 12-hour clock, and every one of them is
+# produced by the two functions below. There is no second formatter: a page that
+# formatted its own time is how "1:45 PM" and "13:45" end up on the same screen.
+#
+# The stored values stay naive NY datetimes. These are *display* functions and
+# nothing computes with their output, for the same reason
+# :func:`minute_of_day_to_12h` above is kept apart from window arithmetic.
+# --------------------------------------------------------------------------- #
+#: Clock-only and date+clock, with and without seconds. The hour is zero-padded
+#: here because that is what ``strftime`` produces; :func:`strftime_12h` removes
+#: it before the string reaches anyone.
+FMT_CLOCK_12H = "%I:%M %p"
+FMT_CLOCK_12H_SECONDS = "%I:%M:%S %p"
+FMT_DATETIME_12H = "%Y-%m-%d %I:%M %p"
+FMT_DATETIME_12H_SECONDS = "%Y-%m-%d %I:%M:%S %p"
+
+#: A zero-padded 12-hour clock value directly after a space or the start of the
+#: string: ``"01:45"`` but never the ``"0"`` in ``"2026-10-14"``, which is not
+#: followed by a digit-colon pair, nor the ``"0"`` in ``"10:45"``, whose
+#: lookbehind sees a digit. Applied only to strings this module produced.
+_UNPADDED_HOUR = re.compile(r"(?<![\d:])0(\d:\d{2})")
+
+
+def strftime_12h(ny_dt: datetime, fmt: str = FMT_DATETIME_12H) -> str:
+    """``ny_dt`` on the operator's 12-hour clock, e.g. ``2026-10-14 1:45 PM``.
+
+    The one place a New York time is turned into a string for a person to read.
+
+    The pad is stripped *after* formatting rather than asked for in the format
+    string: ``strftime``'s unpadded hour directive (``%-I``) is a glibc extension
+    that Windows does not implement, and this project ships on Windows. A regex
+    over a string this function itself produced is portable where ``%-I`` is not,
+    and it is cheaper to reason about than a per-platform format table.
+
+    ``fmt`` may be any of the ``FMT_*`` constants above; they are all 12-hour, so
+    no argument of ``fmt`` can reintroduce a 24-hour clock through this door.
+    """
+    return _UNPADDED_HOUR.sub(r"\1", ny_dt.strftime(fmt))
+
+
 def ny_offset_label(utc_dt: datetime | None = None) -> str:
     """The NY offset at ``utc_dt`` as ``-04:00``/``-05:00``, plus its zone name.
 
@@ -358,7 +442,13 @@ def format_time_chain(broker_dt: datetime | None, utc_dt: datetime,
         f"[MT5 TIME]     {broker_line}  (broker clock, UTC{offset:+.2f}, "
         f"source: {server_offset_source()})",
         f"[UTC TIME]     {utc_dt.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"[NEW YORK TIME] {ny_dt.strftime('%Y-%m-%d %H:%M:%S')}  {ny_offset_label(utc_dt)}",
+        # Only the New York line is on the operator's 12-hour clock, and that is
+        # the point of the trace: the two lines above are *other* clocks, quoted
+        # in their own convention, while this one is the value every session
+        # decision is taken on and is therefore written the way a session window
+        # is written.
+        f"[NEW YORK TIME] {strftime_12h(ny_dt, FMT_DATETIME_12H_SECONDS)}  "
+        f"{ny_offset_label(utc_dt)}",
     ]
     if session:
         lines.append(f"[ICT SESSION]  {session}")

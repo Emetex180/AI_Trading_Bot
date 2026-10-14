@@ -224,7 +224,7 @@
         <ul class="feed">
           {% for e in events %}
           <li class="feed-item">
-            <span class="feed-time">{{ e.event_time_utc | ny('%Y-%m-%d %H:%M:%S') }}</span>
+            <span class="feed-time">{{ e.event_time_utc | ny_datetime_s }}</span>
             <span class="feed-source">{{ e.level }}</span>
             <span class="feed-text">{{ e.message }}</span>
           </li>

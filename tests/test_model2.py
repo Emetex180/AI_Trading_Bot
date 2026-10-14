@@ -42,6 +42,7 @@ from database.models import Base
 from database.repository import Repository, ensure_schema
 from notifications.telegram import TelegramNotifier, format_signal_alert
 from trading import model2_sessions as m2
+from trading import sessions as sess
 from trading import time_utils as tu
 from trading.asset_manager import Asset
 from trading.executor import Executor
@@ -223,14 +224,36 @@ def test_the_new_york_clock_follows_dst_without_a_hardcoded_offset():
         assert (close_ny.hour, close_ny.minute) == (6, 0)
 
 
-def test_the_live_gate_stays_awake_for_model_2_windows_model_1_sleeps_through():
-    """Model 1's London ends at 05:00 and it has no Lunch window at all."""
+def test_model_2s_gate_is_awake_for_every_window_it_owns():
+    """Model 2's own contract, independent of the shared table it is built from.
+
+    ``awake_at`` used to answer differently from Model 1's gate — Model 1 had no
+    Lunch window and its London ended an hour early, so the live loop needed
+    Model 2's second opinion to avoid sleeping through a Model 2 session. Both
+    models now share one schedule and the two agree everywhere, but ``awake_at``
+    is still Model 2's statement of when it may act, so it is still asserted
+    directly: a change that quietly coupled it to Model 1's *entry* rules rather
+    than the shared clock would have to get past this.
+    """
     assert m2.awake_at(datetime(2026, 1, TUE, 5, 30))[0] is True
     assert m2.awake_at(datetime(2026, 1, TUE, 11, 30))[0] is True
     assert m2.awake_at(datetime(2026, 1, TUE, 16, 30))[0] is True
     assert m2.awake_at(datetime(2026, 1, TUE, 6, 30))[0] is False
     assert m2.awake_at(datetime(2026, 1, 10, 8, 0))[0] is False      # Saturday
     assert m2.awake_at(datetime(2026, 1, TUE, 11, 30))[1] == "Model 2 · Lunch"
+
+
+def test_the_two_models_gates_agree_on_every_minute_of_a_trading_day():
+    """The reason the live loop's Model 2 check is now belt-and-braces.
+
+    Model 2's schedule is the shared schedule, so ``session_activity`` already
+    wakes for every Model 2 window. Walking a whole day is what makes that claim
+    safe to rely on rather than a statement about a handful of sampled hours.
+    """
+    for minute in range(24 * 60):
+        at = datetime(2026, 1, TUE) + timedelta(minutes=minute)
+        assert (m2.awake_at(at)[0]
+                == sess.session_activity(at)[0]), f"{at:%H:%M}"
 
 
 def test_the_next_open_search_lands_inside_a_window_across_the_dst_shift():
@@ -558,7 +581,11 @@ def test_the_alert_reads_as_model_2_and_never_claims_a_cisd():
     fields = {ln.split(":", 1)[0].strip(): ln.split(":", 1)[1].strip()
               for ln in text.splitlines() if ":" in ln}
     assert fields["Model"] == MODEL_2
-    assert fields["Session"] == "NY AM"
+    # The session line names the window *and* its hours, in the operator's
+    # 12-hour form, so an alert read against a clock says when the session ran.
+    # Read from the shared table rather than spelled out here: the hours are the
+    # table's business, and a copy of them in this file could quietly disagree.
+    assert fields["Session"] == f"NY AM ({sess.SESSION_INDEX['ny_am'].range_12h} NY)"
     assert "Sequence (Model 2):" in text
     assert "Purge (M15):" in text and "Purge candle:" in text
     assert "Entry trigger:" in text and "Stop anchor:" in text

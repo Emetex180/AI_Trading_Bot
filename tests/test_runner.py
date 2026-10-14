@@ -1188,11 +1188,10 @@ class _Clock:
         self.ny = ny_dt
 
 
-#: Every session the spec marks tradeable, pinned explicitly. The gate reads
-#: ``VALID_ENTRY_SESSIONS`` — an operator who excluded NY Premarket would
+#: Every session the bot's shared table marks tradeable, pinned explicitly. The
+#: gate reads ``VALID_ENTRY_SESSIONS`` — an operator who had narrowed it would
 #: otherwise change what these tests observe through no fault of the code.
-ALL_ENTRY_SESSIONS = ["london_open", "ny_premarket", "ny_am", "london_close",
-                      "ny_pm"]
+ALL_ENTRY_SESSIONS = ["asian_range", "london_open", "ny_am", "ny_lunch", "ny_pm"]
 
 
 def _gated(settings, maker, market=None, sessions=None, **kw):
@@ -1214,8 +1213,9 @@ def test_session_gate_is_asleep_on_a_weekend(tmp_path, monkeypatch):
     active, activity, next_open = jobs._session_gate()
 
     assert (active, activity) == (False, "market_closed_weekend")
-    # And it knows when it will be worth waking up: Monday 02:00 NY.
-    assert tu.utc_to_ny(next_open) == datetime(2026, 9, 14, 2, 0)
+    # And it knows when it will be worth waking up: Monday 01:00 NY, the London
+    # open and the first window of the trading day.
+    assert tu.utc_to_ny(next_open) == datetime(2026, 9, 14, 1, 0)
 
 
 def test_session_gate_is_awake_inside_a_trading_session(tmp_path, monkeypatch):
@@ -1246,14 +1246,17 @@ def test_session_gate_reports_the_gap_between_windows(tmp_path, monkeypatch):
 def test_the_gate_respects_the_entry_allowlist(tmp_path, monkeypatch):
     """A session the operator excluded is not worth waking up for.
 
-    At 06:00 the bot is asleep (the gap before NY AM). With NY AM allow-listed
-    the next open is 07:00; drop ``ny_am`` from the allow-list and the gate must
-    skip past the whole window to NY PM instead.
+    At 06:00 the bot is asleep (the gap between London's close and NY AM). With
+    NY AM allow-listed the next open is 07:00; drop ``ny_am`` from the allow-list
+    and the gate must skip past the whole window to NY PM instead.
     """
     settings, maker = _env(tmp_path, monkeypatch)
     clock = _Clock(MON_0600)
     monkeypatch.setattr(tu, "now_ny", clock.now_ny)
     monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+    # ``power_hour`` is a retired key that aliases onto ``ny_pm``; it is left in
+    # the list here because that is what an existing operator's ``.env`` looks
+    # like, and it must not resolve the list to nothing.
     jobs, _ = _gated(settings, maker,
                      sessions=["london_open", "ny_am", "ny_pm", "power_hour"])
 
@@ -1280,33 +1283,54 @@ def test_the_gate_can_be_switched_off(tmp_path, monkeypatch):
     assert jobs._session_gate() == (True, "gate_disabled", None)
 
 
-def test_the_gate_wakes_for_a_model_2_window_model_1_has_none_for(
+def test_the_gate_wakes_for_a_model_2_window_model_1_is_not_allowed(
         tmp_path, monkeypatch):
-    """Model 2's Lunch must not be slept through.
+    """Model 2's Lunch must not be slept through by a narrowed Model 1 list.
 
-    At 11:30 NY Model 1 has no window at all — NY AM ended at 11:00 and NY PM
-    opens at 13:00 — so with Model 2 off the loop correctly sleeps. With it on
-    the loop has to stay awake for Model 2's own Lunch run (11:00-12:59), or
-    the model would only ever scan inside Model 1's hours and most of its
-    sessions would never be evaluated.
+    Both models now read one shared schedule, so the two gates agree on *hours* —
+    what still separates them is the allow-list. ``VALID_ENTRY_SESSIONS`` filters
+    Model 1's entries, and ``session_activity`` honours it, so an operator who
+    narrowed Model 1 to London and the two New York halves leaves the loop asleep
+    through Lunch. A running Model 2 evaluates all five sessions regardless, and
+    the loop has to stay awake for it — otherwise the model would only ever scan
+    inside Model 1's configured hours and most of its sessions would never be
+    evaluated.
     """
     settings, maker = _env(tmp_path, monkeypatch)
     clock = _Clock(datetime(2026, 9, 14, 11, 30))    # Monday, NY Lunch
     monkeypatch.setattr(tu, "now_ny", clock.now_ny)
     monkeypatch.setattr(tu, "now_utc", clock.now_utc)
-    gated = dict(session_gate_enabled=True,
-                 valid_entry_sessions=list(ALL_ENTRY_SESSIONS))
+    narrowed = dict(session_gate_enabled=True,
+                    valid_entry_sessions=["london_open", "ny_am", "ny_pm"])
 
-    off = _jobs(replace(settings, **gated), maker)
+    off = _jobs(replace(settings, **narrowed), maker)
     assert off._session_gate()[0] is False
 
-    on = _jobs(replace(settings, model_2_enabled=True, **gated), maker)
+    on = _jobs(replace(settings, model_2_enabled=True, **narrowed), maker)
     active, activity, next_open = on._session_gate()
     # Awake for Model 2's own Lunch run, with no next-open to report — which is
     # what "awake now" means here. The label's separator is not pinned, only
     # that the reason is Model 2's and names the right window.
     assert (active, next_open) == (True, None)
     assert activity.startswith("Model 2") and "Lunch" in activity
+
+
+def test_the_gate_stays_awake_for_lunch_when_model_1_is_allowed_it(
+        tmp_path, monkeypatch):
+    """The other half of the same story, on the shared schedule.
+
+    With Lunch in the allow-list — as it is by default, since every window in the
+    table permits an entry — the loop is awake for it whether or not Model 2 is
+    running, and for Model 1's own reason.
+    """
+    settings, maker = _env(tmp_path, monkeypatch)
+    clock = _Clock(datetime(2026, 9, 14, 11, 30))    # Monday, NY Lunch
+    monkeypatch.setattr(tu, "now_ny", clock.now_ny)
+    monkeypatch.setattr(tu, "now_utc", clock.now_utc)
+
+    jobs, _ = _gated(settings, maker)
+
+    assert jobs._session_gate() == (True, "ny_lunch", None)
 
 
 def test_backfill_plan_widens_the_request_to_span_a_sleep(tmp_path, monkeypatch):
@@ -1364,7 +1388,7 @@ def test_the_live_loop_does_not_poll_while_it_is_asleep(tmp_path, monkeypatch):
 
     live = jobs.live_state()
     assert live["active"] is False
-    assert live["next_open_utc"] == tu.ny_to_utc(datetime(2026, 9, 14, 2, 0))
+    assert live["next_open_utc"] == tu.ny_to_utc(datetime(2026, 9, 14, 1, 0))
     # Warm-up still happened — the session is ready, it is just not working.
     assert live["assets"] == ["TEST"]
     assert market.polls == 0
@@ -1438,7 +1462,8 @@ def test_the_live_loop_emits_a_session_line_on_each_transition(tmp_path, monkeyp
 
     clock.set(MON_1000)                      # Monday, inside NY AM
     assert _wait_for(
-        lambda: "[SESSION] NY AM active — Strategy scanner ON" in seen)
+        lambda: "[SESSION] NY AM active (7:00 AM – 10:59 AM NY) "
+                "— Strategy scanner ON" in seen)
     jobs.stop_live(timeout=5)
 
 

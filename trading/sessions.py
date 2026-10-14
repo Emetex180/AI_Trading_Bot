@@ -6,36 +6,52 @@ knowledge of its own — conversion is centralized in :mod:`trading.time_utils`.
 
 The trading calendar
 --------------------
-A minute of the day says nothing about *which* day it is. ``02:00`` is the
+A minute of the day says nothing about *which* day it is. ``1:00 AM`` is the
 London open on a Wednesday and also on a Saturday, and a minute-of-day table
 alone cannot tell them apart, so every window above would report as tradeable
 over a weekend. :func:`is_trading_day` supplies the missing calendar dimension,
 and :func:`session_activity` is the single question the live loop asks: *should
 the bot be awake right now, and why?* See :func:`tradeable_minute` for how the
-window overlap rules interact with a session allow-list, and :func:`wake_minute`
-for the one asymmetry between them: a window can be worth *watching* without
-being tradeable. The Asian range is a no-trade block the bot nonetheless stays
-awake for, because the level it builds is what the London open sweeps.
+window table interacts with a session allow-list, and :func:`wake_minute` for
+the asymmetry between them: a window can be worth *watching* without being
+tradeable, which is the shape :data:`OBSERVED_WINDOWS` exists to express.
 
 Core sessions (the master session model)
 ----------------------------------------
 Every window below is New York **local clock** time, resolved through
 :mod:`trading.time_utils` (``America/New_York``), so 07:00 means 7 AM in New York
-whether the zone is on EDT (UTC-4) or EST (UTC-5):
+whether the zone is on EDT (UTC-4) or EST (UTC-5).
 
-    asian_range     19:00 - 00:00   trade: NO           (observes the Asian range)
-    london_open     02:00 - 05:00   trade: YES
-    ny_am           07:00 - 11:00   trade: YES
-    ny_pm           13:00 - 15:00   trade: YES
-    power_hour      15:00 - 16:00   trade: YES
+This table is the **single trading calendar for the whole bot**. It is Model 2's
+session schedule, and it is deliberately the only one: every model — Model 1's
+:class:`trading.strategy.ICTStrategy`, Model 2 in :mod:`trading.model2`, and any
+model added later — resolves its sessions through this module and must not
+define trading hours of its own. :mod:`trading.model2_sessions` keeps Model 2's
+own key names but derives its windows *from here*, so the two modules cannot
+drift apart. Entry conditions, liquidity rules, confirmations, stops, targets
+and risk/reward remain each model's own business; the clock is shared.
+
+The windows, as the operator states them (12-hour, last minute inclusive) and as
+they are stored (whole minutes of the NY day, half-open):
+
+    Asian      8:00 PM - 11:59 PM    20:00 - 24:00   trade: YES
+    London     1:00 AM -  5:59 AM    01:00 - 06:00   trade: YES
+    NY AM      7:00 AM - 10:59 AM    07:00 - 11:00   trade: YES
+    Lunch     11:00 AM - 12:59 PM    11:00 - 13:00   trade: YES
+    NY PM      1:00 PM -  4:59 PM    13:00 - 17:00   trade: YES
 
 Hours outside every window are :data:`TRADE_CLOSED`: the bot is awake for none
 of them and no entry can be taken in one.
 
+The stored end is *exclusive* (``start <= minute < end``) while the operator's
+statement of each window is *inclusive* at the last minute (``23:59``). They are
+the same interval; :attr:`Window.range_12h` renders the operator's wording from
+the stored one so the two can never be quoted inconsistently.
+
 The Asian window ends *at* midnight rather than crossing it. That is a
 deliberate representation, not an oversight: minutes-of-day are counted
-``00:00 = 0`` through ``24:00 = 1440``, so ``19:00 - 00:00`` is the ordinary
-half-open interval ``[1140, 1440)`` and the midnight boundary is a real,
+``00:00 = 0`` through ``24:00 = 1440``, so ``20:00 - 24:00`` is the ordinary
+half-open interval ``[1200, 1440)`` and the midnight boundary is a real,
 unambiguous endpoint of the *same* NY day. A window that genuinely wraps (say
 ``23:00 - 02:00``) has ``start > end`` and :meth:`Window.contains` handles that
 case too — see :attr:`Window.spans_midnight` — so the two shapes can never be
@@ -124,6 +140,36 @@ class Window:
     def end_hhmm(self) -> str:
         return "24:00" if self.end == DAY_MINUTES else f"{self.end // 60:02d}:{self.end % 60:02d}"
 
+    # ---------------------------------------------------------------- #
+    # Display (12-hour, AM/PM)
+    #
+    # The operator states and reads session times on a 12-hour clock, so every
+    # session time the bot *shows* — dashboard, logs, alerts and reports — is
+    # rendered by these properties. The stored `start`/`end` stay whole minutes
+    # of the NY day: display conventions are not arithmetic, and no boundary
+    # decision anywhere in the project is taken on a formatted string.
+    # ---------------------------------------------------------------- #
+    @property
+    def start_12h(self) -> str:
+        """The opening minute as ``7:00 AM``."""
+        return tu.minute_of_day_to_12h(self.start)
+
+    @property
+    def last_minute_12h(self) -> str:
+        """The closing minute as ``10:59 AM`` — the operator's wording.
+
+        ``end`` is exclusive, so the last minute the window actually covers is
+        ``end - 1``: ``11:00`` is stored, ``10:59 AM`` is shown. The modulo
+        keeps the two wrapping shapes right — a ``...-24:00`` window's last
+        minute is ``11:59 PM`` and a ``...-00:00`` one's is also ``11:59 PM``.
+        """
+        return tu.minute_of_day_to_12h((self.end - 1) % DAY_MINUTES)
+
+    @property
+    def range_12h(self) -> str:
+        """The window as the operator states it, e.g. ``7:00 AM – 10:59 AM``."""
+        return f"{self.start_12h} – {self.last_minute_12h}"
+
 
 def _window(key: str, label: str, start_hm: str, end_hm: str,
             trade: str = TRADE_YES) -> Window:
@@ -134,26 +180,36 @@ def _window(key: str, label: str, start_hm: str, end_hm: str,
 # --------------------------------------------------------------------------- #
 # Definitions (single source of truth)
 # --------------------------------------------------------------------------- #
-#: The operator's five ICT sessions, in New York local clock time. The order is
-#: also the documented tie-break used by :func:`primary_session` for equal-width
-#: overlaps — it is chosen so the session *label* matches the spec at every hour.
+#: The bot's five trading sessions, in New York local clock time — Model 2's
+#: schedule, and the only trading hours any model may use. Every window permits
+#: an entry: this table has no no-trade block, and the hours between windows are
+#: :data:`TRADE_CLOSED` rather than a session that forbids trading.
+#:
+#: The order is also the documented tie-break used by :func:`primary_session` for
+#: equal-width overlaps — it is chosen so the session *label* matches the spec at
+#: every hour. The windows are disjoint, so no tie can currently arise.
 CORE_SESSIONS: tuple[Window, ...] = (
-    _window("asian_range", "Asian", "19:00", "24:00", TRADE_NO),
-    _window("london_open", "London", "02:00", "05:00", TRADE_YES),
+    _window("asian_range", "Asian", "20:00", "24:00", TRADE_YES),
+    _window("london_open", "London", "01:00", "06:00", TRADE_YES),
     _window("ny_am", "NY AM", "07:00", "11:00", TRADE_YES),
-    _window("ny_pm", "NY PM", "13:00", "15:00", TRADE_YES),
-    _window("power_hour", "Power Hour", "15:00", "16:00", TRADE_YES),
+    _window("ny_lunch", "Lunch", "11:00", "13:00", TRADE_YES),
+    _window("ny_pm", "NY PM", "13:00", "17:00", TRADE_YES),
 )
 
 #: Retired window keys -> the session that replaced them, so an existing
-#: ``VALID_ENTRY_SESSIONS`` written against the old seven-window table keeps
-#: working instead of silently allowing nothing. ``None`` means the window has no
-#: successor and is dropped — NY Lunch was a no-trade block, so an operator who
-#: listed it was excluding time, not selecting a session.
+#: ``VALID_ENTRY_SESSIONS`` written against an older table keeps working instead
+#: of silently allowing nothing. ``None`` means the window has no successor and
+#: is dropped.
+#:
+#: ``power_hour`` joined this map when the bot moved onto Model 2's schedule:
+#: 13:00-17:00 is now a single NY PM window, and an allow-list that named the
+#: old 15:00-16:00 Power Hour must keep selecting those hours rather than
+#: resolving to nothing. It matters more than the other two because it has a
+#: *successor with wider hours*: the operator's 15:00-16:00 becomes 13:00-17:00.
 LEGACY_SESSION_ALIASES: dict[str, str | None] = {
     "ny_premarket": "ny_am",   # 07:00-09:30 is now part of NY AM
     "london_close": "ny_am",   # 10:00-12:00 overlapped NY AM
-    "ny_lunch": None,          # no successor: it was a NO-trade window
+    "power_hour": "ny_pm",     # 15:00-16:00 is now part of NY PM
 }
 
 
@@ -221,14 +277,15 @@ def session_trade_mode(minute: int) -> str:
     """The trade mode governing a NY minute.
 
     Overlapping windows are resolved with an explicit precedence rather than by
-    list order, because the spec's windows genuinely overlap (London Close runs
-    inside both NY AM and NY Lunch):
+    list order. The current table has no overlaps and no ``no`` window, so this
+    reduces to "the one active window's mode" — but each step is the rule that
+    applied when the table did overlap (NY AM over London Close), and the same
+    rule a future table with a hard block would need:
 
-    1. **no** wins outright — the Asian range and NY lunch are hard blocks, so a
-       ``no`` window sitting under a ``conditional`` one still blocks.
+    1. **no** wins outright — a ``no`` window sitting under a ``conditional`` or
+       ``yes`` one still blocks.
     2. otherwise **yes** wins — a ``yes`` window under a ``conditional`` one
-       still permits trading (this is what keeps 10:00-11:30 NY AM = YES despite
-       London Close overlapping it).
+       still permits trading.
     3. otherwise **conditional** — every active window is conditional.
     4. **closed** — no core session is active at this minute.
     """
@@ -285,11 +342,17 @@ WEEKEND_REASON = "market_closed_weekend"
 OUTSIDE_SESSION_REASON = "outside_session"
 
 #: Windows the bot stays awake for even though nothing can be entered in them,
-#: because the range they build is an *input* to a later session: the Asian
-#: high/low is a HIGH-grade liquidity level the London and NY sessions sweep, so
-#: it has to be observed even though the window itself is a hard no-trade block.
-#: Being awake here is not permission — see :func:`wake_minute`.
-OBSERVED_WINDOWS: frozenset[str] = frozenset({"asian_range"})
+#: because the range they build is an *input* to a later session. Being awake
+#: here is not permission — see :func:`wake_minute`.
+#:
+#: **Empty, and that is the current truth.** Model 2's schedule permits an entry
+#: in all five windows, so there is no window left that must be watched without
+#: being traded. The concept is kept rather than deleted because it is a property
+#: of the *table*, not of this schedule: reinstating a no-trade range-building
+#: window means naming it here and nothing else, and :func:`wake_minute` already
+#: handles it. ``tradeable_minute`` and ``wake_minute`` consequently agree on
+#: every minute of the day today.
+OBSERVED_WINDOWS: frozenset[str] = frozenset()
 
 #: NY weekday names, indexed by :meth:`datetime.datetime.weekday`.
 DAY_NAMES: tuple[str, ...] = ("Monday", "Tuesday", "Wednesday", "Thursday",
@@ -340,9 +403,10 @@ def tradeable_minute(minute: int, *,
     CONDITIONAL bar.
 
     Overlap precedence matches :func:`session_trade_mode` so the two can never
-    disagree: a ``no`` window sitting under a ``conditional`` one still blocks
-    (11:45 is NY Lunch, even though London Close is open), otherwise any
-    ``yes``/``conditional`` window permits.
+    disagree: a ``no`` window sitting under a ``conditional`` one still blocks,
+    otherwise any ``yes``/``conditional`` window permits. No window is ``no``
+    and none overlap in the current table, so both reduce to the same single
+    answer — the rule is kept for the table that has them again.
 
     ``allowed_sessions`` is the operator's allow-list. A window that permits
     trading but is not on it yields ``None``: they excluded that session, so
@@ -367,18 +431,19 @@ def wake_minute(minute: int, *,
 
     Deliberately distinct from :func:`tradeable_minute`, which answers the
     narrower question "may an entry be taken here?". A window in
-    :data:`OBSERVED_WINDOWS` is awake-but-not-tradeable: the bot watches the
-    Asian range form because a later session trades against it, and takes
-    nothing itself. Conflating the two would either sleep through the range
-    (losing the level) or wake for it and consider it an entry window.
+    :data:`OBSERVED_WINDOWS` would be awake-but-not-tradeable — watched for a
+    level a later session trades against, taking nothing itself. That set is
+    empty in the current table (every window permits entries), so the two
+    questions have the same answer today; the branch is kept because it is a
+    property of the *table* rather than of this schedule.
 
     Precedence is the same rule the other two use, so all three agree about any
-    given minute: an unobserved ``no`` window blocks outright (11:45 is NY Lunch
-    even though London Close is conditional), then any ``yes``/``conditional``
-    window on the allow-list, then an observed window.
+    given minute: an unobserved ``no`` window blocks outright, then any
+    ``yes``/``conditional`` window on the allow-list, then an observed window.
 
     The allow-list is intentionally *not* applied to observed windows — an
-    operator who trades only NY AM still needs the Asian range built for it.
+    operator who trades only NY AM would still need an observed range built for
+    it. Nothing is observed today, so no allow-list can be widened by this.
     """
     active = active_core_sessions(minute)
     if any(w.trade == TRADE_NO and w.key not in OBSERVED_WINDOWS
@@ -402,8 +467,7 @@ def session_activity(ny_dt: datetime, *,
     """Should the bot be awake at this NY instant, and why?
 
     Returns ``(active, reason)``. When active, ``reason`` is the session key that
-    justified it (so the log can say *why* the bot woke up) — which may be an
-    observed, non-tradeable window such as ``asian_range``; when not, it is
+    justified it (so the log can say *why* the bot woke up); when not, it is
     :data:`WEEKEND_REASON` or :data:`OUTSIDE_SESSION_REASON`.
 
     This is the whole gate: the calendar is checked first, because no minute of a
@@ -449,16 +513,16 @@ def next_activity_start_utc(ny_dt: datetime, *,
     return None
 
 
-#: The operator-facing line for each awake state. Observed windows say what they
-#: are actually doing there ("Building liquidity") rather than claiming to scan,
-#: because no entry can be taken in one.
+#: The operator-facing description of each awake state. The session's own window
+#: is appended by :func:`activity_log_line` from the table itself, so the line
+#: answers both "what is the bot doing?" and "over which hours?".
 ACTIVITY_LINES: dict[str, str] = {
-    "asian_range": "Asian session active — Building liquidity",
-    "london_open": "London session active — Strategy scanner ON",
-    "ny_am": "NY AM active — Strategy scanner ON",
-    "ny_pm": "NY PM active — Strategy scanner ON",
-    "power_hour": "Power Hour active — Strategy scanner ON",
-    "gate_disabled": "Activity gate disabled — Strategy scanner ON",
+    "asian_range": "Asian session active",
+    "london_open": "London session active",
+    "ny_am": "NY AM active",
+    "ny_lunch": "Lunch active",
+    "ny_pm": "NY PM active",
+    "gate_disabled": "Activity gate disabled",
 }
 
 
@@ -469,15 +533,27 @@ def activity_log_line(ny_dt: datetime, active: bool, reason: str) -> str:
     NY instant it was evaluated at. Built here rather than at the call site
     because the wording depends on the window table — a name only this module
     knows — and the live loop should not have to invent it.
+
+    A window named by ``reason`` contributes its own **12-hour** bounds
+    (:attr:`Window.range_12h`) to the line, read from the same table the gate
+    consulted: the log cannot quote hours the bot is not actually using. A
+    reason this table does not know — Model 2's ``Model 2 · Lunch``, or the
+    gate-disabled sentinel — is rendered without bounds rather than being
+    refused, so an unfamiliar state still logs.
     """
     if active:
-        body = ACTIVITY_LINES.get(reason, f"{reason} — Strategy scanner ON")
+        window = SESSION_INDEX.get(reason)
+        if window is None:
+            body = f"{ACTIVITY_LINES.get(reason, reason)} — Strategy scanner ON"
+        else:
+            body = (f"{ACTIVITY_LINES.get(reason, window.label)} "
+                    f"({window.range_12h} NY) — Strategy scanner ON")
     elif reason == WEEKEND_REASON:
         body = f"{DAY_NAMES[ny_dt.weekday()]} — Weekend mode"
     else:
         # A trading day with nothing tradeable open. Name the window that is
-        # blocking when the table knows one, so NY Lunch reads as a deliberate
-        # block rather than an unexplained gap in the session.
+        # blocking when the table knows one, so a no-trade session reads as a
+        # deliberate block rather than an unexplained gap.
         window = primary_session(tu.minute_of_day(ny_dt))
         if window is not None and window.trade == TRADE_NO:
             body = f"{window.label} — New signals blocked"
@@ -550,12 +626,13 @@ def get_trading_session_key(ny_dt: datetime) -> str:
 
 
 def describe_session_at(ny_dt: datetime) -> str:
-    """A one-line ``19:00-00:00 Asian (NY)``-style description for logs.
+    """A one-line ``8:00 PM – 11:59 PM Asian (NY)``-style description for logs.
 
-    Includes the window's own bounds so a reader can check the NY clock against
-    the session it was classified into without consulting the source.
+    Bounds are the window's own, in the operator's 12-hour form, so a reader can
+    check the NY clock against the session it was classified into without
+    consulting the source.
     """
     window = get_trading_session(ny_dt)
     if window is None:
         return "Outside session"
-    return f"{window.start_hhmm}-{window.end_hhmm} {window.label} (NY)"
+    return f"{window.range_12h} {window.label} (NY)"

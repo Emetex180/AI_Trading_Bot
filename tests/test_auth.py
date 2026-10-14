@@ -642,14 +642,19 @@ def test_a_round_trip_through_new_york_is_lossless():
 
 
 def test_a_setup_time_renders_on_the_new_york_clock():
-    """The dates on a client page are NY dates, DST-correct, with the right zone."""
+    """The dates on a client page are NY dates, DST-correct, with the right zone.
+
+    Rendered on the operator's 12-hour clock, which is the form every other New
+    York time in the platform is written in — the same value the engine's own
+    log lines carry, so the page and the log agree about one instant.
+    """
     from app.display import ny_str, ny_zone_label
 
     # 2026-07-15 13:30 UTC is 09:30 in New York, inside the NY AM session.
-    assert ny_str(datetime(2026, 7, 15, 13, 30)) == "2026-07-15 09:30"
+    assert ny_str(datetime(2026, 7, 15, 13, 30)) == "2026-07-15 9:30 AM"
     assert ny_zone_label(datetime(2026, 7, 15, 13, 30)) == "EDT"
     # The same wall-clock UTC hour in January is 08:30 New York, not 09:30.
-    assert ny_str(datetime(2026, 1, 15, 13, 30)) == "2026-01-15 08:30"
+    assert ny_str(datetime(2026, 1, 15, 13, 30)) == "2026-01-15 8:30 AM"
     assert ny_zone_label(datetime(2026, 1, 15, 13, 30)) == "EST"
 
 

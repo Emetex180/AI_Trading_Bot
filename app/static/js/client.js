@@ -63,35 +63,40 @@
     }
   })();
 
+  /* The live clock chip, on the operator's 12-hour clock. The server paints the
+   * first byte from trading.time_utils.strftime_12h, so this has to produce the
+   * same shape — "1:45:07 PM" — or the chip would visibly change format one
+   * second after load. The hour is unpadded and the meridiem is kept; seconds
+   * stay because this chip is the ticking clock rather than a timestamp. */
+  function clock12(h, m, s) {
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    var meridiem = h < 12 ? "AM" : "PM";
+    return (h % 12 || 12) + ":" + pad(m) + ":" + pad(s) + " " + meridiem;
+  }
+
   function nyParts() {
+    var h = null, m = 0, s = 0, zone = "", i;
     if (zoneOk) {
       var parts = new Intl.DateTimeFormat("en-US", {
         timeZone: cfg.nyZone, hour12: false, hour: "2-digit",
         minute: "2-digit", second: "2-digit", timeZoneName: "short"
       }).formatToParts(new Date());
-      var out = { time: "", zone: "" };
-      for (var i = 0; i < parts.length; i++) {
-        if (parts[i].type === "hour" || parts[i].type === "minute" ||
-            parts[i].type === "second") {
-          if (out.time) { out.time += ":"; }
-          out.time += parts[i].value;
-        } else if (parts[i].type === "timeZoneName") {
-          out.zone = parts[i].value;
-        }
+      for (i = 0; i < parts.length; i++) {
+        if (parts[i].type === "hour") { h = parseInt(parts[i].value, 10); }
+        else if (parts[i].type === "minute") { m = parseInt(parts[i].value, 10); }
+        else if (parts[i].type === "second") { s = parseInt(parts[i].value, 10); }
+        else if (parts[i].type === "timeZoneName") { zone = parts[i].value; }
       }
       /* "24" appears at midnight under hour12:false in some engines. */
-      if (out.time.indexOf("24:") === 0) { out.time = "00:" + out.time.slice(3); }
-      return out;
+      if (h === 24) { h = 0; }
+    } else {
+      /* Offset path: shifting the epoch by the offset makes the UTC getters read
+       * New York wall-clock fields. */
+      var d = new Date(Date.now() + (cfg.nyOffsetHours || 0) * 3600000);
+      h = d.getUTCHours(); m = d.getUTCMinutes(); s = d.getUTCSeconds();
     }
-
-    /* Offset path: shifting the epoch by the offset makes the UTC getters read
-     * New York wall-clock fields. */
-    var d = new Date(Date.now() + (cfg.nyOffsetHours || 0) * 3600000);
-    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
-    return {
-      time: pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds()),
-      zone: ""
-    };
+    if (h === null || isNaN(h)) { return { time: "", zone: zone }; }
+    return { time: clock12(h, m, s), zone: zone };
   }
 
   function tickClock() {

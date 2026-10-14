@@ -6,8 +6,10 @@ Synthetic, closed-candle, MT5-free scenarios that drive the full model:
 
 The BUY and SELL scenarios are built by one generator that places the same
 price geometry at a caller-chosen minute of the NY day, which lets a test put
-the entry inside a specific session window (NY AM, NY Lunch, NY Premarket)
-without hand-writing a second day of candles.
+the entry inside a specific session window (NY AM, Lunch, NY PM) — or in the
+dead hours between two of them — without hand-writing a second day of candles.
+The windows themselves are not listed here: the engine reads them from
+``trading/sessions.py``, which is the bot's single trading calendar.
 
 Timestamps are constructed on the **NY clock** (``c()`` takes NY time and the
 stream keys buckets on UTC), so the scenarios exercise the real conversion path
@@ -17,6 +19,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from trading import time_utils as tu
 from trading.asset_manager import Asset
 from trading.fvg import FVG, classify, closes_inside, entered, fvg_at_three
 from trading.liquidity import Level
@@ -259,9 +262,11 @@ def build_scenario():
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-#: Every session the spec marks tradeable, pinned explicitly so a test never
-#: depends on the developer's `.env` VALID_ENTRY_SESSIONS.
-_ALL_SESSIONS = "london_open,ny_premarket,ny_am,london_close,ny_pm"
+#: Every session in the bot's shared table, pinned explicitly so a test never
+#: depends on the developer's `.env` VALID_ENTRY_SESSIONS. The retired keys
+#: (``ny_premarket``, ``london_close``, ``power_hour``) are exercised separately,
+#: in the alias test below.
+_ALL_SESSIONS = "asian_range,london_open,ny_am,ny_lunch,ny_pm"
 
 
 def _engine(asset_name="TEST", **overrides):
@@ -414,17 +419,45 @@ def test_no_signals_without_history():
 # --------------------------------------------------------------------------- #
 # Invalidation rules
 # --------------------------------------------------------------------------- #
-def test_setup_reaching_entry_in_the_midday_gap_never_trades():
-    """A setup that would enter inside 11:00-13:00 must not produce a signal.
+def test_an_entry_in_the_midday_hours_now_trades_in_the_lunch_session():
+    """11:00-13:00 is the Lunch session, not the gap it used to be.
 
-    The FVG is placed at 11:29 so the retrace entry falls at 11:33, inside the
-    gap between NY AM (07:00-11:00) and NY PM (13:00-15:00). The minute is
-    ``outside_session``, so the entry is refused; the gap is also longer than
-    ``retrace_wait_m1``, so the pending setup expires before NY PM opens rather
-    than carrying a stale FVG across two dead hours.
+    The same scenario that used to be refused for landing between two New York
+    halves now enters — under the shared table the midday hours are a tradeable
+    window like any other. This is the test that would notice if Lunch were ever
+    quietly turned back into dead time.
+
+    ``fvg_wait_m1`` is widened because the FVG is placed two hours after the CISD
+    that precedes it: the flat run between them is 140-odd M1 candles, which the
+    90-minute default would expire the setup over long before the FVG arrives.
+    That is a property of the fixture, not of the session.
     """
     engine = _engine(fvg_wait_m1="400")
     warm, feed = build_buy_scenario(fvg_at=(11, 29))
+    signals = _run(engine, warm, feed)
+
+    buys = _approved(signals, "buy")
+    assert buys, "the Lunch window permits an entry"
+    assert buys[0].session_primary == "ny_lunch"
+
+
+def test_a_setup_never_reaches_an_entry_in_the_dead_hours():
+    """The hours between the five sessions cancel a pending setup.
+
+    A setup that would enter at 17:33 — after NY PM closed at 17:00 and before
+    the Asian range opens at 20:00 — must not trade. It cannot, and not merely
+    because the entry is refused: the pending setup is invalidated the moment the
+    clock leaves the sessions, so nothing carries a stale FVG across the evening.
+    (The midday version of this test is gone with the gap it tested: 11:00-13:00
+    is the Lunch session now, and an entry there is expected to trade.)
+
+    ``fvg_wait_m1`` is set past the whole flat run (09:05 to 17:28 is 503 M1
+    candles) so that the FVG *timeout* cannot be what ends this setup. The
+    dead-time rule has to be the cause, or the test would still pass with that
+    rule deleted.
+    """
+    engine = _engine(fvg_wait_m1="600")
+    warm, feed = build_buy_scenario(fvg_at=(17, 29))
     signals = _run(engine, warm, feed)
 
     assert _approved(signals, "buy") == []
@@ -661,7 +694,7 @@ def test_the_refusal_names_the_setup_it_protected():
 
     refusal = [m for m in lines if "ignored" in m][-1]
     assert episode.cisd_tf in refusal          # which timeframe confirmed it
-    assert f"{episode.purge_time_ny:%H:%M}" in refusal   # and when it purged
+    assert tu.format_ny_12h(episode.purge_time_ny) in refusal   # and when it purged
 
 
 @pytest.mark.parametrize("prior_state", [LIQUIDITY_PURGED, CISD_CONFIRMED])

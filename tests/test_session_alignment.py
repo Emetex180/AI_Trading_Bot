@@ -35,16 +35,16 @@ def broker_row(server_naive: datetime, o=1.0, h=2.0, l=0.5, c=1.5) -> tuple:
 # The five sessions, on the New York clock
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("hour,minute,key,label", [
-    (19, 0, "asian_range", "Asian"),
+    (20, 0, "asian_range", "Asian"),
     (23, 59, "asian_range", "Asian"),
-    (2, 0, "london_open", "London"),
-    (4, 59, "london_open", "London"),
+    (1, 0, "london_open", "London"),
+    (5, 59, "london_open", "London"),
     (7, 0, "ny_am", "NY AM"),
     (10, 59, "ny_am", "NY AM"),
+    (11, 0, "ny_lunch", "Lunch"),
+    (12, 59, "ny_lunch", "Lunch"),
     (13, 0, "ny_pm", "NY PM"),
-    (14, 59, "ny_pm", "NY PM"),
-    (15, 0, "power_hour", "Power Hour"),
-    (15, 59, "power_hour", "Power Hour"),
+    (16, 59, "ny_pm", "NY PM"),
 ])
 def test_each_session_is_detected_at_its_new_york_boundaries(hour, minute, key, label):
     at = MON.replace(hour=hour, minute=minute)
@@ -53,8 +53,7 @@ def test_each_session_is_detected_at_its_new_york_boundaries(hour, minute, key, 
 
 
 @pytest.mark.parametrize("hour,minute", [
-    (0, 0), (1, 0), (5, 0), (6, 59), (11, 0), (12, 0), (12, 59),
-    (16, 0), (18, 59),
+    (0, 0), (0, 30), (6, 0), (6, 59), (17, 0), (17, 30), (18, 59), (19, 59),
 ])
 def test_hours_outside_every_session_are_not_given_one(hour, minute):
     at = MON.replace(hour=hour, minute=minute)
@@ -74,9 +73,9 @@ def test_the_same_new_york_wall_clock_gives_the_same_session_all_year():
     summer = datetime(2026, 7, 6)      # Monday, EDT (UTC-4)
 
     for day in (winter, summer):
-        for hour, minute, key in [(19, 0, "asian_range"), (2, 0, "london_open"),
-                                  (7, 0, "ny_am"), (13, 0, "ny_pm"),
-                                  (15, 0, "power_hour")]:
+        for hour, minute, key in [(20, 0, "asian_range"), (1, 0, "london_open"),
+                                  (7, 0, "ny_am"), (11, 0, "ny_lunch"),
+                                  (13, 0, "ny_pm")]:
             at = day.replace(hour=hour, minute=minute)
             assert sess.get_trading_session_key(at) == key, (day, hour, minute)
 
@@ -87,8 +86,8 @@ def test_the_same_new_york_wall_clock_gives_the_same_session_all_year():
 def test_a_broker_row_lands_in_the_session_its_new_york_time_names():
     """Broker 14:00 with a +2 server is NY 08:00 — NY AM, not the broker's hour.
 
-    Read on the broker clock, 14:00 would be Power Hour. The whole point of the
-    conversion is that it is not.
+    Read on the broker clock, 14:00 would be the New York afternoon. The whole
+    point of the conversion is that it is not.
     """
     candle = row_to_candle(broker_row(datetime(2026, 9, 14, 14, 0)), 2.0)
 
@@ -130,14 +129,14 @@ def test_the_asian_session_is_reached_across_midnight_without_wrapping():
 def test_a_wrong_broker_offset_moves_the_session():
     """Proof the conversion is load-bearing, not cosmetic.
 
-    The same row read with a UTC+2 server is NY AM; read with a UTC+5 server it
-    is NY 05:00, the gap between London's close and the NY AM open. A wrong
+    The same row read with a UTC+2 server is NY AM; read with a UTC+4 server it
+    is NY 06:00, the gap between London's close and the NY AM open. A wrong
     offset silently changes which session trades — or silently loses the trade.
     """
     row = broker_row(datetime(2026, 9, 14, 14, 0))
 
     assert sess.get_trading_session_key(row_to_candle(row, 2.0).t_ny) == "ny_am"
-    assert sess.get_trading_session(row_to_candle(row, 5.0).t_ny) is None
+    assert sess.get_trading_session(row_to_candle(row, 4.0).t_ny) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -175,8 +174,9 @@ def test_the_backtest_buckets_by_new_york_session_not_utc_hour():
 
 
 def test_a_trade_outside_every_session_buckets_as_outside():
-    candle = row_to_candle(broker_row(datetime(2026, 9, 14, 18, 0)), 2.0)
-    assert candle.t_ny == datetime(2026, 9, 14, 12, 0)
+    """Broker 00:00 (+2) the next day is NY 18:00 — the evening gap."""
+    candle = row_to_candle(broker_row(datetime(2026, 9, 15, 0, 0)), 2.0)
+    assert candle.t_ny == datetime(2026, 9, 14, 18, 0)
     assert _bucket_key(candle.t_utc) == "outside"
 
 
@@ -194,10 +194,14 @@ def _signal_at(broker_naive: datetime, offset: float = 2.0) -> Signal:
 
 
 def test_the_telegram_alert_shows_new_york_time():
-    """``Time (NY)`` must be the NY clock, and say so."""
+    """``Time (NY)`` must be the NY clock, and say so — on the operator's clock.
+
+    Written the same way the alert's own session line is, so the two times on
+    one alert are never in different conventions.
+    """
     alert = format_signal_alert(_signal_at(datetime(2026, 9, 14, 14, 0)))
 
-    assert "Time (NY):           2026-09-14 08:00" in alert
+    assert "Time (NY):           2026-09-14 8:00 AM" in alert
     # The broker's own 14:00 and the UTC 12:00 must not appear as the NY time.
     assert "2026-09-14 14:00" not in alert
     assert "2026-09-14 12:00" not in alert
@@ -217,8 +221,8 @@ def test_the_telegram_time_follows_dst():
     winter = format_signal_alert(_signal_at(datetime(2026, 1, 14, 14, 0)))
     summer = format_signal_alert(_signal_at(datetime(2026, 7, 14, 14, 0)))
 
-    assert "Time (NY):           2026-01-14 07:00" in winter   # EST
-    assert "Time (NY):           2026-07-14 08:00" in summer   # EDT
+    assert "Time (NY):           2026-01-14 7:00 AM" in winter   # EST
+    assert "Time (NY):           2026-07-14 8:00 AM" in summer   # EDT
 
 
 # --------------------------------------------------------------------------- #
@@ -234,7 +238,7 @@ def test_the_debug_trace_reports_every_stage_of_the_chain():
     assert "[UTC TIME]" in trace
     assert "2026-09-14 12:00:00" in trace     # real UTC
     assert "[NEW YORK TIME]" in trace
-    assert "2026-09-14 08:00:00" in trace     # the strategy's clock
+    assert "2026-09-14 8:00:00 AM" in trace     # the strategy's clock
     assert "[ICT SESSION]  NY AM" in trace
     assert "EDT" in trace and "-04:00" in trace
 
@@ -256,7 +260,7 @@ def test_describe_candle_time_uses_the_real_pipeline_conversion(monkeypatch):
 
     assert "[MT5 TIME]     2026-09-14 14:00:00" in text
     assert "[UTC TIME]     2026-09-14 12:00:00" in text
-    assert "[NEW YORK TIME] 2026-09-14 08:00:00" in text
+    assert "[NEW YORK TIME] 2026-09-14 8:00:00 AM" in text
     assert "[ICT SESSION]  NY AM" in text
 
 

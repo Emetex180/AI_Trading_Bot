@@ -96,8 +96,15 @@ def test_the_admin_shell_links_the_whole_administration_area():
 
 
 def test_the_overview_puts_the_auto_trading_state_first():
-    """The one fact an operator must never have to hunt for."""
-    body = _body(_admin(_repo()), "/admin")
+    """The one fact an operator must never have to hunt for.
+
+    ``auto_trading`` is stated rather than inherited: these helpers build their
+    settings with ``replace(get_settings(), ...)``, so leaving it out would make
+    this assertion a function of the developer's own ``.env`` — and it would flip
+    the moment an operator armed the bot, which is precisely the state the *next*
+    test covers.
+    """
+    body = _body(_admin(_repo(), auto_trading=False), "/admin")
 
     assert "Alert only" in body
     assert "not place orders" in body

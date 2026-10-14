@@ -38,11 +38,16 @@ structure extreme. Signals are only emitted on **closed** candles — no
 lookahead. Setups below `MIN_RR` (1.5) are rejected; the TP targets the nearest
 known draw-on-liquidity beyond entry.
 
-All sessions are analysed (Asian, London, NY Premarket, NY AM, London Close, NY
-PM) even when only `VALID_ENTRY_SESSIONS` are tradeable/alerted. Note the
-allow-list accepts only real session keys — `asian_range`, `london_open`,
-`ny_premarket`, `ny_am`, `ny_lunch`, `london_close`, `ny_pm`. Anything else is
-silently ignored, so a typo there quietly narrows what you trade.
+One session table governs the whole bot — Asian, London, NY AM, Lunch and NY PM,
+all in New York time. Every model reads it, so no model can introduce hours of
+its own: models differ in entries, liquidity rules, confirmations, stops and
+targets, never in *when* they are allowed to trade. The allow-list
+(`VALID_ENTRY_SESSIONS`) accepts only real session keys — `asian_range`,
+`london_open`, `ny_am`, `ny_lunch`, `ny_pm` — and anything else is silently
+ignored, so a typo there quietly narrows what you trade. Keys from the
+superseded table still resolve, so an older `.env` keeps trading its hours
+rather than silently allowing nothing: `ny_premarket` and `london_close` both
+resolve to `ny_am`, and `power_hour` to `ny_pm`.
 
 ## Time handling
 
@@ -59,6 +64,14 @@ the broker's offset ahead of UTC comes from `MT5_SERVER_UTC_OFFSET`. A wrong
 value there shifts every session boundary, so verify it against your broker.
 All datetimes are naive UTC internally; `trading/time_utils.py` is the single
 conversion point.
+
+Every New York time the platform **shows** — dashboard, console log, Telegram
+alert, admin report, the `run.py user list` output — is written on the
+**12-hour clock** (`1:45 PM`), and session windows are quoted the operator's way
+(`7:00 AM – 10:59 AM`). `trading/time_utils.strftime_12h` is the single
+formatter behind that, so no surface can render a different convention from the
+one beside it. Storage is deliberately unaffected: the stored NY columns stay
+naive wall clocks, and no boundary decision is ever taken on a formatted string.
 
 ## Safety rules (hard constraints)
 
@@ -179,42 +192,52 @@ Monday–Friday, and only these windows on the New York clock:
 
 | Window | NY time | Mode | Bot |
 |---|---|---|---|
-| London | 02:00 – 05:00 | yes | scanning |
-| NY Premarket | 07:00 – 09:30 | conditional | scanning |
-| NY AM | 09:30 – 11:30 | yes | scanning |
-| London Close | 10:00 – 12:00 | conditional | scanning |
-| NY PM | 13:30 – 16:00 | yes | scanning |
-| Asian range | 20:00 – 00:00 | no | **awake, observing only** |
-| NY Lunch | 11:30 – 13:30 | no | asleep |
+| London | 1:00 AM – 5:59 AM | yes | scanning |
+| NY AM | 7:00 AM – 10:59 AM | yes | scanning |
+| Lunch | 11:00 AM – 12:59 PM | yes | scanning |
+| NY PM | 1:00 PM – 4:59 PM | yes | scanning |
+| Asian | 8:00 PM – 11:59 PM | yes | scanning |
 
-The Asian range is the one no-trade window the bot stays **awake** for. Nothing
-can be entered in it — that is a hard block — but the high and low it builds are
-the liquidity the London session trades against, so the bot watches it form.
-Awake there is not permission: the entry path refuses the window independently
-of the gate, so the only thing being collected is the level. Every other
-no-trade window (NY Lunch) is slept through.
+All five permit entries, so there is no no-trade window to sit through and no
+window the bot watches without trading. Three of them are adjacent — NY AM,
+Lunch and NY PM run back to back from 7:00 AM to 4:59 PM, one unbroken stretch —
+which leaves the working day as three awake spans: London, that New York block,
+and the Asian session, whose last minute is 11:59 PM.
 
-Note that London Close sits *inside* NY Lunch between 11:30 and 12:00; the
-no-trade window wins, so those 30 minutes are slept through.
+The gaps are dead time, and the bot sleeps through them: 6:00 – 6:59 AM, and
+5:00 – 7:59 PM. Weekends are dead time in full — no minute of a Saturday is
+tradeable, whatever the window table says, which is why a Saturday morning with
+London's hours on the wall clock still trades nothing. Friday is an ordinary
+weekday to the gate: it wakes for the Asian session at 8:00 PM like any other
+night, and after that the next wake is Monday's London open at 1:00 AM.
+
+Every time you read is in **12-hour AM/PM**, on the dashboard, in the logs, in
+the Telegram alerts and in the config: that is how a trader states a session.
+The arithmetic underneath is not done on those strings — windows are New York
+wall-clock minutes, and the clock itself comes from `zoneinfo`, so the schedule
+holds across the daylight-saving change without a fixed offset anywhere.
 
 While asleep the loop polls nothing, reads no account, and touches MT5 not at
 all. It does **not** disconnect: the terminal session stays open across the
 sleep, and on waking it backfills every M1 candle it missed before resuming, so
 the stream the model reads has no hole in it. That backfill is also what makes
-it safe to sleep through the Asian range's neighbours — every level is rebuilt
-from closed candles, not from having watched them arrive.
+it safe to sleep through the dead hours — every level is rebuilt from closed
+candles, not from having watched them arrive, so the Asian high and low the
+London session trades against are recovered from history rather than from
+having sat and watched them form.
 
 Two settings control this (`SESSION_GATE_ENABLED`, `TRADING_DAYS` — see
 [Configuration knobs](#configuration-knobs-env)). The dashboard's Live session
-card shows which of the two states it is in and when it will next wake.
+card shows which of the two states it is in and when it will next wake, on the
+same 12-hour clock as the log line — e.g. `Mon 1:00 AM`.
 
 Every transition is logged in one place, on the session clock:
 
 ```
-[SESSION] NY PM active — Strategy scanner ON
+[SESSION] London session active (1:00 AM – 5:59 AM NY) — Strategy scanner ON
+[SESSION] NY PM active (1:00 PM – 4:59 PM NY) — Strategy scanner ON
 [SESSION] Outside trading window — Scanner idle
-[SESSION] Asian session active — Building liquidity
-[SESSION] NY Lunch — New signals blocked
+[SESSION] Asian session active (8:00 PM – 11:59 PM NY) — Strategy scanner ON
 [SESSION] Saturday — Weekend mode
 ```
 

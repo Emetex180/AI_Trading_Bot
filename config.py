@@ -436,6 +436,27 @@ class Settings:
                 if key.startswith(prefix)}
 
 
+def _default_entry_sessions() -> list[str]:
+    """Every session the shared table permits an entry in.
+
+    Imported inside the function rather than at module scope because the
+    dependency runs the other way: :mod:`trading.time_utils` imports *this*
+    module for :func:`get_settings`, and :mod:`trading.sessions` imports
+    ``time_utils``. A module-level import of ``trading.sessions`` would close
+    that loop and neither module would load.
+
+    The point of reading it rather than restating it is that this is the value a
+    deployment falls back to when ``VALID_ENTRY_SESSIONS`` is unset, and it must
+    never be *narrower* than the bot's sessions. A hand-written default is
+    exactly the kind of copy that lags a table change — this one did: it still
+    named the retired ``power_hour`` and omitted the Asian and Lunch windows, so
+    an operator with the line commented out was awake for three of the five.
+    """
+    from trading.sessions import DEFAULT_ENTRY_SESSIONS
+
+    return list(DEFAULT_ENTRY_SESSIONS)
+
+
 def _build_settings() -> Settings:
     default_rr_target = _env_list("TARGET_RR_RANGE", ["1.5", "2.5"])
     try:
@@ -462,8 +483,7 @@ def _build_settings() -> Settings:
         risk_percent=_env_float("RISK_PERCENT", 1.0),
         sl_buffer_atr=_env_float("SL_BUFFER_ATR", 0.25),
         valid_entry_sessions=_env_list(
-            "VALID_ENTRY_SESSIONS",
-            ["london_open", "ny_am", "ny_pm", "power_hour"],
+            "VALID_ENTRY_SESSIONS", _default_entry_sessions(),
         ),
         cisd_threshold_hour_ny=_env_int("CISD_THRESHOLD_HOUR_NY", 9),
         order_deviation=_env_int("ORDER_DEVIATION", 20),
