@@ -273,12 +273,13 @@
   }
 
   function applyOverview(payload) {
-    setText("ov-count-active", payload.signals ? payload.signals.length : undefined);
-    if (payload.counts) {
-      setText("ov-count-total", payload.counts.setups_total);
-      setText("ov-count-approved", payload.counts.setups_approved);
-      setText("ov-count-assets", payload.counts.assets_monitored);
-    }
+    var counts = payload.counts || {};
+    setText("ov-count-active",
+            counts.setups_today !== undefined ? counts.setups_today
+              : (payload.signals ? payload.signals.length : undefined));
+    setText("ov-count-total", counts.setups_total);
+    setText("ov-count-approved", counts.setups_approved);
+    setText("ov-count-assets", counts.assets_monitored);
     noticeNewSetups("ov-new-notice", payload.last_signal_id);
   }
 

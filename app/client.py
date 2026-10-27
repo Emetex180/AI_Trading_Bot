@@ -35,6 +35,7 @@ EDT in July and EST in January.
 from __future__ import annotations
 
 import os
+from datetime import datetime, time
 
 from flask import (Blueprint, current_app, g, jsonify, render_template,
                    request, url_for)
@@ -650,14 +651,45 @@ def analysis_feed(repo, jobs, limit: int = 60) -> list[dict]:
     } for r in rows]
 
 
-def active_setups(repo, limit: int = 60) -> list[dict]:
-    """Setups the engine confirmed and the risk manager approved.
+def current_day_bounds_utc(day=None) -> tuple[datetime, datetime]:
+    """The UTC instants bounding one New York calendar day.
 
-    "Active" means exactly that — see :meth:`Repository.active_setups`. Setups
-    in an intermediate state (waiting on a retrace) are not here: they are not
-    rows yet, and they are shown on the market page from live state instead.
+    The reader's clock — every timestamp, session window and history filter on
+    the platform — is the New York clock, so "today" means today in New York,
+    not in UTC. A setup confirmed at 21:00 NY is stored after midnight UTC; it
+    must still count as today's setup for that reader.
+
+    ``day`` defaults to the current NY date and is a ``datetime.date``. The end
+    bound is the last representable instant of the day, matching
+    :func:`_ny_date_bound`'s inclusive-at-both-ends contract.
     """
-    return [setup_card(s) for s in repo.active_setups(limit=limit)]
+    day = day or tu.now_ny().date()
+    start = tu.ny_to_utc(datetime.combine(day, time(0, 0)))
+    end = tu.ny_to_utc(datetime.combine(day, time(23, 59, 59, 999999)))
+    return start, end
+
+
+def is_current_day(s, bounds=None) -> bool:
+    """Whether a persisted setup's entry falls on the current NY day."""
+    start, end = bounds or current_day_bounds_utc()
+    return bool(s.entry_time_utc and start <= s.entry_time_utc <= end)
+
+
+def active_setups(repo, limit: int = 60) -> list[dict]:
+    """Confirmed, risk-approved setups that are eligible *today*.
+
+    "Eligible today" means an APPROVED row whose entry falls on the current
+    New York calendar day. Setups from earlier days remain stored and continue
+    to appear on the history page — this filter is about the active surface,
+    not about deleting or hiding the record.
+
+    Setups in an intermediate state (waiting on a retrace) are not here: they
+    are not rows yet, and they are shown on the market page from live state
+    instead.
+    """
+    start, end = current_day_bounds_utc()
+    return [setup_card(s) for s in repo.active_setups(
+        limit=limit, date_from=start, date_to=end)]
 
 
 # --------------------------------------------------------------------------- #
@@ -719,12 +751,16 @@ def overview():
     repo, cfg, jobs = g.repo, _cfg(), _jobs()
     status = platform_status(cfg, jobs, g.repo)
     recent = [setup_card(s) for s in repo.find_signals(limit=6)]
+    # The grid shows the first four cards; the stat above it counts the day, so
+    # the two cannot disagree once a day produces more than four.
+    today = active_setups(repo, limit=100)
     return render_template(
         "client/overview.html",
         nav="overview",
         status=status,
         recent=recent,
-        active=active_setups(repo, limit=4),
+        active=today[:4],
+        active_count=len(today),
         feed=analysis_feed(repo, jobs, limit=8),
         counts={
             "setups_total": repo.count_signals(),
@@ -841,15 +877,17 @@ def analysis():
 def api_overview():
     repo, cfg, jobs = g.repo, _cfg(), _jobs()
     status = platform_status(cfg, jobs, g.repo)
+    today = active_setups(repo, limit=100)
     return jsonify({
         "status": status,
         "counts": {
             "setups_total": repo.count_signals(),
             "setups_approved": repo.count_signals("APPROVED"),
+            "setups_today": len(today),
             "assets_monitored": len(status["monitored_assets"]),
         },
         "last_signal_id": repo.max_signal_id(),
-        "signals": [setup_card(s) for s in repo.active_setups(limit=4)],
+        "signals": today[:4],
     })
 
 
@@ -884,15 +922,16 @@ def api_market():
 def api_setups():
     repo, cfg, jobs = g.repo, _cfg(), _jobs()
     after = request.args.get("after_id", type=int)
+    day = current_day_bounds_utc()
     if after is not None:
         # The poller's cursor: only rows newer than the highest id it has seen,
         # so a 5s poll costs one indexed comparison rather than a full listing.
-        # Filtered to APPROVED because "a new setup appeared" is the only thing
-        # this endpoint means; a rejected row is history, not a new setup.
+        # Filtered to APPROVED and to today's NY day, matching the server-drawn
+        # grid; a rejected row is history, and so is a setup from yesterday.
         rows = [s for s in repo.signals_after_id(after, limit=50)
-                if s.status == "APPROVED"]
+                if s.status == "APPROVED" and is_current_day(s, day)]
     else:
-        rows = repo.active_setups(limit=100)
+        rows = repo.active_setups(limit=100, date_from=day[0], date_to=day[1])
     return jsonify({
         "status": platform_status(cfg, jobs, g.repo),
         "last_signal_id": repo.max_signal_id(),

@@ -26,6 +26,7 @@ from flask import Blueprint, current_app, g, redirect, render_template, url_for
 
 from .auth import current_user
 from .plans import PLANS
+from .testimonials import published as published_testimonials
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ def _nav_context(**extra) -> dict:
     from trading import time_utils as tu
 
     context = {"plans": PLANS, "support_email": _cfg().support_email,
+               "testimonials": published_testimonials(),
                "ny_year": tu.now_utc().year}
     context.update(extra)
     return context

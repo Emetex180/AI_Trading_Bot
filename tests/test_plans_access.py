@@ -57,9 +57,9 @@ def _buy(repo, user, plan_key: str, *, days: int = 30, reference: str | None = N
 # --------------------------------------------------------------------------- #
 def test_the_three_launch_plans_are_priced_as_specified():
     assert PLAN_KEYS == ("basic", "premium", "vip")
-    assert get_plan("basic").price_minor == 5_000
-    assert get_plan("premium").price_minor == 10_000
-    assert get_plan("vip").price_minor == 50_000
+    assert get_plan("basic").price_minor == 1_000
+    assert get_plan("premium").price_minor == 3_000
+    assert get_plan("vip").price_minor == 5_000
     assert {p.currency for p in PLANS} == {"USD"}
 
 
@@ -432,7 +432,7 @@ def test_platform_stats_report_what_is_actually_stored():
     assert stats["subscriptions_active"] == 2
     assert stats["payments_successful"] == 2
     assert stats["payments_pending"] == 1
-    assert stats["revenue_minor"] == 5_000 + 50_000
+    assert stats["revenue_minor"] == 1_000 + 5_000
 
 
 def test_revenue_is_zero_rather_than_none_before_any_sale():
@@ -520,7 +520,7 @@ def test_settling_sends_the_receipt_and_the_activation_notice(monkeypatch):
     kinds = [k for k, _ in sent]
     assert kinds == ["received", "activated"]
     assert sent[0][1]["reference"] == payment.reference
-    assert sent[0][1]["amount"] == "$100.00"
+    assert sent[0][1]["amount"] == "$30.00"
 
 
 def test_a_declined_charge_emails_the_customer_their_reason(monkeypatch):

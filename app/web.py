@@ -326,7 +326,7 @@ def create_app(settings: Settings | None = None,
     app.jinja_env.filters["pf"] = _profit_factor
 
     # Money formatting, as a global rather than a filter. A price is an integer
-    # count of minor units plus its currency — ``format_minor(5000, "USD")`` —
+    # count of minor units plus its currency — ``format_minor(1000, "USD")`` —
     # and a filter would put the amount first and the currency somewhere it is
     # easy to forget. Making it global also means every shell (console, client,
     # admin, public) formats an amount the same way without each view having to

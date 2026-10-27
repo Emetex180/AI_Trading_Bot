@@ -71,8 +71,8 @@
 </div>
 
 <div class="stat-grid mb-4">
-  {{ stat('Active setups', active | length, 'success',
-          'confirmed and risk-approved', id='ov-count-active') }}
+  {{ stat("Today's setups", active_count, 'success',
+          'confirmed and approved today', id='ov-count-active') }}
   {{ stat('Setups recorded', counts.setups_total, '',
           'all time', id='ov-count-total') }}
   {{ stat('Approved', counts.setups_approved, '',
@@ -85,8 +85,8 @@
   <div class="col-12 col-xl-8">
 
     <div class="d-flex align-items-center justify-content-between mb-2">
-      <div class="section-label mb-0">Active setups</div>
-      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.setups') }}">All setups</a>
+      <div class="section-label mb-0">Today's setups</div>
+      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('client.setups') }}">View today's setups</a>
     </div>
 
     {# Populated by the poller when a setup confirmed. Nothing is inserted that
@@ -101,11 +101,13 @@
     <div class="card mb-4" id="ov-active-empty">
       <div class="card-body">
         <p class="empty-state mb-0">
-          No confirmed setup is open right now.
+          No confirmed setup is eligible today.
           {%- if status.scanner_active %}
           The engine is watching {{ counts.assets_monitored }} asset(s) for a
           1H liquidity purge.
           {%- endif %}
+          Setups from earlier days remain in
+          <a href="{{ url_for('client.history') }}">history</a>.
         </p>
       </div>
     </div>

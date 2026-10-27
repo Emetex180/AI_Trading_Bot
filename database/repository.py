@@ -355,14 +355,22 @@ class Repository:
         ).scalars().all()
         return [r for r in rows if r]
 
-    def active_setups(self, limit: int = 50) -> list[m.Signal]:
-        """Setups the engine has confirmed and that are still the latest word.
+    def active_setups(self, limit: int = 50, *,
+                      date_from: datetime | None = None,
+                      date_to: datetime | None = None) -> list[m.Signal]:
+        """Setups the engine has confirmed and that are still actionable.
 
         "Active" means APPROVED — the deterministic rules and the risk manager
         both passed, so it is a setup the platform is standing behind. Pending
         and rejected rows are history, not active setups.
+
+        ``date_from``/``date_to`` are optional naive-UTC bounds on
+        ``entry_time_utc``. The client surfaces pass today's New York day so the
+        active feed shows only setups that are eligible *today*; the stored rows
+        and the history page are never filtered by this method's callers.
         """
-        return self.find_signals(status="APPROVED", limit=limit)
+        return self.find_signals(status="APPROVED", date_from=date_from,
+                                 date_to=date_to, limit=limit)
 
     def count_signals(self, status: str | None = None) -> int:
         stmt = select(func.count()).select_from(m.Signal)

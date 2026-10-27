@@ -9,7 +9,7 @@ that gets any of them wrong takes real money from real people:
   which asks Flutterwave directly over an authenticated connection.
 * **The amount is re-checked, not taken on trust.** What the provider reports
   charged is compared against what *we* recorded for that reference, in exact
-  integer minor units. A tampered charge of $1 for a $500 plan is refused.
+  integer minor units. A tampered charge of $1 for a $50 plan is refused.
 * **Secrets stay server-side.** The secret key and the webhook hash are read
   from configuration and used only in request headers. Nothing here is ever
   rendered into a template, returned in a response body, or logged.

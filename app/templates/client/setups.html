@@ -7,9 +7,11 @@
 {% block content %}
 <div class="client-hero">
   <div>
-    <h1>Active setups</h1>
-    <p>Setups the engine confirmed and the risk manager approved. Each one shows
-       the conditions it cleared and the levels it would be traded from.</p>
+    <h1>Today's setups</h1>
+    <p>Setups the engine confirmed and the risk manager approved today on the
+       New York clock. Each one shows the conditions it cleared and the levels
+       it would be traded from. Earlier setups remain in
+       <a href="{{ url_for('client.history') }}">history</a>.</p>
   </div>
   <div class="page-actions">
     <span class="state-chip {{ 'is-confirmed' if status.scanner_active else 'is-idle' }}">
@@ -29,7 +31,7 @@
 {% endif %}
 
 <div class="stat-grid mb-4">
-  {{ stat('Open setups', setups | length, 'success', 'confirmed and approved',
+  {{ stat('Eligible today', setups | length, 'success', 'confirmed and approved today',
           id='setups-count') }}
   {{ stat('Session', status.session_label, '',
           (status.session_window ~ ' NY') if status.session_window else 'outside all windows') }}
@@ -47,7 +49,7 @@
 <div class="card">
   <div class="card-body">
     <p class="empty-state mb-0">
-      No confirmed setup is open.
+      No confirmed setup is eligible today.
       {%- if status.scanner_active %}
       The engine is monitoring {{ status.monitored_assets | length }} asset(s)
       and will record one when the full sequence completes and the risk gate
@@ -56,6 +58,8 @@
       The scanner is not in an active session, so no new setups are being
       produced.
       {%- endif %}
+      Setups from earlier days are kept in
+      <a href="{{ url_for('client.history') }}">history</a>.
     </p>
   </div>
 </div>

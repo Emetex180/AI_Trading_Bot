@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, time
 
 import pytest
 
@@ -26,6 +26,7 @@ from app.display import ny_str, ny_time_s
 from app.web import create_app
 from config import get_settings
 from database import models as m
+from trading import time_utils as tu
 
 from test_web import (_PASSWORD, _FakeJobs, _lease, _repo, _save_signal,
                       _sign_in)
@@ -67,6 +68,27 @@ def _seeded(jobs=None, **signal_kw):
     """A repository holding one approved, fully-populated setup."""
     repo = _repo()
     _save_signal(repo, **signal_kw)
+    return repo
+
+
+def _today_ny_at(hour=9, minute=10):
+    """A NY wall-clock instant on the current NY day, as the naive UTC column
+    stores it. Used by the surfaces that only show today's setups."""
+    day = tu.now_ny().date()
+    return tu.ny_to_utc(datetime.combine(day, time(hour, minute)))
+
+
+def _seeded_today(jobs=None, **signal_kw):
+    """One approved setup entered today on the New York clock.
+
+    The active feeds are deliberately day-scoped, so a test about what those
+    pages render must seed a setup that is eligible today; history tests keep
+    using fixed dates through :func:`_seeded`.
+    """
+    repo = _repo()
+    entry_ny = tu.utc_to_ny(_today_ny_at())
+    _save_signal(repo, entry_time_utc=_today_ny_at(),
+                 entry_time_ny=entry_ny, **signal_kw)
     return repo
 
 
@@ -173,7 +195,7 @@ def test_the_auto_trading_pill_turns_dangerous_when_it_is_on():
 # --------------------------------------------------------------------------- #
 def test_the_dashboard_shows_a_persisted_setup():
     """The card carries the levels and the clock, straight from the row."""
-    repo = _seeded()
+    repo = _seeded_today()
     body = _body(_client(repo))
 
     assert 'data-asset="USTEC"' in body
@@ -190,8 +212,8 @@ def test_the_setups_page_shows_the_condition_checklist():
     detail page: the card's list is deliberately compact, since a grid of
     twelve setups each carrying seven paragraphs is unreadable.
     """
-    repo = _seeded(state="TRADE_CONFIRMED", structure_extreme_price=99.5,
-                   target_kind="PDH", target_price=106.0)
+    repo = _seeded_today(state="TRADE_CONFIRMED", structure_extreme_price=99.5,
+                         target_kind="PDH", target_price=106.0)
     body = _body(_client(repo), "/setups")
 
     assert "1H liquidity purge" in body
@@ -202,10 +224,22 @@ def test_the_setups_page_shows_the_condition_checklist():
 
 
 def test_the_setups_page_lists_the_approved_setup():
-    repo = _seeded()
+    repo = _seeded_today()
     body = _body(_client(repo), "/setups")
 
     assert "USTEC" in body and 'id="setups-grid"' in body
+
+
+def test_an_earlier_setup_leaves_the_active_feed_but_stays_in_history():
+    """Today's feed is a view, not a deletion: the row is still on record."""
+    repo = _seeded()                       # fixed 2026-01-06 — an earlier NY day
+    body = _body(_client(repo), "/setups")
+
+    assert 'id="setups-grid"' not in body
+    assert "No confirmed setup is eligible today" in body
+
+    history = _body(_client(repo), "/history")
+    assert "USTEC" in history
 
 
 def test_the_setup_detail_page_walks_the_model():
@@ -239,8 +273,8 @@ def test_the_setup_detail_page_shows_the_recorded_values_not_placeholders():
 def test_the_checklist_reports_a_step_the_engine_never_reached():
     """A half-formed setup must show its gaps, not a row of ticks."""
     # No structure anchor and no target: the SL and TP steps never happened.
-    repo = _seeded(state="CISD_CONFIRMED", structure_extreme_price=0.0,
-                   target_kind="", target_price=0.0)
+    repo = _seeded_today(state="CISD_CONFIRMED", structure_extreme_price=0.0,
+                         target_kind="", target_price=0.0)
     body = _body(_client(repo), "/setups")
 
     assert 'class="condition unmet"' in body
@@ -869,12 +903,12 @@ def test_the_feed_hides_non_strategy_sources_from_the_strategy_view():
 # The poller contract
 # --------------------------------------------------------------------------- #
 def test_the_setups_cursor_only_returns_what_is_newer():
-    repo = _seeded()
+    repo = _seeded_today()
     first = repo.max_signal_id()
-    # A distinct instant, because save_signal keys on the setup fingerprint and
-    # an identical row would update the first one rather than add a second.
-    _save_signal(repo, entry_time_utc=datetime(2026, 1, 6, 14, 10),
-                 entry_time_ny=datetime(2026, 1, 6, 9, 10))
+    # A distinct instant on the same NY day, because save_signal keys on the
+    # setup fingerprint and an identical row would update the first one.
+    later = _today_ny_at(hour=9, minute=25)
+    _save_signal(repo, entry_time_utc=later, entry_time_ny=tu.utc_to_ny(later))
     assert repo.max_signal_id() > first
 
     payload = _client(repo).get(f"/api/client/setups?after_id={first}").get_json()
@@ -884,7 +918,7 @@ def test_the_setups_cursor_only_returns_what_is_newer():
 
 
 def test_the_setups_cursor_carries_the_fields_the_poller_paints():
-    repo = _seeded()
+    repo = _seeded_today()
     setup = _client(repo).get("/api/client/setups").get_json()["setups"][0]
 
     for key in ("id", "asset", "direction", "entry", "sl", "tp", "rr_label",
@@ -908,10 +942,12 @@ def test_a_rejected_setup_is_not_offered_as_a_new_setup():
 
 
 def test_the_overview_payload_counts_what_the_page_shows():
-    repo = _seeded()
+    repo = _seeded_today()
     payload = _client(repo).get("/api/client/overview").get_json()
 
     assert payload["counts"]["setups_total"] == repo.count_signals()
+    assert payload["counts"]["setups_today"] == 1
+    assert payload["counts"]["setups_today"] == len(payload["signals"])
     assert payload["last_signal_id"] == repo.max_signal_id()
     assert payload["status"]["ny_zone"]
 

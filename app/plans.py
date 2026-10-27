@@ -33,7 +33,7 @@ class PlanSpec:
 
     key: str
     name: str
-    #: Minor units (cents). ``50`` dollars is ``5000``. Integer, never a float:
+    #: Minor units (cents). ``10`` dollars is ``1000``. Integer, never a float:
     #: a webhook amount is compared against this to authorise a subscription,
     #: and a float would make that comparison inexact.
     price_minor: int
@@ -74,13 +74,12 @@ PLANS: tuple[PlanSpec, ...] = (
     PlanSpec(
         key="basic",
         name="Basic",
-        price_minor=5_000,
-        description="Structured market coverage and the signals view, for a "
-                    "single disciplined approach to the sessions that matter.",
+        price_minor=1_000,
+        description="Live market coverage and the trading dashboard, for "
+                    "following the model's state across every instrument.",
         features=(
             "Multi-asset market monitoring",
             "Live quotes and session state",
-            "Trading signals view",
             "Trading dashboard access",
             "Account and profile management",
         ),
@@ -90,7 +89,7 @@ PLANS: tuple[PlanSpec, ...] = (
     PlanSpec(
         key="premium",
         name="Premium",
-        price_minor=10_000,
+        price_minor=3_000,
         description="The full validated setup feed, with the liquidity and "
                     "structure detail behind every signal.",
         features=(
@@ -99,7 +98,6 @@ PLANS: tuple[PlanSpec, ...] = (
             "Setup detail: liquidity and FVG levels",
             "Signal history with filters",
             "Risk and structure breakdown",
-            "Email notifications",
         ),
         level=20,
         highlight=True,
@@ -108,14 +106,13 @@ PLANS: tuple[PlanSpec, ...] = (
     PlanSpec(
         key="vip",
         name="VIP",
-        price_minor=50_000,
+        price_minor=5_000,
         description="Every tool the platform runs, including the analysis "
                     "workspace and performance reporting.",
         features=(
             "Everything in Premium",
             "Full analysis workspace",
             "Performance and backtest reporting",
-            "Telegram signal delivery",
             "Priority support",
         ),
         level=30,
@@ -181,7 +178,7 @@ _SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "NGN": "₦", "GHS": "GH₵",
 
 
 def format_minor(minor: int, currency: str = CURRENCY) -> str:
-    """``5000`` -> ``"$50.00"``. Exact, via integer arithmetic.
+    """``1000`` -> ``"$10.00"``. Exact, via integer arithmetic.
 
     Deliberately not ``display.money``: that takes a major-unit figure and
     formats a float, which is right for a broker balance and wrong for money the
