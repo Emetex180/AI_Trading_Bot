@@ -160,7 +160,7 @@ def _default_model2_scanner_factory(asset, settings: Settings, repo: Repository,
     from trading.model2_scanner import Model2Scanner
 
     return Model2Scanner(asset, settings=settings, repo=repo,
-                         equity_provider=equity_provider)
+                         equity_provider=equity_provider, live_quotes=True)
 
 
 def _default_backtest_factory(asset, max_hold_m1: int):
@@ -1022,6 +1022,9 @@ class JobManager:
                 while not self._stop_event.is_set():
                     # ---- session-hours gate -------------------------------- #
                     now_ny = tu.now_ny()
+                    for model2_scanner in model2_scanners.values():
+                        if hasattr(model2_scanner, "expire_at"):
+                            model2_scanner.expire_at(tu.ny_to_utc(now_ny))
                     active, activity, next_open = self._session_gate(now_ny)
                     with self._state_lock:
                         self._live.active = active
@@ -1123,8 +1126,6 @@ class JobManager:
                         # can only ever come from their rules and never from
                         # their data.
                         m2 = model2_scanners.get(name)
-                        if m2 is not None:
-                            handled += m2.feed_new(candles)
                         # The live quote, read in the terminal session this
                         # worker already owns — never a second connection. Kept
                         # beside the candle poll because both describe the same
@@ -1136,6 +1137,17 @@ class JobManager:
                             quote = None
                         if quote is not None:
                             quotes[name] = quote
+                        if m2 is not None:
+                            try:
+                                handled += m2.feed_new(candles)
+                                if quote is not None and hasattr(m2, "feed_quote"):
+                                    handled += m2.feed_quote(quote)
+                            except Exception as exc:
+                                # Fail this model closed (including persistence
+                                # failures), without stopping Model 1's scanner.
+                                model2_scanners.pop(name, None)
+                                self._log(repo, "ERROR", "scanner",
+                                          f"{name}: Model 2 stopped — {type(exc).__name__}: {exc}")
                         last = sc.last_candle_time_utc()
                         with self._state_lock:
                             self._live.last_candle_utc = last

@@ -1,29 +1,12 @@
-"""Model 2 tests — sessions, liquidity causality, the purge, entry, and expiry.
+"""Model 2 sessions, liquidity, purge-candle entry and shared pipeline tests.
 
-Everything here is synthetic and MT5-free, like the rest of the suite. The
-fixture is one Monday of session ranges and one Tuesday morning that trades
-through them:
+Synthetic closed M1 candles only. Monday's London range is 2500/2400;
+Monday's wider Asian range (2520/2300) consumes both London levels before
+Tuesday. Tests needing an unconsumed London level use that session alone.
 
-* **Monday 2026-01-05** (a trading day). London runs 01:00-05:59 and prints a
-  2500 high and a 2400 low; the Asian session runs 20:00-23:59 and prints a 2520
-  high and a 2300 low. Those four prices are the whole liquidity pool Tuesday
-  can draw on.
-* **Tuesday 2026-01-06** (also a trading day). The 07:00 NY AM bucket is the
-  purge candle, and a 07:15 M1 candle is the break that fills the entry.
-
-Session ranges are fed **minute by minute** rather than as a skeleton of
-quarter-hour candles. A 15-minute bucket only closes when the *next* bucket's
-first minute arrives, so a sparse feed would leave buckets hanging open across
-the gaps and finalise them at an unrelated instant later — which would make the
-purge fire at the wrong time for reasons that have nothing to do with the model.
-
-Two consequences of the model's own causality are asserted directly, because
-they are behaviour a reader might otherwise mistake for a bug:
-
-* A purge is only known once its candle has **closed**, so feeding the purge
-  bucket alone creates nothing; the premise appears on the next candle.
-* A session's extremes enter the pool only once that session has **closed**, so
-  the Asian range is not available at 23:59 — one minute before the window ends.
+A full M15 candle becomes available when its final constituent M1 closes.
+Session extremes are usable only after the entire session closes, and a purge
+can trigger an entry only on a subsequent price observation in that session.
 """
 from __future__ import annotations
 
@@ -278,14 +261,11 @@ def test_a_session_extreme_is_usable_only_once_its_session_has_closed():
     assert _prices(mid_asian) == {LONDON_HIGH, LONDON_LOW}
     assert {lvl.source_session for lvl in mid_asian} == {"m2_london"}
 
-    # One minute before the Asian window ends it is *still* running, and still
-    # excluded. 23:59 is not "yesterday's Asian" — it is today's, unfinished.
-    assert _prices(strategy.session_levels(datetime(2026, 1, MON, 23, 59))
-                   ) == {LONDON_HIGH, LONDON_LOW}
+    # London has now been consumed by the Asian range, which is still forming.
+    assert strategy.session_levels(datetime(2026, 1, MON, 23, 59)) == []
 
-    # The next morning all four levels are available.
     assert _prices(strategy.session_levels(datetime(2026, 1, TUE, 7, 0))) == {
-        LONDON_HIGH, LONDON_LOW, ASIAN_HIGH, ASIAN_LOW}
+        ASIAN_HIGH, ASIAN_LOW}
 
 
 def test_a_session_still_forming_is_never_used_as_liquidity():
@@ -298,7 +278,7 @@ def test_a_session_still_forming_is_never_used_as_liquidity():
 
     pool = strategy.session_levels(datetime(2026, 1, TUE, 7, 45))
     assert {lvl.source_date for lvl in pool} == {"2026-01-05"}
-    assert _prices(pool) == {LONDON_HIGH, LONDON_LOW, ASIAN_HIGH, ASIAN_LOW}
+    assert _prices(pool) == {ASIAN_LOW}
 
     # 2560 and 2600 were both traded through by Tuesday's own range, and neither
     # is a premise: the setup is anchored on Monday's Asian high.
@@ -308,14 +288,12 @@ def test_a_session_still_forming_is_never_used_as_liquidity():
     assert setup.session_key == "m2_ny_am"
 
 
-def test_the_pool_reaches_back_over_the_previous_three_trading_days():
-    """Tuesday 2026-01-06 looks back over Mon 5th, Fri 2nd and Thu 1st."""
+def test_the_pool_covers_three_calendar_days_including_today():
     strategy = _strategy()
     assert strategy._pool_days(date(2026, 1, 6)) == [
-        date(2026, 1, 6), date(2026, 1, 5), date(2026, 1, 2), date(2026, 1, 1)]
-    # The weekend is skipped, not counted: Monday reaches back to the Friday.
+        date(2026, 1, 6), date(2026, 1, 5), date(2026, 1, 4)]
     assert strategy._pool_days(date(2026, 1, 5)) == [
-        date(2026, 1, 5), date(2026, 1, 2), date(2026, 1, 1), date(2025, 12, 31)]
+        date(2026, 1, 5), date(2026, 1, 4), date(2026, 1, 3)]
 
 
 # --------------------------------------------------------------------------- #
@@ -327,13 +305,13 @@ def test_a_buyside_purge_sells_the_break_of_the_purge_candle():
     _feed(strategy, _monday_pool())
 
     purge = _bucket(TUE, 7, 0, o=2505, h=2530, l=2502, cl=2520, base=2520)
-    _feed(strategy, purge)
-    # The purge candle is not a premise until it has closed, and it closes when
-    # the next bucket's first minute arrives — not one candle earlier.
+    _feed(strategy, purge[:-1])
     assert strategy.pending_setups == 0
+    _feed(strategy, purge[-1:])
+    # Minute 14 has closed: the exact M15 candle is final immediately.
+    assert strategy.pending_setups == 1
 
-    # 07:15 closes the bucket and holds inside it: the premise now exists, its
-    # candle's extremes are final, and it is waiting for the break.
+    # 07:15 holds inside the final purge extremes.
     assert _feed(strategy, [_q(TUE, 7, 15, 2520, 2527, 2510, 2520)]) == []
     setup = strategy._setups["sell"]
     assert setup.state == WAITING_FOR_PURGE_CANDLE_BREAK
@@ -348,15 +326,13 @@ def test_a_buyside_purge_sells_the_break_of_the_purge_candle():
 
     # SELL at the purge candle's low; the stop is its high.
     assert (sig.direction, sig.entry, sig.sl) == ("sell", 2502.0, 2530.0)
-    # TP is the nearest available session low below the entry, not a fixed
-    # multiple: London's 2400 is nearer than the Asian 2300.
+    # London's low was consumed on Monday. Only the Asian low remains.
     assert (sig.target_kind, sig.target_price, sig.tp) == (
-        "SESSION_LOW", LONDON_LOW, LONDON_LOW)
-    assert sig.rr == pytest.approx(102 / 28)
-    assert sig.risk_points == 28.0 and sig.reward_points == 102.0
+        "SESSION_LOW", ASIAN_LOW, ASIAN_LOW)
+    assert sig.rr == pytest.approx(202 / 28)
+    assert sig.risk_points == 28.0 and sig.reward_points == 202.0
 
-    # 2530 swept both of Monday's highs; the level anchored on is the furthest
-    # one taken — the Asian high at 2520 — and exactly one setup came of it.
+    # The Asian high is the only still-unconsumed high on Tuesday.
     assert sig.liquidity_type == "SESSION_HIGH"
     assert sig.liquidity_price == ASIAN_HIGH
     assert sig.session_primary == "m2_ny_am"
@@ -389,7 +365,7 @@ def test_a_buyside_purge_sells_the_break_of_the_purge_candle():
 
 def test_a_sellside_purge_buys_the_break_of_the_purge_candle():
     strategy = _strategy()
-    _feed(strategy, _monday_pool())
+    _feed(strategy, _monday_london())
     _feed(strategy, _bucket(TUE, 7, 0, o=2410, h=2415, l=2370, cl=2380, base=2400))
 
     signals = _feed(strategy, [_q(TUE, 7, 15, 2400, 2420, 2395, 2415)])
@@ -442,16 +418,19 @@ def test_a_purge_outside_every_window_builds_no_setup():
 def test_one_candle_taking_several_levels_is_one_setup():
     """A cascade of crossed levels must not become duplicated signals."""
     strategy = _strategy()
-    _feed(strategy, _monday_pool())
-    # 07:00 trades through both of Monday's highs at once.
-    _feed(strategy, _bucket(TUE, 7, 0, o=2530, h=2540, l=2510, cl=2535, base=2530))
-
-    signals = _feed(strategy, [_q(TUE, 7, 15, 2535, 2536, 2500, 2510)])
+    _feed(strategy, _monday_london()
+          + _session(MON, "20:00", "24:00", base=2450,
+                     high=2490, low=2410))
+    # Both nested session highs remain available until this purge.
+    _feed(strategy, _bucket(TUE, 7, 0, o=2500, h=2510, l=2490, cl=2500, base=2500))
+    assert strategy._setups["sell"].level.price == LONDON_HIGH
+    assert len([key for key in strategy._consumed if key.endswith("SESSION_HIGH")]) == 2
+    signals = _feed(strategy, [_q(TUE, 7, 15, 2500, 2501, 2480, 2490)])
     assert len(signals) == 1
     sig = signals[0]
-    assert sig.liquidity_price == ASIAN_HIGH          # the furthest taken
-    assert (sig.entry, sig.sl, sig.tp) == (2510.0, 2540.0, LONDON_LOW)
-    assert model_meta(sig)["liquidity_source_session"] == "m2_asian"
+    assert sig.liquidity_price == LONDON_HIGH
+    assert (sig.entry, sig.sl, sig.tp) == (2490.0, 2510.0, 2410.0)
+    assert model_meta(sig)["liquidity_source_session"] == "m2_london"
 
 
 def test_the_break_fills_once_and_never_twice():
@@ -469,17 +448,16 @@ def test_the_break_fills_once_and_never_twice():
     assert strategy.pending_setups == 0
 
 
-def test_warm_up_loads_history_without_emitting_or_deciding():
+def test_warm_up_replays_state_without_emitting_historical_signals():
     """Warm-up replays must not re-alert a setup that fired before attach."""
     strategy = _strategy()
     strategy.warm(_monday_pool()
                   + _bucket(TUE, 7, 0, o=2505, h=2530, l=2502, cl=2520, base=2520)
                   + [_q(TUE, 7, 15, 2520, 2522, 2480, 2490)])
     assert strategy.pending_setups == 0
-    assert strategy.state("sell") == WAITING
-    # The history is loaded all the same, so the pool is there for the live feed.
-    assert _prices(strategy.session_levels()) == {
-        LONDON_HIGH, LONDON_LOW, ASIAN_HIGH, ASIAN_LOW}
+    assert strategy.state("sell") == ENTRY_TRIGGERED
+    # Warm-up rebuilt consumption as well as history; no level is resurrected.
+    assert _prices(strategy.session_levels()) == {ASIAN_LOW}
 
 
 # --------------------------------------------------------------------------- #
@@ -529,8 +507,9 @@ def test_no_session_liquidity_in_the_trade_direction_rejects_the_setup():
     # One candle takes every level at once: above the highs and below the lows.
     _feed(strategy, _bucket(TUE, 7, 0, o=2505, h=2545, l=2450, cl=2500, base=2520))
 
-    assert _feed(strategy, [_q(TUE, 7, 15, 2500, 2546, 2449, 2500)]) == []
+    assert _feed(strategy, [_q(TUE, 7, 15, 2500, 2501, 2449, 2490)]) == []
     assert strategy.state("sell") == INVALIDATED
+    assert _feed(strategy, [_q(TUE, 7, 16, 2500, 2546, 2499, 2500)]) == []
     assert strategy.state("buy") == INVALIDATED
     assert strategy.pending_setups == 0
     assert any("no session liquidity" in m for m in console), console
@@ -542,7 +521,7 @@ def test_the_shared_risk_policy_applies_to_model_2():
     strict = replace(ASSET, overrides={"min_rr": "99"})
     console = []
     strategy = _strategy(asset=strict, log=console.append)
-    _feed(strategy, _monday_pool())
+    _feed(strategy, _monday_london())
     _feed(strategy, _bucket(TUE, 7, 0, o=2410, h=2415, l=2370, cl=2380, base=2400))
 
     assert _feed(strategy, [_q(TUE, 7, 15, 2400, 2420, 2395, 2415)]) == []
@@ -632,7 +611,7 @@ def test_a_model_2_signal_runs_through_the_shared_scanner_and_database():
 
     candles = _monday_pool() + _bucket(TUE, 7, 0, o=2505, h=2530, l=2502,
                                        cl=2520, base=2520)
-    scanner.warm(candles)                    # the purge bucket has not closed
+    scanner.warm(candles)                    # the purge is pending, no entry yet
     assert repo.count_signals() == 0
 
     assert scanner.step([_q(TUE, 7, 15, 2520, 2522, 2480, 2490)]) == 1

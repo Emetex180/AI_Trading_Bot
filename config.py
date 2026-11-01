@@ -277,15 +277,12 @@ class Settings:
     # it adds signals, so it is an operator's deliberate choice, not something a
     # deploy switches on.
     #
-    # Model 2 answers to the same MIN_RR / RISK_PERCENT / TRADING_DAYS policy as
-    # Model 1 and shares its scanner, signal schema, dedupe, alerts and
-    # repository. Only the two facts below are its own. Both are overridable per
-    # asset via ``ASSET_<NAME>_MODEL_2_ENABLED`` /
-    # ``ASSET_<NAME>_MODEL_2_LOOKBACK_DAYS``.
+    # Model 2 shares RISK_PERCENT / TRADING_DAYS and honors stricter MIN_RR,
+    # with a hard 1.50 floor. The global enable switch must be on; a per-asset
+    # MODEL_2_ENABLED override can then opt an asset out.
     model_2_enabled: bool = False
-    # Trading days of session history the liquidity pool looks back over, in
-    # addition to the current day. 3 is the model's own value: the sessions of
-    # the previous three trading days plus today.
+    # Legacy configuration field retained for compatibility. Model 2 enforces
+    # exactly three NY calendar days INCLUDING today, regardless of this value.
     model_2_lookback_days: int = 3
 
     extra: dict[str, Any] = field(default_factory=dict)

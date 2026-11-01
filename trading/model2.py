@@ -1,88 +1,37 @@
-"""Model 2 — session-liquidity purge model on the 15-minute chart.
+"""Model 2: three-calendar-day session liquidity -> M15 purge -> opposite break.
 
-The model
----------
-    a session liquidity level (a completed session high or low, from the previous
-    three trading days plus today)
-        └─ a closed M15 candle trades *through* that level → the PURGE CANDLE
-            └─ price trades back through the far side of the purge candle
-                └─ entry at that boundary, immediately (no candle close, no
-                   second confirmation candle, no CISD, no FVG, no retracement
-                   wait)
-                   SL = the far side of the purge candle
-                   TP = the nearest still-available session level in the trade
-                        direction
-                   → deterministic checks → risk approval → Signal
+Only completed sessions from today and the two preceding NY calendar days are
+eligible. Every breach consumes that session extreme, even outside a session.
+The exact, completed M15 purge candle supplies the immutable trigger and stop;
+the pending entry expires at the originating session's close. No CISD or FVG.
 
-Taking buy-side liquidity (a session **high**) calls for a SELL; taking
-sell-side liquidity (a session **low**) calls for a BUY.
+Live scanners use the existing runner's bid/ask observations for price breaks
+and proposed fills. Historical replay uses later M1 ranges, accounts for gaps,
+and rejects minutes whose stop/trigger sequence is unknowable. Neither path
+requires a close beyond the trigger. Historical fills are not tick executions.
 
-Relationship to Model 1
------------------------
-This is an independent engine, not a variant of
-:class:`trading.strategy.ICTStrategy`. It shares the *infrastructure* — the
-:class:`~trading.stream.BarsStream` candle store, the
-:class:`~trading.bars.Candle` model, the New York clock in
-:mod:`trading.time_utils`, the :class:`~trading.signal_engine.Signal` schema, the
-risk manager and the scanners — but none of Model 1's decisions, and none of
-Model 1's session windows (Model 2 has its own table in
-:mod:`trading.model2_sessions`). The two engines can therefore run side by side
-over the same symbol without either one's state machine being able to disturb
-the other's.
-
-Causality (no lookahead)
-------------------------
-Every rule below is stated so that the answer at candle *T* depends only on
-candles that closed at or before *T*:
-
-* A session's extremes enter the liquidity pool only once that session has
-  **closed** (:func:`trading.model2_sessions.session_closed_by`). A partly
-  formed range is never used, so "today's Asian high" is genuinely unavailable
-  while the Asian window is still running.
-* The purge is detected on a **closed** M15 candle. Its high and low are
-  therefore final when the premise is created, and the entry boundary can never
-  move afterwards.
-* The take-profit pool is rebuilt **as of the entry instant**, so a level that
-  had not yet formed when the trade was taken can never be selected.
-
-The same code drives live scanning and backtesting: closed M1 candles in,
-approved :class:`Signal` objects out.
-
-Timeout behaviour
------------------
-A setup has exactly one deadline: the end of the session it was purged in. The
-model's hard rule is that an entry must occur in the *same* trading session as
-its purge, on the same New York day, so instead of a candle-count timeout there
-is a single question — is the clock still inside the purge's own session? — and
-"no" is final. An expired setup is dropped, never deferred.
-
-Setup lifecycle
----------------
-    WAITING
-      ↓  a closed M15 candle takes an available session level
-    LIQUIDITY_PURGED → PURGE_CANDLE_IDENTIFIED
-      ↓  (the purge candle has closed, so its extremes are final and fixed)
-    WAITING_FOR_PURGE_CANDLE_BREAK
-      ↓  price trades back through the far side, inside the same session
-    ENTRY_TRIGGERED
-      ↘  EXPIRED      the originating session ended first
-      ↘  INVALIDATED  the entry failed the deterministic or risk checks
+TP is the nearest unconsumed session extreme on the correct side of the proposed
+entry, chosen BEFORE RR validation (>= 1.50, or a stricter configured minimum).
+The scanner persists consumption tombstones in the existing event table; replay
+never restores entries anchored to those spent levels. Model 1 is independent.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, time as _time, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from math import isfinite
 from typing import Callable
 
 from config import Settings, get_settings
 
 from . import model2_sessions as m2
 from .asset_manager import Asset
-from .bars import Candle
+from .bars import Candle, epoch_minute
 from .indicators import atr
 from .liquidity import Level, select_tp_target, session_extremes
-from .risk_manager import (EfficiencyWeights, RiskManager, compute_rr,
+from .risk_manager import (EfficiencyWeights, RiskDecision, RiskManager, compute_rr,
                            efficiency_score, risk_reward_points)
 from .signal_engine import (APPROVED, MODEL_1, MODEL_2, Signal, build_setup_id)
 from .sessions import is_trading_day, parse_trading_days
@@ -96,9 +45,8 @@ from .stream import BarsStream
 #: nothing else about the model is timeframe-relative.
 TIMEFRAME = "M15"
 
-#: The resolution the entry trigger is evaluated at. The scanner feeds closed M1
-#: candles, so a break of the purge candle is acted on the minute it happens
-#: rather than at an M15 close — which is what "enter immediately" requires.
+#: Historical entry resolution. Live scanners use existing bid/ask quote polls;
+#: M1 ranges prove historical breaks but not exact tick times or live fills.
 TRIGGER_TIMEFRAME = "M1"
 
 #: Length of the purge candle, used to place the instant it finishes forming.
@@ -140,9 +88,9 @@ _LOW_KIND = "SESSION_LOW"
 #: structure the strategy module bounds with its own cap.
 TRIGGERED_ID_CAP = 5000
 
-#: Default number of *trading* days of history the liquidity pool looks back
-#: over, in addition to the current day.
+#: Calendar days INCLUDING today. This is a strategy invariant, not a tuning knob.
 DEFAULT_LOOKBACK_DAYS = 3
+MINIMUM_RR = 1.50
 
 
 # --------------------------------------------------------------------------- #
@@ -163,6 +111,11 @@ class SessionLevel:
     source_label: str          # "London"
     source_date: str           # NY date the session ran on, "YYYY-MM-DD"
     formed_at_ny: datetime     # the instant the session closed
+
+    @property
+    def identity(self) -> str:
+        """Stable across replay, independent of reconstructed price precision."""
+        return f"{self.source_date}/{self.source_session}/{self.kind}"
 
     @property
     def side(self) -> str:
@@ -220,6 +173,19 @@ class _Setup:
 # --------------------------------------------------------------------------- #
 # Engine
 # --------------------------------------------------------------------------- #
+class Model2RiskManager(RiskManager):
+    """Shared policy with decimal-price geometry for Model 2's exact RR floor."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.min_rr = Decimal(str(max(MINIMUM_RR, self.min_rr)))
+
+    def approve(self, entry, sl, tp, direction):
+        if not all(isfinite(p) and p > 0 for p in (entry, sl, tp)):
+            return RiskDecision(False, "invalid_sl_tp")
+        return super().approve(*(Decimal(str(p)) for p in (entry, sl, tp)), direction)
+
+
 class Model2Strategy:
     """Per-asset Model 2 engine: session liquidity → purge → break → entry."""
 
@@ -235,9 +201,11 @@ class Model2Strategy:
             return asset.settings_value(key, fallback, cfg)
 
         # --- liquidity pool ---------------------------------------------- #
-        self.lookback_days: int = int(asset_setting(
-            "model_2_lookback_days",
-            getattr(cfg, "model_2_lookback_days", DEFAULT_LOOKBACK_DAYS)))
+        self.enabled = bool(getattr(cfg, "model_2_enabled", False)) and bool(
+            asset_setting("model_2_enabled", True))
+        # Keep the legacy settings field readable, but never widen/shorten this
+        # model's specified three-calendar-day window.
+        self.lookback_days = DEFAULT_LOOKBACK_DAYS
         self.trading_days: frozenset[int] = parse_trading_days(
             asset_setting("trading_days", getattr(cfg, "trading_days", None)))
 
@@ -245,10 +213,14 @@ class Model2Strategy:
         # The same policy Model 1 answers to: an operator's MIN_RR /
         # RISK_PERCENT apply to every model in the bot, so Model 2 cannot quietly
         # trade geometry the operator has already refused.
-        self.min_rr: float = float(asset_setting("min_rr", cfg.min_rr))
-        self.risk = RiskManager(
+        configured_rr = float(asset_setting("min_rr", cfg.min_rr))
+        if not isfinite(configured_rr):
+            raise ValueError("Model 2 MIN_RR must be finite")
+        self.min_rr = max(MINIMUM_RR, configured_rr)
+        self.risk = Model2RiskManager(
             min_rr=self.min_rr,
             risk_percent=float(asset_setting("risk_percent", cfg.risk_percent)),
+            spec=getattr(asset, "spec", None),
         )
 
         # --- efficiency score (shared formula, shared weights) ------------ #
@@ -273,6 +245,13 @@ class Model2Strategy:
         self._setups: dict[str, _Setup] = {}
         self._last_state: dict[str, str] = {"buy": WAITING, "sell": WAITING}
         self._triggered: set[str] = set()
+        self._consumed: dict[str, datetime] = {}
+        self._bucket_purges: dict[datetime, list[SessionLevel]] = {}
+        self._closed_m15: list[Candle] = []
+        self._last_quote: tuple | None = None
+        self._as_of_utc: datetime | None = None
+        if tu.NY_TZ is None:
+            raise ValueError("Model 2 requires America/New_York timezone data")
 
         #: Session-extreme cache. The expensive part of building the pool is
         #: scanning M15 candles for every session on every day; those prices only
@@ -310,10 +289,9 @@ class Model2Strategy:
         without reading the database.
         """
         if as_of_ny is None:
-            m15 = self.stream.m15()
-            if not m15:
+            if self._as_of_utc is None:
                 return []
-            as_of_ny = m15[-1].t_ny
+            as_of_ny = tu.utc_to_ny(self._as_of_utc)
         return sorted(self._levels_as_of(as_of_ny),
                       key=lambda lvl: (lvl.source_date, lvl.source_session),
                       reverse=True)
@@ -322,60 +300,122 @@ class Model2Strategy:
     # Warm-up / main entry point
     # ------------------------------------------------------------------ #
     def warm(self, candles: list) -> None:
-        """Feed historical closed M1 candles without emitting signals.
-
-        Identical to Model 1's warm-up and for the same reason: the engine is
-        brought up to the live boundary with its price history in place, but no
-        historical setup is alerted. The session-level cache fills itself on the
-        first M15 close, so warm-up stays a pure stream load.
-        """
-        for candle in candles:
-            self.stream.add(candle)
+        """Replay consumption/expiry too, but never publish historical signals."""
+        for candle in sorted(candles, key=lambda c: c.t_utc):
+            self.feed(candle)
 
     def feed(self, candle: Candle) -> list[Signal]:
-        """Process one newly *closed* M1 candle; return approved signals."""
-        update = self.stream.add(candle)
-        signals: list[Signal] = []
+        """Historical M1 decision path; live scanners discard its entry signals.
 
-        # A closed M15 candle is where a session level is taken.
-        if update.m15 is not None:
-            self._on_m15_closed(update.m15)
-
-        # Every closed minute may break the far side of the purge candle.
-        signals += self._check_break(candle)
+        A later M1 range can prove a break, not its exact tick time or fill.
+        Gap entries use the open; a minute spanning both stop and trigger is
+        ambiguous and rejected. The live path uses observed bid/ask instead.
+        """
+        last = self.stream.last_m1()
+        if last is not None and candle.t_utc <= last.t_utc:
+            return []
+        self.stream.add(candle)
+        if not self.enabled:
+            return []
+        # Decide against information available at the minute's OPEN, before
+        # consuming its full range (which may include a later target hit).
+        signals = self._check_break(candle)
+        self._consume(candle, candle.t_utc + timedelta(minutes=1))
+        self._finalize_m15(candle)
+        observed = candle.t_utc + timedelta(minutes=1)
+        self._as_of_utc = max(observed, self._as_of_utc or observed)
+        self.expire_at(self._as_of_utc)
         return signals
+
+    def _finalize_m15(self, candle: Candle) -> None:
+        """Finalize on minute 14's close, without waiting for minute 15 to close.
+
+        Local to Model 2: do not change Model 1's BarsStream cadence. Partial
+        buckets cannot establish exact purge extremes; their levels stay spent.
+        """
+        start = candle.t_utc - timedelta(minutes=epoch_minute(candle.t_utc) % 15)
+        for old in list(self._bucket_purges):
+            if old < start:
+                self._bucket_purges.pop(old)
+        if epoch_minute(candle.t_utc) % 15 != 14:
+            return
+        minutes = self.stream.m1[-15:]
+        if len(minutes) != 15 or any(
+                c.t_utc != start + timedelta(minutes=i)
+                for i, c in enumerate(minutes)):
+            self._bucket_purges.pop(start, None)
+            return
+        bar = Candle(start, tu.utc_to_ny(start), minutes[0].open,
+                     max(c.high for c in minutes), min(c.low for c in minutes),
+                     minutes[-1].close, sum(c.volume for c in minutes))
+        self._closed_m15.append(bar)
+        self._on_m15_closed(bar)
+
+    def _consume(self, candle: Candle, observed_utc: datetime) -> None:
+        """Spend only breached levels, inside OR outside a trading session."""
+        start = candle.t_utc - timedelta(
+            minutes=epoch_minute(candle.t_utc) % 15,
+            seconds=candle.t_utc.second, microseconds=candle.t_utc.microsecond)
+        for level in self._levels_as_of(candle.t_ny):
+            crossed = (candle.high > level.price if level.buy_side
+                       else candle.low < level.price)
+            if crossed and level.identity not in self._consumed:
+                self._consumed[level.identity] = observed_utc
+                self._bucket_purges.setdefault(start, []).append(level)
+
+    def feed_quote(self, *, t_utc: datetime, bid: float, ask: float) -> list[Signal]:
+        """Observe an existing runner quote. Bid matches the broker OHLC chart;
+        proposed market entry is ask for BUY and bid for SELL, never the trigger.
+        """
+        self.expire_at(t_utc)
+        if not self.enabled or not all(isfinite(p) and p > 0 for p in (bid, ask)):
+            return []
+        if ask < bid or (self._as_of_utc is not None and t_utc < self._as_of_utc):
+            return []
+        key = (t_utc, bid, ask)
+        if self._last_quote is not None and (
+                key == self._last_quote or t_utc < self._last_quote[0]):
+            return []
+        self._last_quote = key
+        candle = Candle(t_utc, tu.utc_to_ny(t_utc), bid, bid, bid, bid)
+        signals = self._check_break(candle, quote_entry={"buy": ask, "sell": bid})
+        self._consume(candle, t_utc)
+        self._as_of_utc = t_utc
+        return signals
+
+    def expire_at(self, t_utc: datetime) -> None:
+        """Clock-driven expiry also works when no candles/quotes arrive."""
+        ny = tu.utc_to_ny(t_utc)
+        for direction, setup in list(self._setups.items()):
+            if not self._session_still_open(setup, ny):
+                self._expire(direction, "the originating session ended")
+
+    def consumption_state(self) -> dict:
+        """Small durable tombstone snapshot; no pending entries are restored."""
+        if self._as_of_utc is not None:
+            oldest = min(self._pool_days(tu.utc_to_ny(self._as_of_utc).date())).isoformat()
+            self._consumed = {key: stamp for key, stamp in self._consumed.items()
+                              if key.split("/", 1)[0] >= oldest}
+        return {"version": 1, "consumed": {
+            key: stamp.isoformat() for key, stamp in sorted(self._consumed.items())}}
+
+    def restore_consumption(self, state: dict) -> None:
+        if state.get("version") != 1:
+            raise ValueError("Unsupported Model 2 consumption state")
+        self._consumed.update({key: datetime.fromisoformat(stamp)
+                               for key, stamp in state["consumed"].items()})
+        self._setups.clear()
+        self._bucket_purges.clear()
 
     # ------------------------------------------------------------------ #
     # The liquidity pool
     # ------------------------------------------------------------------ #
     def _pool_days(self, today: date) -> list[date]:
-        """Today plus the ``lookback_days`` trading days before it."""
-        if self._days_key == today:
-            return self._days
-        self._days = [today] + self._previous_trading_days(today,
-                                                           self.lookback_days)
-        self._days_key = today
+        """Today, yesterday, and the day before, including weekends."""
+        if self._days_key != today:
+            self._days = [today - timedelta(days=i) for i in range(self.lookback_days)]
+            self._days_key = today
         return self._days
-
-    def _previous_trading_days(self, day: date, count: int) -> list[date]:
-        """The ``count`` most recent trading days strictly before ``day``.
-
-        Weekends are skipped rather than counted, which is what "the previous
-        three **trading** days" means: on a Monday the pool reaches back over
-        Thursday and Friday rather than into a closed Saturday.
-        """
-        out: list[date] = []
-        cursor = day
-        # A bounded walk: even with a pathological TRADING_DAYS a fortnight is
-        # more than enough to find `count` trading days.
-        for _ in range(max(count * 4, 8)):
-            cursor -= timedelta(days=1)
-            if is_trading_day(datetime.combine(cursor, _time(0, 0)),
-                              self.trading_days):
-                out.append(cursor)
-                if len(out) >= count:
-                    break
-        return out
 
     def _rebuild_level_cache(self) -> None:
         """Every session extreme with data over the pool's day window.
@@ -386,7 +426,7 @@ class Model2Strategy:
         rule in exactly one place, so the expensive part and the correct part
         cannot drift out of step.
         """
-        m15 = self.stream.m15()
+        m15 = self._closed_m15
         if not m15:
             self._level_cache = []
             return
@@ -395,9 +435,21 @@ class Model2Strategy:
         pool = self._m15_from(m15, min(days))
 
         cached: list[SessionLevel] = []
+        observed_buckets = {c.t_utc for c in pool}
         for day in days:
             day_key = day.strftime("%Y-%m-%d")
             for window in m2.MODEL_2_SESSIONS:
+                opened_at, closed_at = m2.session_bounds_ny(day, window)
+                # A warm-up starting mid-session cannot know that full range.
+                if self.stream.m1[0].t_utc > tu.ny_to_utc(opened_at):
+                    continue
+                opened_utc, closed_utc = tu.ny_to_utc(opened_at), tu.ny_to_utc(closed_at)
+                count = int((closed_utc - opened_utc).total_seconds() // 900)
+                if any(opened_utc + timedelta(minutes=15 * i) not in observed_buckets
+                       for i in range(count)):
+                    # A missing part of the session is unknown, not a smaller
+                    # high/low. UTC bucket coverage also handles repeated DST hours.
+                    continue
                 extremes = session_extremes(pool, window, day_key)
                 if extremes is None:
                     continue
@@ -432,11 +484,16 @@ class Model2Strategy:
         excluded even though :meth:`_rebuild_level_cache` has already measured
         them.
         """
-        key = len(self.stream.m15())
+        key = len(self._closed_m15)
         if key != self._level_cache_key:
             self._rebuild_level_cache()
             self._level_cache_key = key
-        return [lvl for lvl in self._level_cache if lvl.formed_at_ny <= as_of_ny]
+        days = {day.isoformat() for day in self._pool_days(as_of_ny.date())}
+        as_of_utc = tu.ny_to_utc(as_of_ny)
+        return [lvl for lvl in self._level_cache
+                if lvl.source_date in days and lvl.formed_at_ny <= as_of_ny
+                and (lvl.identity not in self._consumed
+                     or self._consumed[lvl.identity] > as_of_utc)]
 
     # ------------------------------------------------------------------ #
     # Step 1 — the purge (detected on a closed M15 candle)
@@ -446,20 +503,13 @@ class Model2Strategy:
         # 01:00, 06:00, 07:00, 11:00, 13:00, 17:00), so a 15-minute candle can
         # never straddle a boundary and its opening instant alone settles which
         # session it belongs to.
+        levels = self._bucket_purges.pop(candle.t_utc, [])
         window = m2.session_at(candle.t_ny)
-        if window is None:
-            # Outside every defined session there is no premise to build, and
-            # therefore no valid entry either.
+        if window is None or not is_trading_day(candle.t_ny, self.trading_days):
+            # Consumption was already recorded, including out-of-session bars.
             return
-
-        levels = self._levels_as_of(candle.t_ny)
-
-        # Strict comparisons: "trades above" / "trades below". A candle that
-        # merely *touches* a level leaves it resting and is not a purge.
-        buyside = [lvl for lvl in levels
-                   if lvl.buy_side and candle.high > lvl.price]
-        sellside = [lvl for lvl in levels
-                    if not lvl.buy_side and candle.low < lvl.price]
+        buyside = [lvl for lvl in levels if lvl.buy_side]
+        sellside = [lvl for lvl in levels if not lvl.buy_side]
 
         if buyside:
             self._start_setup(_DIRECTION_FOR_SIDE[BUYSIDE],
@@ -520,7 +570,8 @@ class Model2Strategy:
     # ------------------------------------------------------------------ #
     # Step 2 — the break of the purge candle (evaluated on each closed M1)
     # ------------------------------------------------------------------ #
-    def _check_break(self, candle: Candle) -> list[Signal]:
+    def _check_break(self, candle: Candle, *, quote_entry: dict | None = None
+                     ) -> list[Signal]:
         signals: list[Signal] = []
         for direction in ("buy", "sell"):
             setup = self._setups.get(direction)
@@ -548,7 +599,18 @@ class Model2Strategy:
                 self._last_state[direction] = WAITING_FOR_PURGE_CANDLE_BREAK
                 continue
 
-            signal = self._build_signal(setup, candle)
+            ambiguous = quote_entry is None and (
+                candle.low <= setup.sl_price if direction == "buy"
+                else candle.high >= setup.sl_price)
+            if ambiguous:
+                self._reject("M1 spans stop and trigger; intrabar order unknown")
+                signal = None
+            else:
+                entry = (quote_entry[direction] if quote_entry is not None else
+                         (max(candle.open, setup.trigger_price) if direction == "buy"
+                          else min(candle.open, setup.trigger_price)))
+                signal = self._build_signal(setup, candle, entry=entry,
+                                            live_quote=quote_entry is not None)
             self._setups.pop(direction, None)
             if signal is not None:
                 self._last_state[direction] = ENTRY_TRIGGERED
@@ -576,11 +638,16 @@ class Model2Strategy:
     # ------------------------------------------------------------------ #
     # Entry construction
     # ------------------------------------------------------------------ #
-    def _build_signal(self, setup: _Setup, candle: Candle) -> Signal | None:
+    def _build_signal(self, setup: _Setup, candle: Candle, *,
+                      entry: float | None = None, live_quote: bool = False
+                      ) -> Signal | None:
         direction = setup.direction
-        entry = setup.trigger_price
-        sl = setup.sl_price
+        entry = self._price(setup.trigger_price if entry is None else entry)
+        sl = self._price(setup.sl_price)
         entry_ny = candle.t_ny
+        if not all(isfinite(p) and p > 0 for p in (entry, sl)):
+            self._reject("invalid SL/TP geometry")
+            return None
 
         if not is_trading_day(entry_ny, self.trading_days):
             self._reject("not a trading day")
@@ -598,27 +665,31 @@ class Model2Strategy:
             self._reject("no session liquidity in the trade direction to target")
             return None
         target, tp = pick
+        tp = self._price(tp)
 
-        if entry <= 0 or sl <= 0 or tp <= 0:
+        if not isfinite(tp) or tp <= 0:
             self._reject("invalid SL/TP geometry")
             return None
 
         # ---- geometry, ratio and risk: Model 1's own gates ---------------- #
         risk_points, reward_points = risk_reward_points(entry, sl, tp, direction)
-        rr = compute_rr(entry, sl, tp, direction)
-        if rr <= 0:
+        # Decimal prices avoid rejecting exactly 1.50 because binary subtraction
+        # turned, for example, 0.30 / 0.20 into 1.4999999999999998.
+        prices = tuple(Decimal(str(p)) for p in (entry, sl, tp))
+        rr = float(compute_rr(*prices, direction))
+        if not all(isfinite(p) and p > 0 for p in (risk_points, reward_points, rr)):
             self._reject("invalid SL/TP geometry")
             return None
         if rr < self.min_rr:
             self._reject(f"RR below the minimum ({rr:.2f} < {self.min_rr:.2f})")
             return None
-        decision = self.risk.approve(entry, sl, tp, direction)
+        decision = self.risk.approve(*prices, direction)
         if not decision.approved:
             self._reject(decision.reason)
             return None
 
         setup_id = build_setup_id(self.asset.name, direction,
-                                  setup.purge_time_utc, candle.t_utc, None,
+                                  setup.purge_time_utc, None, None,
                                   model=MODEL_2)
         if setup_id in self._triggered:
             self._reject("duplicate setup")
@@ -677,10 +748,17 @@ class Model2Strategy:
             risk_approved=True,
             alert_only=True,
             model=MODEL_2,
-            model_meta=self._meta_json(setup, candle),
+            model_meta=self._meta_json(setup, candle, live_quote=live_quote),
         )
 
-    def _meta_json(self, setup: _Setup, candle: Candle) -> str:
+    def _price(self, value: float) -> float:
+        """Match Executor's broker-digits normalization before RR approval."""
+        spec = getattr(self.asset, "spec", None)
+        digits = int(spec.digits if spec is not None else self.asset.digits)
+        return round(float(value), digits) if digits > 0 else float(value)
+
+    def _meta_json(self, setup: _Setup, candle: Candle, *,
+                   live_quote: bool = False) -> str:
         """The Model 2 provenance payload, as a JSON string.
 
         Stored as text rather than through the ORM's JSON type so the column
@@ -701,6 +779,8 @@ class Model2Strategy:
             "purge_candle_low": setup.purge_low,
             "originating_session": setup.session_key,
             "entry_trigger_candle_ny": candle.t_ny.isoformat(),
+            "entry_trigger": setup.trigger_price,
+            "entry_basis": "live_quote" if live_quote else "historical_m1_break",
             "setup_status": TRADE_CONFIRMED,
         }, sort_keys=True)
 
