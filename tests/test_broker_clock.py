@@ -99,6 +99,179 @@ def _install(monkeypatch, fake):
 
 
 # --------------------------------------------------------------------------- #
+# Probe selection: inventory names, not assumed portable registry spellings
+# --------------------------------------------------------------------------- #
+class _InventoryMT5(_FakeMT5):
+    """Only selected inventory symbols serve data, as on a suffixed broker.
+
+    Keep the parent's deliberately permissive/incomplete symbol_info response:
+    metadata alone must not establish that a probe name exists.
+    """
+
+    def __init__(self, *, unavailable=(), **kwargs):
+        super().__init__(**kwargs)
+        self.unavailable = set(unavailable)
+        self.tick_reads = []
+        self.bar_reads = []
+
+    def symbol_select(self, symbol, enable):
+        if symbol not in self.symbols or symbol in self.unavailable:
+            return False
+        return super().symbol_select(symbol, enable)
+
+    def symbol_info_tick(self, symbol):
+        self.tick_reads.append(symbol)
+        if symbol not in self.symbols or symbol not in self.selected:
+            return None
+        return super().symbol_info_tick(symbol)
+
+    def copy_rates_from_pos(self, symbol, timeframe, pos, count):
+        self.bar_reads.append(symbol)
+        if symbol not in self.symbols or symbol not in self.selected:
+            return []
+        return super().copy_rates_from_pos(symbol, timeframe, pos, count)
+
+
+@pytest.mark.parametrize("suffix", ["", "m", ".pro"])
+@pytest.mark.parametrize("offset", [0.0, 2.0, 5.5])
+def test_probe_resolves_inventory_and_selects_before_reading(monkeypatch, suffix, offset):
+    names = ["EURUSD" + suffix, "GBPUSD" + suffix]
+    fake = _InventoryMT5(offset_hours=offset, symbols=names)
+    client = _install(monkeypatch, fake)
+
+    discovered, detail = client.discover_server_utc_offset_hours(["EURUSD", "GBPUSD"])
+
+    assert discovered == offset
+    assert "discovered from 2 symbol(s)" in detail
+    assert fake.tick_reads == names
+    assert fake.bar_reads and set(fake.bar_reads) <= set(names)
+    assert set(fake.selected) == set(names)
+
+
+@pytest.mark.parametrize("preferred", [None, ["MISSING", "NOT_OFFERED"]])
+def test_suffixed_fallback_probes_work_without_resolvable_preferred_names(monkeypatch, preferred):
+    fake = _InventoryMT5(offset_hours=3, symbols=["EURUSDm", "GBPUSDm", "XAUUSDm"])
+    client = _install(monkeypatch, fake)
+    assert client.discover_server_utc_offset_hours(preferred)[0] == 3
+    assert set(fake.tick_reads) == set(fake.symbols)
+
+
+def test_probe_names_are_exact_first_deduplicated_and_limited_after_resolution(monkeypatch):
+    fake = _InventoryMT5(offset_hours=2, symbols=["EURUSD", "EURUSDm", "GBPUSDm"])
+    client = _install(monkeypatch, fake)
+    assert client._probe_symbols(["MISSING", "EURUSD", "EURUSD", "GBPUSD"], 2) == [
+        "EURUSD", "GBPUSDm"]
+    assert fake.selected == ["EURUSD", "GBPUSDm"]
+
+
+def test_probe_resolution_uses_existing_index_aliases_and_suffixes(monkeypatch):
+    names = ["USTECm", "US500m", "US30m", "DE30m", "XAUUSDm"]
+    fake = _InventoryMT5(offset_hours=0, symbols=names)
+    client = _install(monkeypatch, fake)
+    assert client._probe_symbols(["USTEC", "US500", "US30", "GER40", "XAUUSD"], 5) == names
+
+
+def test_probe_deduplication_cannot_turn_one_symbol_into_two_clock_votes(monkeypatch):
+    fake = _InventoryMT5(offset_hours=2, symbols=["XAUUSDm"])
+    client = _install(monkeypatch, fake)
+    offset, detail = client.discover_server_utc_offset_hours(["XAUUSD", "XAUUSDm", "XAUUSD"])
+    assert offset is None
+    assert "need agreement" in detail
+    assert fake.tick_reads == ["XAUUSDm"]
+
+
+@pytest.mark.parametrize("broken_inventory", [False, True])
+def test_unavailable_inventory_does_not_trust_symbol_info(monkeypatch, broken_inventory):
+    fake = _InventoryMT5(offset_hours=2, symbols=[])
+    client = _install(monkeypatch, fake)
+    if broken_inventory:
+        def unavailable():
+            raise RuntimeError("inventory unavailable")
+        monkeypatch.setattr(client, "symbol_names", unavailable)
+    assert client.discover_server_utc_offset_hours(["EURUSD", "GBPUSD"]) == (
+        None, "no live tick from any probe symbol")
+    assert fake.selected == fake.tick_reads == fake.bar_reads == []
+
+
+def test_unselectable_probes_are_skipped_before_applying_limit(monkeypatch):
+    fake = _InventoryMT5(offset_hours=2, symbols=["EURUSDm", "GBPUSDm", "XAUUSDm"],
+                         unavailable=["EURUSDm"])
+    client = _install(monkeypatch, fake)
+    assert client._probe_symbols(["EURUSD", "GBPUSD", "XAUUSD"], 2) == ["GBPUSDm", "XAUUSDm"]
+    assert client.discover_server_utc_offset_hours(["EURUSD", "GBPUSD", "XAUUSD"])[0] == 2
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_nonpositive_probe_limit_has_no_symbol_side_effects(monkeypatch, limit):
+    fake = _InventoryMT5(offset_hours=2, symbols=["EURUSD", "GBPUSD"])
+    client = _install(monkeypatch, fake)
+    assert client._probe_symbols(["EURUSD", "GBPUSD"], limit) == []
+    assert fake.selected == []
+
+
+def test_suffixed_probes_still_require_fresh_m1_data(monkeypatch):
+    fake = _InventoryMT5(offset_hours=2, symbols=["EURUSDm", "GBPUSDm"],
+                         bar_age_minutes=60)
+    client = _install(monkeypatch, fake)
+    offset, detail = client.discover_and_publish_server_offset(["EURUSD", "GBPUSD"])
+    assert offset is None
+    assert "stale" in detail
+    assert tu.server_offset_source() == "unresolved"
+
+
+def test_suffixed_probes_that_disagree_cannot_establish_an_offset(monkeypatch):
+    fake = _InventoryMT5(offset_hours=2, symbols=["EURUSDm", "GBPUSDm"])
+    original = fake.symbol_info_tick
+
+    def skew(symbol):
+        tick = original(symbol)
+        if tick is not None and symbol == "GBPUSDm":
+            return SimpleNamespace(time=tick.time + 1800)
+        return tick
+
+    fake.symbol_info_tick = skew
+    client = _install(monkeypatch, fake)
+    assert client.discover_server_utc_offset_hours(["EURUSD", "GBPUSD"])[0] is None
+    assert fake.tick_reads == fake.symbols
+
+
+def test_canonical_index_fallback_resolves_ustec_suffix(monkeypatch):
+    fake = _InventoryMT5(offset_hours=0, symbols=["USTECm", "GBPUSDm"])
+    client = _install(monkeypatch, fake)
+    assert client.discover_server_utc_offset_hours()[0] == 0
+    assert set(fake.tick_reads) == set(fake.symbols)
+
+
+def test_symbol_selection_exception_does_not_block_other_probes(monkeypatch):
+    fake = _InventoryMT5(offset_hours=2, symbols=["EURUSDm", "GBPUSDm", "XAUUSDm"])
+    original = fake.symbol_select
+
+    def select(symbol, enable):
+        if symbol == "EURUSDm":
+            raise RuntimeError("symbol temporarily unavailable")
+        return original(symbol, enable)
+
+    fake.symbol_select = select
+    client = _install(monkeypatch, fake)
+    assert client.discover_server_utc_offset_hours(["EURUSD", "GBPUSD", "XAUUSD"])[0] == 2
+    assert set(fake.tick_reads) == {"GBPUSDm", "XAUUSDm"}
+
+
+@pytest.mark.parametrize("missing", ["ticks", "bars"])
+def test_resolved_symbols_with_missing_data_do_not_publish_an_offset(monkeypatch, missing):
+    fake = _InventoryMT5(offset_hours=2, symbols=["EURUSDm", "GBPUSDm"])
+    if missing == "ticks":
+        monkeypatch.setattr(fake, "symbol_info_tick", lambda symbol: None)
+    else:
+        monkeypatch.setattr(fake, "copy_rates_from_pos", lambda *args: None)
+    client = _install(monkeypatch, fake)
+    offset, detail = client.discover_and_publish_server_offset(["EURUSD", "GBPUSD"])
+    assert offset is None
+    assert ("no live tick" if missing == "ticks" else "stale") in detail
+    assert tu.server_offset_source() == "unresolved"
+
+
+# --------------------------------------------------------------------------- #
 # The measurement itself
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("offset", [2.0, 3.0, 1.0, 0.0, -4.0, -5.0, 5.5])

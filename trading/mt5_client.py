@@ -17,6 +17,7 @@ from typing import Any
 from config import Settings
 
 from . import time_utils as tu
+from .symbol_resolver import resolve
 
 try:  # pragma: no cover - importable only where the package is installed
     import MetaTrader5 as _mt5  # type: ignore
@@ -317,18 +318,47 @@ class MT5Client:
         }
 
     def _probe_symbols(self, preferred: list[str] | None, limit: int) -> list[str]:
-        """Symbols to read the broker clock from, best first.
+        """Resolve and select distinct inventory symbols before clock discovery.
 
-        Prefers the caller's own traded symbols (they are selected in Market
-        Watch, and 24/5 instruments are the ones most likely to be quoting), then
-        falls back to a few continuously-quoted majors.
+        Startup runs before instrument preparation, so preferred names can still
+        be portable registry names. The inventory, not symbol_info metadata, is
+        authoritative here; the shared resolver supplies suffix/alias ranking.
         """
-        out: list[str] = [s for s in (preferred or []) if s]
-        available = set(self.symbol_names())
-        for candidate in ("EURUSD", "USDCAD", "XAUUSD", "US100", "GBPUSD"):
-            if candidate in available and candidate not in out:
-                out.append(candidate)
-        return out[:limit]
+        if limit <= 0:
+            return []
+        try:
+            names = self.symbol_names()
+            available = set(names)
+        except Exception:
+            return []
+        if not available:
+            return []
+
+        class Inventory:
+            def symbol_names(self):
+                return names
+
+            def symbol_info(self, symbol):
+                # Only membership is needed for resolve's exact-match fast path.
+                # Do not fetch/convert contract metadata just to choose a probe.
+                return {"name": symbol} if symbol in available else None
+
+        inventory = Inventory()
+        out: list[str] = []
+        for requested in list(preferred or []) + [
+                "EURUSD", "USDCAD", "XAUUSD", "US100", "GBPUSD", "USTEC"]:
+            symbol = resolve(inventory, requested)
+            if symbol is None or symbol in out:
+                continue
+            try:
+                if not self.ensure_symbol(symbol):
+                    continue
+            except Exception:
+                continue
+            out.append(symbol)
+            if len(out) >= limit:
+                break
+        return out
 
     def discover_server_utc_offset_hours(
             self, preferred_symbols: list[str] | None = None,
