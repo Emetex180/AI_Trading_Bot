@@ -29,6 +29,10 @@ import re
 import secrets
 import threading
 import time
+import json
+import os
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from collections import defaultdict, deque
 from datetime import timedelta
 from functools import wraps
@@ -582,7 +586,42 @@ def _registration_throttle():
 def register():
     if current_user() is not None:
         return redirect(_landing_for(current_user()))
-    return render_template("register.html")
+    return render_template(
+        "register.html",
+        turnstile_site_key=os.environ.get("TURNSTILE_SITE_KEY", "").strip(),
+    )
+
+
+def _verify_turnstile(token: str, remote_ip: str | None = None) -> bool:
+    """Verify a Cloudflare Turnstile response with Cloudflare."""
+    secret = os.environ.get("TURNSTILE_SECRET_KEY", "").strip()
+    if not secret or not token:
+        return False
+
+    data = {
+        "secret": secret,
+        "response": token,
+    }
+    if remote_ip:
+        data["remoteip"] = remote_ip
+
+    try:
+        req = Request(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data=urlencode(data).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urlopen(req, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+        return (
+            result.get("success") is True
+            and result.get("hostname") in {"3rader.com", "www.3rader.com"}
+        )
+    except Exception:
+        log.exception("Cloudflare Turnstile verification failed")
+        return False
 
 
 @auth_bp.post("/register")
@@ -598,7 +637,12 @@ def register_post():
     }
 
     def fail(message: str, code: int = 400):
-        return render_template("register.html", error=message, form=form), code
+        return render_template(
+            "register.html",
+            error=message,
+            form=form,
+            turnstile_site_key=os.environ.get("TURNSTILE_SITE_KEY", "").strip(),
+        ), code
 
     if not csrf_ok():
         return fail("Your session expired. Reload the page and try again.", 400)
@@ -626,6 +670,13 @@ def register_post():
         return fail(problem)
     if password != confirm:
         return fail("Those passwords do not match.")
+
+    # Verify Cloudflare Turnstile before creating the account.
+    token = request.form.get("cf-turnstile-response", "")
+    if not _verify_turnstile(token, request.remote_addr):
+        return fail(
+            "Please complete the security check and try again.", 400
+        )
 
     if repo.login_identifier_exists(form["email"]):
         # This one *does* confirm the address is taken, which is a deliberate
