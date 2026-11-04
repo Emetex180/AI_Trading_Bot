@@ -30,7 +30,7 @@ import requests  # type: ignore
 
 from config import Settings, get_settings
 from trading.liquidity import LEVEL_LABELS
-from trading.model2 import MODEL_2, is_model_2, model_meta
+from trading.model2 import is_model_2, model_label, model_meta
 from trading.model2_sessions import MODEL_2_SESSION_INDEX
 from trading.risk_manager import risk_reward_points
 from trading.sessions import SESSION_INDEX
@@ -136,7 +136,7 @@ def _level_label(kind: str) -> str:
 
 
 def _model2_sequence(signal: Signal) -> list[str]:
-    """A Model 2 alert's purge → break lineage, in place of Model 1's.
+    """A Model 2 alert's purge → confirmation lineage, in place of Model 1's.
 
     Reads the model's own provenance out of ``model_meta`` — the level that was
     taken, which session and day it came from, and the purge candle's extremes —
@@ -157,14 +157,19 @@ def _model2_sequence(signal: Signal) -> list[str]:
     low = meta.get("purge_candle_low")
     timeframe = meta.get("timeframe") or "M15"
 
-    # The boundary that fills the trade is the far side of the purge candle from
-    # the stop; naming it makes the entry condition auditable after the fact.
+    # Retain the truthful description when formatting legacy stored signals.
     if signal.direction == "sell":
         trigger = f"trades below {_price(low, d)}"
         anchor = f"purge candle high {_price(high, d)}"
     else:
         trigger = f"trades above {_price(high, d)}"
         anchor = f"purge candle low {_price(low, d)}"
+    if meta.get("cisd_timeframe") == "M5":
+        trigger = f"{'bullish' if signal.direction == 'buy' else 'bearish'} M5 CISD"
+        confirmed_at = meta.get("cisd_confirmed_at_ny")
+        if confirmed_at:
+            from datetime import datetime
+            trigger += f" (closed {_hm(datetime.fromisoformat(confirmed_at))} NY)"
 
     return [
         "",
@@ -207,6 +212,7 @@ def format_signal_alert(signal: Signal) -> str:
 
     lines = [
         f"{emoji} — {signal.asset}",
+        f"Model:               {model_label(signal).replace('_', ' ')}",
         f"Symbol:              {signal.asset}",
         f"Direction:           {signal.direction.upper()}",
         f"Session:             {_session_with_hours(signal.session_primary) if signal.session_primary else ', '.join(_session_with_hours(k) for k in signal.session_keys) or '-'}",
@@ -233,12 +239,7 @@ def format_signal_alert(signal: Signal) -> str:
         return f"  {label:<19}{value}"
 
     if is_model_2(signal):
-        # Model 2 has no CISD and no FVG, so it gets its own sequence block
-        # rather than three lines describing steps the model never took. A
-        # "Model:" header is added for the same reason: the reader has to be able
-        # to tell which engine produced what is in front of them. Model 1's alert
-        # takes the branch below and is unchanged, header and all.
-        lines.insert(3, f"Model:               {MODEL_2}")
+        # Model 2 has an M15 purge and M5 CISD, but no FVG step.
         lines += _model2_sequence(signal)
     else:
         lines += [

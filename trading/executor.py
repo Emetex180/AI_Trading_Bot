@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from config import Settings, auto_trading_enabled, get_settings
+from config import Settings, auto_trading_enabled, get_settings, model_enabled
 
 from . import time_utils as tu
 from .risk_manager import RiskManager
@@ -78,8 +78,9 @@ class Executor:
 
     def __init__(self, settings: Settings | None = None,
                  risk_manager: RiskManager | None = None,
-                 spec: SymbolSpec | None = None):
+                 spec: SymbolSpec | None = None, asset=None):
         self.settings = settings or get_settings()
+        self.asset = asset
         self.spec = spec
         self.risk = risk_manager or RiskManager(settings=self.settings, spec=spec)
 
@@ -105,6 +106,8 @@ class Executor:
             return self._skipped(signal, symbol, 0.0, "signal_not_approved", now)
         if not signal.risk_approved:
             return self._skipped(signal, symbol, 0.0, "signal_not_risk_approved", now)
+        if not model_enabled(self.settings, getattr(signal, "model", "MODEL_1"), self.asset):
+            return self._skipped(signal, symbol, 0.0, "model_disabled", now)
 
         # ---- Gate 3: risk manager re-check (tamper guard on SL/TP/entry) -- #
         decision = self.risk.approve(signal.entry, signal.sl, signal.tp, signal.direction)
@@ -130,6 +133,12 @@ class Executor:
         Subclasses / tests may stub this to simulate fills. A real MT5 order is
         only ever requested from here.
         """
+        # Re-read immediately before sending: the dashboard can disarm while
+        # risk sizing is running. All models share this last safety boundary.
+        if not auto_trading_enabled(self.settings):
+            return self._skipped(signal, symbol, lots, "auto_trading_disabled", now)
+        if not model_enabled(self.settings, getattr(signal, "model", "MODEL_1"), self.asset):
+            return self._skipped(signal, symbol, lots, "model_disabled", now)
         if not symbol:
             return self._result(signal, None, lots, EXECUTION_FAILED,
                                 "no_broker_symbol", now)

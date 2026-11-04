@@ -124,6 +124,28 @@ def auto_trading_enabled(settings: Any) -> bool:
     return bool(override)
 
 
+def model_enabled(settings: Any, model: str = "MODEL_1", asset: Any = None) -> bool:
+    """Independent model eligibility, never an override of the master gate.
+
+    Models use the existing MODEL_<N>_ENABLED naming convention. Model 1
+    preserves its historical default (on); unconfigured future models fail
+    closed. A per-asset override may opt out, but cannot override global off.
+    """
+    def flag(value):
+        return value.strip().lower() in {"1", "true", "yes", "on"} if isinstance(value, str) else bool(value)
+
+    key = (model or "MODEL_1").lower() + "_enabled"
+    enabled = flag(getattr(settings, key, key == "model_1_enabled"))
+    if asset is not None:
+        # Resolve only model enablement here: do not change Model 1's strategy
+        # override semantics. Either the registry or an env opt-out wins.
+        env_key = f"ASSET_{asset.name.upper()}_{key.upper()}"
+        env_value = getattr(settings, "asset_env", {}).get(env_key, True)
+        enabled = (enabled and asset.enabled and flag(env_value)
+                   and flag(asset.settings_value(key, True, settings)))
+    return enabled
+
+
 def bare_host(value: str) -> str:
     """``host[:port]`` reduced to a lower-case hostname.
 
@@ -271,7 +293,11 @@ class Settings:
     efficiency_weight_liquidity: float = 0.3
     efficiency_weight_distance: float = 0.2
 
-    # --- Model 2: session-liquidity purge (15M) ------------------------------
+    # Model enablement is separate from the master automatic-execution switch.
+    # Model 1 stays enabled by default; disabling it does not change its rules.
+    model_1_enabled: bool = True
+
+    # --- Model 2: session-liquidity purge (15M) + CISD (5M) -------------------
     # A second, independent model that runs alongside the ICT sequence above
     # rather than replacing it (see ``trading.model2``). Off by default: enabling
     # it adds signals, so it is an operator's deliberate choice, not something a
@@ -530,6 +556,7 @@ def _build_settings() -> Settings:
         efficiency_weight_liquidity=_env_float("EFFICIENCY_WEIGHT_LIQUIDITY", 0.3),
         efficiency_weight_distance=_env_float("EFFICIENCY_WEIGHT_DISTANCE", 0.2),
         # --- Model 2: session-liquidity purge ------------------------------ #
+        model_1_enabled=_env_bool("MODEL_1_ENABLED", default=True),
         model_2_enabled=_env_bool("MODEL_2_ENABLED", default=False),
         model_2_lookback_days=_env_int("MODEL_2_LOOKBACK_DAYS", 3),
         # --- Web platform -------------------------------------------------- #

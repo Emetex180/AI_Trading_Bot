@@ -9,9 +9,9 @@
     <p>What the engine is doing right now, and everything it has recorded.</p>
   </div>
   <div class="page-actions">
-    <span class="pill {{ 'tone-danger' if auto_trading else 'tone-success' }}"
+    <span class="pill {{ 'tone-warning' if trading_control.auto_trading is none else ('tone-danger' if trading_control.auto_trading else 'tone-success') }}"
           id="nav-auto-mirror">
-      <span class="dot"></span>{{ 'AUTO-TRADING ON' if auto_trading else 'ALERT ONLY' }}
+      <span class="dot"></span>{{ 'AUTO-TRADING UNKNOWN' if trading_control.auto_trading is none else ('AUTO-TRADING ON' if trading_control.auto_trading else 'ALERT ONLY') }}
     </span>
   </div>
 </div>
@@ -122,7 +122,8 @@
       <div class="card-header">
         <span>Recent executions</span>
         <span class="card-header-note">
-          {%- if auto_trading -%}live trading enabled
+          {%- if trading_control.auto_trading is none -%}execution state unknown
+          {%- elif trading_control.auto_trading -%}live trading enabled
           {%- else -%}alert only — nothing is sent
           {%- endif -%}
         </span>

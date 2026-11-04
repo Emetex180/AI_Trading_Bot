@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from config import Settings, get_settings
+from config import Settings, get_settings, model_enabled
 from trading.asset_manager import Asset
 from trading.bars import Candle
 from trading.executor import Executor
@@ -71,7 +71,8 @@ class AssetScanner:
                                             log=self._strategy_log)
         self.analyzer = analyzer or AiAnalyzer(settings=cfg)
         self.notifier = notifier or TelegramNotifier(settings=cfg)
-        self.executor = executor or Executor(settings=cfg, spec=getattr(asset, "spec", None))
+        self.executor = executor or Executor(settings=cfg, spec=getattr(asset, "spec", None),
+                                             asset=asset)
         self.dedupe = dedupe or RecentSignals()
         self.processed = 0
 
@@ -115,6 +116,8 @@ class AssetScanner:
     def _on_signal(self, signal: Signal) -> bool:
         """Route one *approved* signal through the pipeline. Returns True if new."""
         if signal.status != "APPROVED":
+            return False
+        if not model_enabled(self.settings, getattr(signal, "model", "MODEL_1"), self.asset):
             return False
         if self.dedupe.is_duplicate(signal):
             return False

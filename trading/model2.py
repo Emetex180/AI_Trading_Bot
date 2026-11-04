@@ -1,14 +1,15 @@
-"""Model 2: three-calendar-day session liquidity -> M15 purge -> opposite break.
+"""Model 2: three-calendar-day session liquidity -> M15 purge -> M5 CISD.
 
 Only completed sessions from today and the two preceding NY calendar days are
 eligible. Every breach consumes that session extreme, even outside a session.
-The exact, completed M15 purge candle supplies the immutable trigger and stop;
-the pending entry expires at the originating session's close. No CISD or FVG.
+The completed M15 purge candle supplies the immutable stop reference. Only full
+M5 candles opening after that purge closes can confirm the shared wick/reclaim
+CISD definition. No opposite-side break or FVG is required.
 
-Live scanners use the existing runner's bid/ask observations for price breaks
-and proposed fills. Historical replay uses later M1 ranges, accounts for gaps,
-and rejects minutes whose stop/trigger sequence is unknowable. Neither path
-requires a close beyond the trigger. Historical fills are not tick executions.
+Historical replay enters at the confirmed M5 close (a zero-spread bar-close
+simulation, not a tick fill). Live scanners wait for a fresh bid/ask observation
+and revalidate geometry at ask for BUY / bid for SELL. Neither path carries a
+setup past its originating session, a stop breach or the CISD waiting window.
 
 TP is the nearest unconsumed session extreme on the correct side of the proposed
 entry, chosen BEFORE RR validation (>= 1.50, or a stricter configured minimum).
@@ -20,11 +21,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from math import isfinite
 from typing import Callable
 
-from config import Settings, get_settings
+from config import Settings, get_settings, model_enabled
+
+from . import cisd as cisd_mod
 
 from . import model2_sessions as m2
 from .asset_manager import Asset
@@ -41,13 +44,10 @@ from .stream import BarsStream
 # --------------------------------------------------------------------------- #
 # Identity
 # --------------------------------------------------------------------------- #
-#: The only timeframe Model 2 decides on. The purge candle is an M15 candle and
-#: nothing else about the model is timeframe-relative.
+#: Purge and confirmation timeframes are fixed, independent of Model 1 settings.
 TIMEFRAME = "M15"
-
-#: Historical entry resolution. Live scanners use existing bid/ask quote polls;
-#: M1 ranges prove historical breaks but not exact tick times or live fills.
-TRIGGER_TIMEFRAME = "M1"
+CISD_TIMEFRAME = "M5"
+TRIGGER_TIMEFRAME = CISD_TIMEFRAME
 
 #: Length of the purge candle, used to place the instant it finishes forming.
 M15_MINUTES = 15
@@ -61,7 +61,8 @@ LIQUIDITY_PURGED = "LIQUIDITY_PURGED"
 #: never waits for a further candle to qualify it. Kept as its own state so a
 #: reader of the dashboard sees the same lifecycle this docstring describes.
 PURGE_CANDLE_IDENTIFIED = "PURGE_CANDLE_IDENTIFIED"
-WAITING_FOR_PURGE_CANDLE_BREAK = "WAITING_FOR_PURGE_CANDLE_BREAK"
+WAITING_FOR_CISD = "WAITING_FOR_CISD"
+CISD_CONFIRMED = "CISD_CONFIRMED"
 ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
 EXPIRED = "EXPIRED"
 INVALIDATED = "INVALIDATED"
@@ -157,17 +158,14 @@ class _Setup:
     purge_close_utc: datetime      # when the purge candle finished forming
     session_key: str               # the session the purge occurred in
     session_date: date             # ...and the NY day it ran on
+    stop_price: float             # buffered, tick-aligned M15 anchor; immutable
+    confirmation: Candle | None = None
     state: str = PURGE_CANDLE_IDENTIFIED
 
     @property
-    def trigger_price(self) -> float:
-        """The price that must be traded through for this setup to fill."""
-        return self.purge_low if self.direction == "sell" else self.purge_high
-
-    @property
     def sl_price(self) -> float:
-        """The far side of the purge candle — the stop-loss reference."""
-        return self.purge_high if self.direction == "sell" else self.purge_low
+        """Stop beyond the original M15 extreme, never the CISD candle."""
+        return self.stop_price
 
 
 # --------------------------------------------------------------------------- #
@@ -187,11 +185,12 @@ class Model2RiskManager(RiskManager):
 
 
 class Model2Strategy:
-    """Per-asset Model 2 engine: session liquidity → purge → break → entry."""
+    """Per-asset Model 2 engine: session liquidity → purge → CISD → entry."""
 
     def __init__(self, asset: Asset, *, settings: Settings | None = None,
                  server_offset_hours: float | None = None,
-                 log: Callable[[str], None] | None = None):
+                 log: Callable[[str], None] | None = None,
+                 quote_entries: bool = False):
         cfg = settings or get_settings()
         self.asset = asset
         self.stream = BarsStream(server_offset_hours=server_offset_hours)
@@ -201,8 +200,12 @@ class Model2Strategy:
             return asset.settings_value(key, fallback, cfg)
 
         # --- liquidity pool ---------------------------------------------- #
-        self.enabled = bool(getattr(cfg, "model_2_enabled", False)) and bool(
-            asset_setting("model_2_enabled", True))
+        self.enabled = model_enabled(cfg, MODEL_2, asset)
+        self.quote_entries = quote_entries
+        self.max_cisd_candles = max(1, int(asset_setting("max_cisd_candles", cfg.max_cisd_candles)))
+        self.sl_min_offset_ticks = max(1.0, float(asset_setting(
+            "sl_min_offset_ticks", cfg.sl_min_offset_ticks)))
+        self.quote_max_age = max(5.0, 2 * cfg.scanner_poll_interval_ms / 1000.0)
         # Keep the legacy settings field readable, but never widen/shorten this
         # model's specified three-calendar-day window.
         self.lookback_days = DEFAULT_LOOKBACK_DAYS
@@ -301,28 +304,28 @@ class Model2Strategy:
     # ------------------------------------------------------------------ #
     def warm(self, candles: list) -> None:
         """Replay consumption/expiry too, but never publish historical signals."""
-        for candle in sorted(candles, key=lambda c: c.t_utc):
-            self.feed(candle)
+        live = self.quote_entries
+        self.quote_entries = False
+        try:
+            for candle in sorted(candles, key=lambda c: c.t_utc):
+                self.feed(candle)
+        finally:
+            self.quote_entries = live
 
     def feed(self, candle: Candle) -> list[Signal]:
-        """Historical M1 decision path; live scanners discard its entry signals.
-
-        A later M1 range can prove a break, not its exact tick time or fill.
-        Gap entries use the open; a minute spanning both stop and trigger is
-        ambiguous and rejected. The live path uses observed bid/ask instead.
-        """
+        """Advance only closed M1 information; confirm at the actual M5 close."""
         last = self.stream.last_m1()
         if last is not None and candle.t_utc <= last.t_utc:
             return []
         self.stream.add(candle)
         if not self.enabled:
             return []
-        # Decide against information available at the minute's OPEN, before
-        # consuming its full range (which may include a later target hit).
-        signals = self._check_break(candle)
-        self._consume(candle, candle.t_utc + timedelta(minutes=1))
-        self._finalize_m15(candle)
         observed = candle.t_utc + timedelta(minutes=1)
+        # Stops and pool consumption during confirmation are known before entry.
+        self._invalidate_stops(candle)
+        self._consume(candle, observed)
+        self._finalize_m15(candle)
+        signals = self._confirm_m5(candle)
         self._as_of_utc = max(observed, self._as_of_utc or observed)
         self.expire_at(self._as_of_utc)
         return signals
@@ -378,8 +381,20 @@ class Model2Strategy:
             return []
         self._last_quote = key
         candle = Candle(t_utc, tu.utc_to_ny(t_utc), bid, bid, bid, bid)
-        signals = self._check_break(candle, quote_entry={"buy": ask, "sell": bid})
+        self._invalidate_stops(Candle(t_utc, candle.t_ny, bid, ask, bid, bid))
         self._consume(candle, t_utc)
+        signals = []
+        for direction, setup in list(self._setups.items()):
+            if setup.confirmation is None:
+                continue
+            confirmed_at = setup.confirmation.t_utc + timedelta(minutes=5)
+            if not 0 <= (t_utc - confirmed_at).total_seconds() <= self.quote_max_age:
+                continue
+            signal = self._finish_entry(setup, candle,
+                                        ask if direction == "buy" else bid,
+                                        live_quote=True)
+            if signal is not None:
+                signals.append(signal)
         self._as_of_utc = t_utc
         return signals
 
@@ -389,6 +404,19 @@ class Model2Strategy:
         for direction, setup in list(self._setups.items()):
             if not self._session_still_open(setup, ny):
                 self._expire(direction, "the originating session ended")
+            elif setup.confirmation is not None:
+                closed = setup.confirmation.t_utc + timedelta(minutes=5)
+                if (t_utc - closed).total_seconds() > self.quote_max_age:
+                    self._expire(direction, "no fresh quote after M5 CISD")
+            else:
+                deadline = setup.purge_close_utc + timedelta(minutes=5 * self.max_cisd_candles)
+                # The runner checks the clock BEFORE polling newly closed bars.
+                # Give the final eligible M5 close its normal quote-freshness
+                # budget to arrive, but never accept a candle after the deadline.
+                processed_deadline = self._as_of_utc is not None and self._as_of_utc >= deadline
+                if t_utc >= deadline and (processed_deadline or
+                        (t_utc - deadline).total_seconds() > self.quote_max_age):
+                    self._expire(direction, "no M5 CISD within the waiting window")
 
     def consumption_state(self) -> dict:
         """Small durable tombstone snapshot; no pending entries are restored."""
@@ -562,62 +590,93 @@ class Model2Strategy:
             purge_close_utc=candle.t_utc + timedelta(minutes=M15_MINUTES),
             session_key=window.key,
             session_date=candle.t_ny.date(),
+            stop_price=self._stop_price(candle, direction),
         )
         self._setups[direction] = setup
         self._last_state[direction] = PURGE_CANDLE_IDENTIFIED
         self._log_setup_block(setup, window)
 
     # ------------------------------------------------------------------ #
-    # Step 2 — the break of the purge candle (evaluated on each closed M1)
+    # Step 2 — closed M5 CISD, using the unchanged shared reclaim detector
     # ------------------------------------------------------------------ #
-    def _check_break(self, candle: Candle, *, quote_entry: dict | None = None
-                     ) -> list[Signal]:
-        signals: list[Signal] = []
-        for direction in ("buy", "sell"):
-            setup = self._setups.get(direction)
-            if setup is None:
-                continue
-
-            # The purge candle is only identified once it has *closed*, so its
-            # far side can only be broken afterwards. Inside the purge candle the
-            # condition is arithmetically impossible anyway — an M1 low can never
-            # undercut the low of the M15 candle containing it — but stating it
-            # keeps the rule explicit and keeps a mid-candle re-feed from being
-            # read as a trigger.
+    def _invalidate_stops(self, candle: Candle) -> None:
+        for direction, setup in list(self._setups.items()):
             if candle.t_utc < setup.purge_close_utc:
                 continue
-
-            if not self._session_still_open(setup, candle.t_ny):
-                self._expire(direction, "the session it was purged in ended "
-                                        "before the purge candle was broken")
-                continue
-
-            triggered = (candle.low < setup.purge_low if direction == "sell"
-                         else candle.high > setup.purge_high)
-            if not triggered:
-                setup.state = WAITING_FOR_PURGE_CANDLE_BREAK
-                self._last_state[direction] = WAITING_FOR_PURGE_CANDLE_BREAK
-                continue
-
-            ambiguous = quote_entry is None and (
-                candle.low <= setup.sl_price if direction == "buy"
-                else candle.high >= setup.sl_price)
-            if ambiguous:
-                self._reject("M1 spans stop and trigger; intrabar order unknown")
-                signal = None
-            else:
-                entry = (quote_entry[direction] if quote_entry is not None else
-                         (max(candle.open, setup.trigger_price) if direction == "buy"
-                          else min(candle.open, setup.trigger_price)))
-                signal = self._build_signal(setup, candle, entry=entry,
-                                            live_quote=quote_entry is not None)
-            self._setups.pop(direction, None)
-            if signal is not None:
-                self._last_state[direction] = ENTRY_TRIGGERED
-                signals.append(signal)
-            else:
+            hit = (candle.low <= setup.sl_price if direction == "buy"
+                   else candle.high >= setup.sl_price)
+            if hit:
+                self._setups.pop(direction)
                 self._last_state[direction] = INVALIDATED
+                self._reject("M15-anchored stop breached before entry")
+
+    def _confirm_m5(self, candle: Candle) -> list[Signal]:
+        if epoch_minute(candle.t_utc) % 5 != 4:
+            return []
+        minutes = self.stream.m1[-5:]
+        start = candle.t_utc - timedelta(minutes=4)
+        # A partial aggregate is not a confirmed candle, including after gaps.
+        if len(minutes) != 5 or any(
+                c.t_utc != start + timedelta(minutes=i)
+                for i, c in enumerate(minutes)):
+            return []
+        bar = Candle(start, tu.utc_to_ny(start), minutes[0].open,
+                     max(c.high for c in minutes), min(c.low for c in minutes),
+                     minutes[-1].close, sum(c.volume for c in minutes))
+        closed = candle.t_utc + timedelta(minutes=1)
+        signals = []
+        for direction, setup in list(self._setups.items()):
+            if setup.confirmation is not None or start < setup.purge_close_utc:
+                continue
+            if (not self._session_still_open(setup, tu.utc_to_ny(closed))
+                    or closed > setup.purge_close_utc + timedelta(minutes=5 * self.max_cisd_candles)):
+                self._expire(direction, "session or M5 CISD waiting window ended")
+                continue
+            setup.state = WAITING_FOR_CISD
+            confirmed = cisd_mod.confirm(
+                [bar], setup.level.price, direction,
+                after_time_utc=setup.purge_close_utc,
+                params=cisd_mod.CISDParams(max_candles=1))
+            if confirmed is None:
+                continue
+            setup.confirmation = bar
+            setup.state = CISD_CONFIRMED
+            self._log(f"{direction.upper()} M5 CISD confirmed at "
+                      f"{tu.format_ny_stamp(tu.utc_to_ny(closed))} NY")
+            if not self.quote_entries:
+                observation = Candle(closed, tu.utc_to_ny(closed), bar.close,
+                                     bar.close, bar.close, bar.close)
+                signal = self._finish_entry(setup, observation, bar.close)
+                if signal is not None:
+                    signals.append(signal)
         return signals
+
+    def _finish_entry(self, setup: _Setup, candle: Candle, entry: float, *,
+                      live_quote: bool = False) -> Signal | None:
+        signal = self._build_signal(setup, candle, entry=entry, live_quote=live_quote)
+        self._setups.pop(setup.direction, None)
+        self._last_state[setup.direction] = ENTRY_TRIGGERED if signal else INVALIDATED
+        return signal
+
+    def _stop_price(self, candle: Candle, direction: str) -> float:
+        """At least one tick beyond M15, using the existing offset setting.
+
+        Round outward onto the broker tick grid; registry digits are the same
+        offline fallback Model 1 uses. Unknown precision cannot invent a stop.
+        """
+        spec = getattr(self.asset, "spec", None)
+        tick = float(getattr(spec, "tick_size", 0.0) or 0.0)
+        digits = int(spec.digits if spec is not None else self.asset.digits)
+        if tick <= 0 and digits > 0:
+            tick = 10.0 ** -digits
+        if not isfinite(tick) or tick <= 0:
+            return float("nan")
+        step = Decimal(str(tick))
+        offset = Decimal(str(self.sl_min_offset_ticks)).to_integral_value(rounding=ROUND_CEILING)
+        anchor = Decimal(str(candle.low if direction == "buy" else candle.high)) / step
+        value = ((anchor.to_integral_value(rounding=ROUND_FLOOR) - offset) if direction == "buy"
+                 else (anchor.to_integral_value(rounding=ROUND_CEILING) + offset)) * step
+        return self._price(float(value))
 
     def _session_still_open(self, setup: _Setup, ny_dt: datetime) -> bool:
         """Is ``ny_dt`` inside the very session the purge happened in?
@@ -642,10 +701,13 @@ class Model2Strategy:
                       entry: float | None = None, live_quote: bool = False
                       ) -> Signal | None:
         direction = setup.direction
-        entry = self._price(setup.trigger_price if entry is None else entry)
+        if setup.confirmation is None or not self._session_still_open(setup, candle.t_ny):
+            return None
+        entry = self._price(setup.confirmation.close if entry is None else entry)
         sl = self._price(setup.sl_price)
         entry_ny = candle.t_ny
-        if not all(isfinite(p) and p > 0 for p in (entry, sl)):
+        if (not all(isfinite(p) and p > 0 for p in (entry, sl))
+                or not (sl < setup.purge_low if direction == "buy" else sl > setup.purge_high)):
             self._reject("invalid SL/TP geometry")
             return None
 
@@ -725,14 +787,11 @@ class Model2Strategy:
             liquidity_price=setup.level.price,
             purge_grade=setup.level.as_level().grade,
             purge_time_ny=setup.purge_time_ny,
-            # Model 2 has no CISD and no FVG. The CISD field carries the
-            # timeframe the purge itself was detected on — the only confirmation
-            # this model has — and the FVG columns are left at their defaults
-            # rather than filled with something that did not happen, so neither
-            # the alert nor the database claims a step the model does not take.
-            cisd_tf=TIMEFRAME,
-            cisd_confirm_time_ny=setup.purge_time_ny,
-            structure_extreme_price=sl,
+            # M5 confirms; the immutable M15 candle still supplies the stop.
+            # As with Model 1, this field labels the confirming candle's OPEN.
+            cisd_tf=CISD_TIMEFRAME,
+            cisd_confirm_time_ny=setup.confirmation.t_ny,
+            structure_extreme_price=(setup.purge_low if direction == "buy" else setup.purge_high),
             structure_time_ny=setup.purge_time_ny,
             target_kind=target.kind,
             target_price=target.price,
@@ -779,8 +838,12 @@ class Model2Strategy:
             "purge_candle_low": setup.purge_low,
             "originating_session": setup.session_key,
             "entry_trigger_candle_ny": candle.t_ny.isoformat(),
-            "entry_trigger": setup.trigger_price,
-            "entry_basis": "live_quote" if live_quote else "historical_m1_break",
+            "entry_trigger": "M5_CISD",
+            "cisd_timeframe": CISD_TIMEFRAME,
+            "cisd_candle_time_ny": setup.confirmation.t_ny.isoformat(),
+            "cisd_confirmed_at_ny": tu.utc_to_ny(
+                setup.confirmation.t_utc + timedelta(minutes=5)).isoformat(),
+            "entry_basis": "live_quote" if live_quote else "historical_m5_close",
             "setup_status": TRADE_CONFIRMED,
         }, sort_keys=True)
 
@@ -823,8 +886,8 @@ class Model2Strategy:
             f"  M15 purge candle: {tu.format_ny_stamp(setup.purge_time_ny)} NY  "
             f"H {self._fmt(setup.purge_high)} / L {self._fmt(setup.purge_low)}\n"
             f"  Session: {window.label}\n"
-            f"  Expected: {setup.direction.upper()} on a break of "
-            f"{self._fmt(setup.trigger_price)} (SL {self._fmt(setup.sl_price)})")
+            f"  Expected: {setup.direction.upper()} after closed M5 CISD "
+            f"(M15-anchored SL {self._fmt(setup.sl_price)})")
 
     def _log_entry_block(self, setup: _Setup, candle: Candle, entry: float,
                          sl: float, tp: float, target: Level, rr: float,
@@ -866,7 +929,7 @@ __all__ = [
     "MODEL_1", "MODEL_2", "TIMEFRAME", "TRIGGER_TIMEFRAME", "Model2Strategy",
     "SessionLevel",
     "WAITING", "LIQUIDITY_PURGED", "PURGE_CANDLE_IDENTIFIED",
-    "WAITING_FOR_PURGE_CANDLE_BREAK", "ENTRY_TRIGGERED", "EXPIRED",
+    "WAITING_FOR_CISD", "CISD_CONFIRMED", "CISD_TIMEFRAME", "ENTRY_TRIGGERED", "EXPIRED",
     "INVALIDATED", "TRADE_CONFIRMED", "BUYSIDE", "SELLSIDE",
     "is_model_2", "model_label", "model_meta",
 ]

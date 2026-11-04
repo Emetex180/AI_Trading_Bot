@@ -2,7 +2,8 @@
 
 The runner opts into live_quotes: candle replay advances consumption and setup
 state without executing historical signals; its existing quote poll authorizes
-live entries. Standalone/offline scanners retain M1 signal evaluation.
+live entries after a closed M5 CISD. Standalone/offline scanners evaluate the
+same confirmation from their closed M1 input, with fills at the M5 close.
 
 Consumption tombstones are snapshots in the existing SystemEvent table, keyed
 by asset and broker symbol. They are committed before signals are handled, and
@@ -59,7 +60,8 @@ class Model2Scanner(AssetScanner):
         cfg = settings or get_settings()
         default_executor = kwargs.get("executor") is None
         if default_executor:
-            kwargs["executor"] = _Model2Executor(settings=cfg, spec=getattr(asset, "spec", None))
+            kwargs["executor"] = _Model2Executor(settings=cfg, spec=getattr(asset, "spec", None),
+                                                 asset=asset)
         # ``log=self._strategy_log`` is only needed when this class builds the
         # engine itself: it routes the engine's decision lines to the console and
         # the event log, exactly as the parent does for Model 1. A caller who
@@ -73,6 +75,7 @@ class Model2Scanner(AssetScanner):
             **kwargs,
         )
         self.live_quotes = live_quotes
+        self.engine.quote_entries = live_quotes
         if default_executor and hasattr(self.engine, "risk"):
             # Same per-asset policy/normalization at signal and execution gates.
             self.executor.risk = self.engine.risk
@@ -96,7 +99,7 @@ class Model2Scanner(AssetScanner):
             self._saved_state = state
 
     def warm(self, candles: list) -> None:
-        super().warm(candles)
+        self.engine.warm(candles)
         self._persist_consumption()
 
     def step(self, candles: list) -> int:

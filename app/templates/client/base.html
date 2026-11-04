@@ -162,9 +162,9 @@
            top-level `{% set %}` in a parent template is visible inside a
            child's blocks, so a one-letter alias here would shadow whatever a
            page passed under that name. #}
-        <span class="pill {{ 'tone-danger' if cfg and cfg.effective_auto_trading else 'tone-success' }}"
+        <span class="pill {{ 'tone-warning' if trading_control.auto_trading is none else ('tone-danger' if trading_control.auto_trading else 'tone-success') }}"
               id="nav-auto">
-          <span class="dot"></span>{{ 'AUTO-TRADING ENABLED' if cfg and cfg.effective_auto_trading else 'ALERT ONLY' }}
+          <span class="dot"></span>{{ 'AUTO-TRADING UNKNOWN' if trading_control.auto_trading is none else ('AUTO-TRADING ENABLED' if trading_control.auto_trading else 'ALERT ONLY') }}
         </span>
 
         {# Rewritten in place by client.js from the same `/api/client/*` payload

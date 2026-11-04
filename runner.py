@@ -1582,6 +1582,25 @@ class JobManager:
     # ------------------------------------------------------------------ #
     # Auto-trading override (session-only)
     # ------------------------------------------------------------------ #
+    def auto_trading_state(self) -> dict[str, Any]:
+        """Report the switch owned by this process, never a remote engine's.
+
+        The existing runtime override is not IPC. A separately running scanner
+        cannot be controlled here; do not claim that a local toggle reached it.
+        """
+        lease = self.engine_lease()
+        local = not (lease.get("alive") and not lease.get("mine"))
+        return {
+            "auto_trading": self.settings.effective_auto_trading if local else None,
+            "auto_trading_baseline": self.settings.auto_trading,
+            "auto_trading_override": self.settings.auto_trading_override,
+            "auto_trading_controllable": local,
+            "model_enablement": {key[:-8].upper(): bool(value)
+                                 for key, value in vars(self.settings).items()
+                                 if key.startswith("model_") and key.endswith("_enabled")} if local else {},
+            "auto_trading_reason": "" if local else "Scanner runs in another process; use the dashboard-owned engine to control Auto Trading.",
+        }
+
     def set_auto_trading(self, enabled: bool | None) -> dict[str, Any]:
         """Set or clear the runtime override for the master trading switch.
 
@@ -1602,6 +1621,12 @@ class JobManager:
         :mod:`trading.executor` — signal approved, risk-approved, registry symbol,
         risk-manager sizing — is untouched and cannot be influenced this way.
         """
+        control = self.auto_trading_state()
+        if not control["auto_trading_controllable"]:
+            return {"ok": False, "reason": control["auto_trading_reason"],
+                    "auto_trading": None, "baseline": self.settings.auto_trading,
+                    "override": self.settings.auto_trading_override,
+                    "live_running": True}
         with self._state_lock:
             self.settings.auto_trading_override = enabled
             return {

@@ -30,6 +30,7 @@ their exits happened to land in.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
@@ -435,7 +436,8 @@ class BacktestRunner:
     Model 2's, for instance — built from the same asset with this runner's
     overrides applied. Everything else about the run is unchanged, because the
     contract the runner needs is one method: ``feed(closed_m1) -> list[Signal]``.
-    Leaving it out replays Model 1, which is what every existing caller does.
+    With no factory, ``model="MODEL_2"`` selects Model 2 explicitly for offline
+    replay; leaving both out preserves Model 1. No live setting is changed.
     """
 
     def __init__(self, asset: Asset, *, max_hold_m1: int = DEFAULT_MAX_HOLD_M1,
@@ -452,8 +454,19 @@ class BacktestRunner:
         engine_asset = Asset(
             name=asset.name, broker_symbol=asset.broker_symbol,
             enabled=True, digits=asset.digits, overrides=overrides)
-        self.strategy = (strategy_factory(engine_asset) if strategy_factory
-                         else ICTStrategy(engine_asset))
+        if model == "MODEL_2":
+            engine_asset.spec = asset.spec
+        if strategy_factory is not None:
+            self.strategy = strategy_factory(engine_asset)
+        elif model == "MODEL_2":
+            from dataclasses import replace
+            from config import get_settings
+            from trading.model2 import Model2Strategy
+            # Explicit offline model selection, never a mutation of live settings.
+            self.strategy = Model2Strategy(engine_asset, settings=replace(
+                get_settings(), model_2_enabled=True))
+        else:
+            self.strategy = ICTStrategy(engine_asset)
 
     # ------------------------------------------------------------------ #
     def run(self, m1_candles: list[Candle], name: str = "") -> tuple[BacktestSummary,
@@ -470,11 +483,19 @@ class BacktestRunner:
             signals.extend(self.strategy.feed(c))
 
         trades: list[BacktestTrade] = []
+        times = [c.t_utc for c in candles]
         for sig in signals:
             sig_idx = by_time.get(sig.entry_time_utc)
-            if sig_idx is None:
-                continue
-            following = candles[sig_idx + 1:]
+            # Model 2 enters at the *instant* its M5 candle closes. The M1
+            # opening at that timestamp is already AFTER entry, and must not be
+            # skipped; the final confirmation can also be the tape's last bar.
+            from trading.model2 import model_meta
+            if model_meta(sig).get("entry_basis") == "historical_m5_close":
+                following = candles[bisect_left(times, sig.entry_time_utc):]
+            else:
+                if sig_idx is None:
+                    continue
+                following = candles[sig_idx + 1:]
             trades.append(simulate(sig, following, self.max_hold_m1))
 
         summary = self._summarize(signals, trades, start_utc, end_utc,

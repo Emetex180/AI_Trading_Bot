@@ -69,23 +69,28 @@
   <div class="card-header">
     <span>Auto-trading</span>
     <span id="auto-trading-state-badge"
-          class="badge tone-{{ 'danger' if cfg.effective_auto_trading else 'success' }}">
-      {{ 'enabled' if cfg.effective_auto_trading else 'off' }}
+          class="badge tone-{{ 'warning' if trading_control.auto_trading is none else ('danger' if trading_control.auto_trading else 'success') }}">
+      {{ 'unknown' if trading_control.auto_trading is none else ('enabled' if trading_control.auto_trading else 'off') }}
     </span>
   </div>
   <div class="card-body">
     <p class="card-note">
       Whether approved signals are actually sent to the broker. This is the
-      master switch only — a signal still has to be approved, risk-approved and
-      sized by the risk manager before an order reaches MT5.
+      master switch for all enabled models — individual model and per-asset
+      settings still apply. A signal must be approved, risk-approved and sized
+      by the risk manager before an order reaches MT5.
     </p>
+    <p id="auto-trading-models" class="card-note">{% for model, enabled in trading_control.get('model_enablement', {}).items() %}{{ ' · ' if not loop.first }}{{ model | replace('_', ' ') }}: {{ 'enabled' if enabled else 'disabled' }}{% endfor %}</p>
+    <p id="auto-trading-control-note" class="card-note">{{ trading_control.auto_trading_reason }}</p>
 
     <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
       <button type="button" id="auto-trading-toggle"
+              {{ 'disabled' if not trading_control.auto_trading_controllable }}
               class="btn btn-sm btn-outline-{{ 'secondary' if cfg.effective_auto_trading else 'danger' }}">
         {{ 'Turn off' if cfg.effective_auto_trading else 'Turn on' }}
       </button>
       <button type="button" id="auto-trading-reset"
+              {{ 'disabled' if not trading_control.auto_trading_controllable }}
               class="btn btn-sm btn-outline-secondary {{ 'd-none' if cfg.auto_trading_override is none }}">
         Follow .env
       </button>

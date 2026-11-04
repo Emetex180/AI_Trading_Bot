@@ -619,6 +619,8 @@ def register_api(app) -> None:
                    else str(raw).strip().lower() in {"1", "true", "yes", "on"})
 
         result = jobs.set_auto_trading(enabled)
+        if not result["ok"]:
+            return jsonify(result), 409
         # Arming is the notable event, so it is recorded as a warning; disarming
         # and resetting are routine, and recorded as information.
         g.repo.log_event(
@@ -675,6 +677,8 @@ def register_api(app) -> None:
         payload["auto_trading"] = cfg.effective_auto_trading
         payload["auto_trading_baseline"] = cfg.auto_trading
         payload["auto_trading_override"] = cfg.auto_trading_override
+        if hasattr(jobs, "auto_trading_state"):
+            payload.update(jobs.auto_trading_state())
         payload["assets"] = asset_choices(cfg, g.repo)
         payload["backtest_defaults"] = {"bars": cfg.backtest_m1_bars}
         payload["ai"] = ai_status(cfg)

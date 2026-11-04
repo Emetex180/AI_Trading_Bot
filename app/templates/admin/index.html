@@ -16,7 +16,11 @@
 
 {# Safety state first, deliberately above everything else: whether the bot may
    place orders is the one fact an operator should never have to go looking for. #}
-{% if auto_trading %}
+{% if trading_control.auto_trading is none %}
+<div class="notice mb-3">
+  <span><strong>Automatic trading state is unknown.</strong> {{ trading_control.auto_trading_reason }}</span>
+</div>
+{% elif trading_control.auto_trading %}
 <div class="notice mb-3" style="border-color: var(--c-neg)">
   <span><strong>Automatic trading is ON.</strong> The engine may place orders.
   This is the master switch, not the alert-only scanner.</span>

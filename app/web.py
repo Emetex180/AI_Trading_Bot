@@ -270,7 +270,8 @@ def create_app(settings: Settings | None = None,
         # attached, so leaving it unset would mean a dashboard that owns a
         # scanner and never says a word about it on its own console.
         if factory is None:
-            jobs = JobManager(settings=cfg, on_event=print)
+            jobs = JobManager(settings=cfg, on_event=print,
+                              repo_factory=lambda: repository)
         else:
             jobs = JobManager(settings=cfg, on_event=print,
                               repo_factory=lambda: Repository(
@@ -350,7 +351,10 @@ def create_app(settings: Settings | None = None,
         browser actually needs; ``ny_offset_hours`` is the current DST-aware
         offset, kept as the fallback for engines without a timezone database.
         """
-        return {"cfg": cfg, "ny_zone": tu.NY_TZ_NAME,
+        control = (jobs.auto_trading_state() if hasattr(jobs, "auto_trading_state") else {
+            "auto_trading": cfg.effective_auto_trading,
+            "auto_trading_controllable": True, "auto_trading_reason": ""})
+        return {"cfg": cfg, "trading_control": control, "ny_zone": tu.NY_TZ_NAME,
                 "ny_offset_hours": tu.ny_offset_hours(),
                 # The product name. Injected rather than passed by each template
                 # so the existing ``platform_name | default(...)`` calls pick up

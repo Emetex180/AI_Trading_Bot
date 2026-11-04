@@ -2,6 +2,8 @@
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from notifications.telegram import (ALERT_ONLY_TAG, TelegramNotifier,
                                     SendResult, format_signal_alert)
 from trading.signal_engine import MODEL_2, Signal
@@ -34,6 +36,25 @@ def _settings(enabled=True):
         telegram_chat_id="chat",
         telegram_timeout_seconds=5,
     )
+
+
+@pytest.mark.parametrize("model,label", [("MODEL_1", "MODEL 1"), ("MODEL_2", "MODEL 2"), ("", "MODEL 1")])
+@pytest.mark.parametrize("direction", ["buy", "sell"])
+@pytest.mark.parametrize("ai_status", [None, "DISABLED", "AI_UNAVAILABLE", "ANALYZED"])
+def test_every_signal_variant_identifies_model_near_start(model, label, direction, ai_status):
+    signal = _signal(model=model, direction=direction, ai_status=ai_status,
+                     ai_decision="WAIT", ai_score=70, ai_confidence=80)
+    sent, mirrored = [], []
+    settings = _settings()
+    settings.telegram_channel_id = "channel"
+    notifier = TelegramNotifier(settings=settings,
+        transport=lambda body: sent.append(body) or SendResult(True),
+        channel_transport=lambda body: mirrored.append(body) or SendResult(True))
+    assert notifier.send_signal(signal).ok
+    assert sent == mirrored
+    assert sent[0].splitlines()[1] == f"Model:               {label}"
+    assert sent[0].count("Model:               ") == 1
+    assert ALERT_ONLY_TAG in sent[0]
 
 
 def test_format_alert_has_alert_only_tag():

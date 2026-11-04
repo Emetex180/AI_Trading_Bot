@@ -49,9 +49,9 @@
          *effective* switch, not the .env baseline, or it would contradict the
          dashboard the moment the override is used. #}
       <span id="auto-trading-pill"
-            class="pill {{ 'tone-danger' if cfg.effective_auto_trading else 'tone-success' }}">
+            class="pill {{ 'tone-warning' if trading_control.auto_trading is none else ('tone-danger' if trading_control.auto_trading else 'tone-success') }}">
         {# Only the inner label is rewritten by the poller, so the dot survives. #}
-        <span class="dot"></span><span id="auto-trading-pill-text">{{ 'AUTO-TRADING ENABLED' if cfg.effective_auto_trading else 'AUTO-TRADING OFF · ALERT ONLY' }}</span>
+        <span class="dot"></span><span id="auto-trading-pill-text">{{ 'AUTO-TRADING UNKNOWN · EXTERNAL ENGINE' if trading_control.auto_trading is none else ('AUTO-TRADING ENABLED' if trading_control.auto_trading else 'AUTO-TRADING OFF · ALERT ONLY') }}</span>
       </span>
       {% endif %}
       {# Only the inner label is rewritten by the poller, so the status dot survives. #}

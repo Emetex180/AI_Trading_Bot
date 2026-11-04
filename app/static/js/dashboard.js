@@ -600,33 +600,40 @@
    * override changed, and this is the one indicator in the UI that must never
    * lie about whether the bot can trade. */
   function renderAutoTrading(data) {
+    var known = data.auto_trading !== null;
+    var controllable = data.auto_trading_controllable !== false;
     var on = !!data.auto_trading;
     autoTradingOn = on;
 
     var pill = byId("auto-trading-pill");
-    if (pill) pill.className = "pill tone-" + (on ? "danger" : "success");
-    text("auto-trading-pill-text",
-         on ? "AUTO-TRADING ENABLED" : "AUTO-TRADING OFF · ALERT ONLY");
+    if (pill) pill.className = "pill tone-" + (!known ? "warning" : (on ? "danger" : "success"));
+    text("auto-trading-pill-text", !known ? "AUTO-TRADING UNKNOWN · EXTERNAL ENGINE" :
+         (on ? "AUTO-TRADING ENABLED" : "AUTO-TRADING OFF · ALERT ONLY"));
 
     var badge = byId("auto-trading-state-badge");
     if (badge) {
-      badge.textContent = on ? "enabled" : "off";
-      setTone("auto-trading-state-badge", on ? "danger" : "success");
+      badge.textContent = !known ? "unknown" : (on ? "enabled" : "off");
+      setTone("auto-trading-state-badge", !known ? "warning" : (on ? "danger" : "success"));
     }
 
     var toggle = byId("auto-trading-toggle");
     if (toggle) {
       toggle.textContent = on ? "Turn off" : "Turn on";
       toggle.className = "btn btn-sm btn-outline-" + (on ? "secondary" : "danger");
-      toggle.disabled = false;
+      toggle.disabled = !controllable;
     }
 
     var override = data.auto_trading_override;
     var reset = byId("auto-trading-reset");
     if (reset) {
       reset.classList.toggle("d-none", override === null || override === undefined);
-      reset.disabled = false;
+      reset.disabled = !controllable;
     }
+    text("auto-trading-control-note", data.auto_trading_reason || "");
+    var models = data.model_enablement || {};
+    text("auto-trading-models", Object.keys(models).map(function (model) {
+      return model.replace(/_/g, " ") + ": " + (models[model] ? "enabled" : "disabled");
+    }).join(" · "));
 
     text("auto-trading-baseline", data.auto_trading_baseline ? "true" : "false");
     text("auto-trading-override",
